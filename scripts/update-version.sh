@@ -10,14 +10,25 @@ version=$VERSION
 echo "Setting package versions to: $version"
 ./node_modules/.bin/lerna version $version --exact --yes --no-git-tag-version --no-push --force-publish=\*
 
-# Add changes to Git
-echo "Committing version changes"
-git config user.name "github-actions"
-git config user.email "github-actions@github.com"
-git add **/package.json yarn.lock lerna.json
-git status
-git commit -m "update version to: $version"
+# Get the version number from lerna.json
+version_num=$(jq -r '.version' lerna.json)
+echo "New Version: $version_num"
 
-# Push to the Git branch
-echo "Pushing to head branch"
-git push origin HEAD
+# Add changes to Git
+if [[ -n $(git status --porcelain) ]]; then
+  echo "Committing version changes"
+  git config user.name "github-actions"
+  git config user.email "github-actions@github.com"
+  git add $(find . -name 'package.json') yarn.lock lerna.json
+
+  if git diff-index --quiet HEAD --; then
+    echo "No changes to commit."
+  else
+    git commit -m "chore: update version to $version_num"
+    # Push to the Git branch
+    echo "Pushing version changes to development branch"
+    git push origin HEAD
+  fi
+else
+  echo "No changes to commit."
+fi
