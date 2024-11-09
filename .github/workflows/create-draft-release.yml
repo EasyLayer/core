@@ -1,0 +1,51 @@
+name: 'Create Draft Release'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Monorepo install
+        uses: ./.github/actions/yarn-nm-install
+      - name: Check security dependencies
+        uses: ./.github/actions/security/lockfile
+        with:
+          path: 'yarn.lock'
+          type: 'yarn'
+          allowedHosts: 'https://registry.npmjs.org'
+          allowedURLs: ''
+      - name: Publish Release Packages
+        id: publish_release_packages
+        run: |
+          bash ./scripts/publish-release.sh
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HUSKY: '0' # By default do not run HUSKY install
+      - name: Read Tag from File
+        id: read_tag
+        run: echo "tag=$(cat tag_name.txt)" >> $GITHUB_ENV
+      - name: Create Draft Release
+        id: create_draft_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.tag }}
+          release_name: Release ${{ env.tag }}
+          draft: true
+          body: |
+            Changes in this Release:
+            - First change
+            - Second change
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

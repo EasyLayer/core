@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "removeComments": true,
+    "sourceMap": false,
+    "declarationMap": false,
+  },
+  "references": [
+    { "path": "../cqrs/tsconfig.build.json" },
+    { "path": "../bitcoin-network-provider/tsconfig.build.json" },
+    { "path": "../logger/tsconfig.build.json" },
+    { "path": "../../common/domain-cqrs-components/tsconfig.json" },
+    { "path": "../../common/exponential-interval-async/tsconfig.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

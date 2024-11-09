@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "references": [
+    {"path": "./cqrs/tsconfig.build.json"},
+    {"path": "./logger/tsconfig.build.json"},
+    {"path": "./cqrs-transport/tsconfig.build.json"},
+    {"path": "./network-transport/tsconfig.build.json"},
+    {"path": "./eventstore/tsconfig.build.json"},
+    {"path": "./views-rdbms-db/tsconfig.build.json"},
+    {"path": "./bitcoin-blocks-queue/tsconfig.build.json"},
+    {"path": "./bitcoin-network-provider/tsconfig.build.json"},
+    {"path": "./views-keyvalue-db/tsconfig.build.json"},
+    {"path": "./secure-storage/tsconfig.build.json"},
+    {"path": "./websocket-messages/tsconfig.build.json"}
+  ],
+  "include": ["."],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ]
+}

@@ -1,0 +1,13 @@
+{
+    "$schema": "https://typedoc.org/schema.json",
+    "out": "./docs",
+    "entryPoints": [
+        "packages/*",
+        "packages/*/*"
+    ],
+    "exclude": [],
+    "name": "EasyLayer Core Documentation",
+    "entryPointStrategy": "packages",
+    "includeVersion": true,
+    "readme": "none"
+}

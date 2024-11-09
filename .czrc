@@ -1,0 +1,21 @@
+{
+  "path": "cz-conventional-changelog",
+  "types": {
+    "feat": {
+      "description": "A new implementation",
+      "title": "New Feature"
+    },
+    "fix": {
+      "description": "A bug fix",
+      "title": "Fix bug"
+    },
+    "test": {
+      "description": "Adding new tests or correcting existing tests",
+      "title": "Testing"
+    },
+    "refactor": {
+      "description": "Refactor already exists feature",
+      "title": "Refactor code"
+    }
+  }
+}

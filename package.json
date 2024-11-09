@@ -1,0 +1,62 @@
+{
+  "name": "easylayer",
+  "version": "0.0.0",
+  "description": "",
+  "author": "Yaroslav Pavliuk",
+  "license": "",
+  "private": true,
+  "packageManager": "yarn@3.6.0",
+  "bugs": {
+    "url": "https://github.com/easylayer/core/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/easylayer/core.git"
+  },
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "packages/*/*"
+    ]
+  },
+  "scripts": {
+    "clear": "lerna run clear:dist && lerna run clear:node_modules && rimraf node_modules && yarn cache clean --all",
+    "clear:node_modules": "lerna run  clear:node_modules && rimraf node_modules",
+    "clear:dist": "lerna run clear:dist",
+    "build:dev": "yarn prepare && tsc -b packages/tsconfig.json",
+    "build:prod": "yarn prepare && tsc -b packages/tsconfig.build.json",
+    "test:unit": "lerna run test:unit --stream --",
+    "test:e2e": "lerna run test:e2e --stream",
+    "lint": "lerna run lint --stream",
+    "lint:fix": "lerna run lint:fix --stream",
+    "prepare": "ts-patch install -s",
+    "postinstall": "husky install",
+    "pre-commit": "lerna run lint",
+    "pre-push": "lerna run test:unit",
+    "commit": "cz",
+    "docs:generate:developer-docs": "typedoc"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "18.4.3",
+    "@commitlint/config-conventional": "18.4.3",
+    "@typescript-eslint/eslint-plugin": "6.13.2",
+    "@typescript-eslint/parser": "6.13.2",
+    "commitizen": "4.3.0",
+    "cz-conventional-changelog": "3.3.0",
+    "eslint": "8.55.0",
+    "eslint-config-prettier": "9.1.0",
+    "eslint-plugin-prettier": "5.0.1",
+    "husky": "8.0.3",
+    "lerna": "8.0.0",
+    "prettier": "3.1.1",
+    "rimraf": "5.0.5",
+    "ts-patch": "3.2.1",
+    "typedoc": "0.25.6",
+    "typescript": "5.3.3",
+    "typescript-transform-paths": "3.4.7"
+  },
+  "devEngines": {
+    "node": ">=18.0.0 <=20.x.x",
+    "npm": ">=8.0.0"
+  }
+}

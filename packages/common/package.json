@@ -1,0 +1,80 @@
+{
+  "name": "@easylayer/common",
+  "version": "0.0.4",
+  "description": "",
+  "exports": {
+    "./arithmetic": {
+      "default": "./arithmetic/dist/index.js",
+      "types": "./arithmetic/dist/index.d.ts"
+    },
+    "./domain-cqrs-components": {
+      "default": "./domain-cqrs-components/dist/index.js",
+      "types": "./domain-cqrs-components/dist/index.d.ts"
+    },
+    "./domain-cqrs-components/websocket-messages": {
+      "default": "./domain-cqrs-components/dist/websocket-messages/index.js",
+      "types": "./domain-cqrs-components/dist/websocket-messages/index.d.ts"
+    },
+    "./domain-cqrs-components/bitcoin-indexer": {
+      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-indexer/index.js",
+      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-indexer/index.d.ts"
+    },
+    "./domain-cqrs-components/bitcoin-listener": {
+      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-listener/index.js",
+      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-listener/index.d.ts"
+    },
+    "./domain-cqrs-components/bitcoin-loader": {
+      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-loader/index.js",
+      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-loader/index.d.ts"
+    },
+    "./domain-cqrs-components/bitcoin-wallet": {
+      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-wallet/index.js",
+      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-wallet/index.d.ts"
+    },
+    "./exponential-interval-async": {
+      "default": "./exponential-interval-async/dist/index.js",
+      "types": "./exponential-interval-async/dist/index.d.ts"
+    },
+    "./shared-interfaces": {
+      "default": "./shared-interfaces/dist/index.js",
+      "types": "./shared-interfaces/dist/index.d.ts"
+    }
+  },
+  "files": [
+    "arithmetic/dist",
+    "domain-cqrs-components/dist",
+    "exponential-interval-async/dist",
+    "shared-interfaces/dist"
+  ],
+  "scripts": {
+    "clear": "yarn run clear:dist && yarn run clear:node_modules",
+    "clear:node_modules": "rimraf node_modules",
+    "clear:dist": "rimraf dist",
+    "prepublishOnly": "yarn clear:dist && yarn build:prod",
+    "build:dev": "tsc -b tsconfig.json",
+    "build:prod": "tsc -b tsconfig.build.json"
+  },
+  "author": "Yaroslav Pavliuk",
+  "license": "",
+  "packageManager": "yarn@3.6.0",
+  "dependencies": {
+    "@nestjs/common": "10.2.10",
+    "@nestjs/core": "10.2.10",
+    "bignumber.js": "9.1.2",
+    "bn.js": "5.2.1",
+    "bunyan": "1.8.15",
+    "chalk": "4.1.2",
+    "reflect-metadata": "0.1.14",
+    "rxjs": "7.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.10.4",
+    "rimraf": "5.0.5",
+    "ts-node": "10.9.2",
+    "typescript": "5.3.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
