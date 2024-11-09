@@ -19,7 +19,7 @@ if [[ -n $(git status --porcelain) ]]; then
   echo "Committing version changes"
   git config user.name "github-actions"
   git config user.email "github-actions@github.com"
-  git add $(find . -name 'package.json') yarn.lock lerna.json
+  git add $(find . -name 'package.json' -not -path '*/node_modules/*') yarn.lock lerna.json
 
   if git diff-index --quiet HEAD --; then
     echo "No changes to commit."
