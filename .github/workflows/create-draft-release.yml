@@ -11,13 +11,16 @@ jobs:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
+          tags: true
       - name: Setup Node.js
         uses: actions/setup-node@v2
         with:
           node-version: '18'
           registry-url: 'https://registry.npmjs.org'
+
       - name: Monorepo install
         uses: ./.github/actions/yarn-nm-install
+
       - name: Check security dependencies
         uses: ./.github/actions/security/lockfile
         with:
@@ -25,6 +28,26 @@ jobs:
           type: 'yarn'
           allowedHosts: 'https://registry.npmjs.org'
           allowedURLs: ''
+      
+      - name: Get Version
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./lerna.json').version")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create Git Tag if not exists
+        run: |
+          TAG="v${{ env.VERSION }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists. Skipping tag creation."
+          else
+            echo "Create a tag $TAG."
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish Release Packages
         id: publish_release_packages
         run: |
@@ -33,15 +56,13 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HUSKY: '0' # By default do not run HUSKY install
-      - name: Read Tag from File
-        id: read_tag
-        run: echo "tag=$(cat tag_name.txt)" >> $GITHUB_ENV
+
       - name: Create Draft Release
         id: create_draft_release
         uses: actions/create-release@v1
         with:
-          tag_name: ${{ env.tag }}
-          release_name: Release ${{ env.tag }}
+          tag_name: v${{ env.VERSION }}
+          release_name: Release v${{ env.VERSION }}
           draft: true
           body: |
             Changes in this Release:
