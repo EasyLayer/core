@@ -86,6 +86,8 @@
     "@nestjs/typeorm": "10.0.2",
     "@nestjs/websockets": "10.2.10",
     "async-mutex": "0.5.0",
+    "better-sqlite3": "11.2.1",
+    "better-sqlite3-multiple-ciphers": "11.1.2",
     "bip32": "4.0.0",
     "bip39": "3.1.0",
     "bitcoin-core": "4.1.0",
