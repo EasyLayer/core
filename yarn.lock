@@ -678,7 +678,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/bitcoin-blocks-queue@workspace:packages/components/bitcoin-blocks-queue"
   dependencies:
-    "@easylayer/common": 0.1.2
+    "@easylayer/common": 0.2.0
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/swagger": 7.1.17
@@ -734,7 +734,22 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@easylayer/common@0.1.2, @easylayer/common@workspace:packages/common":
+"@easylayer/bitcoin-network-state@workspace:packages/components/bitcoin-network-state":
+  version: 0.0.0-use.local
+  resolution: "@easylayer/bitcoin-network-state@workspace:packages/components/bitcoin-network-state"
+  dependencies:
+    "@easylayer/common": 0.1.1
+    "@types/node": 20.10.4
+    "@types/uuid": 9.0.7
+    reflect-metadata: 0.1.14
+    rxjs: 7.8.1
+    ts-node: 10.9.2
+    typescript: 5.3.3
+    uuid: 9.0.1
+  languageName: unknown
+  linkType: soft
+
+"@easylayer/common@0.2.0, @easylayer/common@workspace:packages/common":
   version: 0.0.0-use.local
   resolution: "@easylayer/common@workspace:packages/common"
   dependencies:
@@ -753,11 +768,27 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@easylayer/components@0.1.2, @easylayer/components@workspace:packages/components":
+"@easylayer/common@npm:0.1.1":
+  version: 0.1.1
+  resolution: "@easylayer/common@npm:0.1.1"
+  dependencies:
+    "@nestjs/common": 10.2.10
+    "@nestjs/core": 10.2.10
+    bignumber.js: 9.1.2
+    bn.js: 5.2.1
+    bunyan: 1.8.15
+    chalk: 4.1.2
+    reflect-metadata: 0.1.14
+    rxjs: 7.8.1
+  checksum: d87f3cd793a0e736d6b184a24c5920ee52563315a671f7dea5980049a5dd1ac547ff91398529557ca9c117cdaa2b4d2d076de54976950416f4adb2ef6825399a
+  languageName: node
+  linkType: hard
+
+"@easylayer/components@0.2.0, @easylayer/components@workspace:packages/components":
   version: 0.0.0-use.local
   resolution: "@easylayer/components@workspace:packages/components"
   dependencies:
-    "@easylayer/common": 0.1.2
+    "@easylayer/common": 0.2.0
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/cqrs": 10.2.6
@@ -912,7 +943,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/network-transport@workspace:packages/components/network-transport"
   dependencies:
-    "@easylayer/components": 0.1.2
+    "@easylayer/components": 0.2.0
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/testing": 10.2.10
@@ -1010,7 +1041,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/websocket-messages@workspace:packages/components/websocket-messages"
   dependencies:
-    "@easylayer/common": 0.1.2
+    "@easylayer/common": 0.2.0
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/platform-socket.io": 10.2.10
@@ -3800,9 +3831,9 @@ __metadata:
   linkType: hard
 
 "caniuse-lite@npm:^1.0.30001669":
-  version: 1.0.30001679
-  resolution: "caniuse-lite@npm:1.0.30001679"
-  checksum: 6fca375c6c3a749aaf1246f28c9b182f94b2aa0fb30a98d4c5a3df1a22054fba852df625be50b5ffa1c772a0c53f1aea14dead920d6c5d54030dd4dede0dba98
+  version: 1.0.30001680
+  resolution: "caniuse-lite@npm:1.0.30001680"
+  checksum: 2641d2b18c5ab0a6663cb350c5adc81e5ede1a7677d1c7518a8053ada87bf6f206419e1820a2608f76fa5e4f7bea327cbe47df423783e571569a88c0ea645270
   languageName: node
   linkType: hard
 
@@ -4806,9 +4837,9 @@ __metadata:
   linkType: hard
 
 "electron-to-chromium@npm:^1.5.41":
-  version: 1.5.55
-  resolution: "electron-to-chromium@npm:1.5.55"
-  checksum: 7c797418ef30b0021b586d023eec1e87400632add6f37285e993716292f2f3451a36d6266c8502df34c776000bca01ad8e17b736b1f7b3de022a82a45d0dc06f
+  version: 1.5.57
+  resolution: "electron-to-chromium@npm:1.5.57"
+  checksum: fffd6dc9aeca39f94ef083a5a68c7c330994a4a5c31960758af81d743db6ea79d142d0b97fc852700955726c3cb6296de1183051a94118c0978c072e86ac74b7
   languageName: node
   linkType: hard
 
@@ -8449,13 +8480,13 @@ __metadata:
   linkType: hard
 
 "node-gyp-build@npm:^4.2.2, node-gyp-build@npm:^4.3.0":
-  version: 4.8.2
-  resolution: "node-gyp-build@npm:4.8.2"
+  version: 4.8.3
+  resolution: "node-gyp-build@npm:4.8.3"
   bin:
     node-gyp-build: bin.js
     node-gyp-build-optional: optional.js
     node-gyp-build-test: build-test.js
-  checksum: 1a57bba8c4c193f808bd8ad1484d4ebdd8106dd9f04a3e82554dc716e3a2d87d7e369e9503c145e0e6a7e2c663fec0d8aaf52bd8156342ec7fc388195f37824e
+  checksum: 570c71016704a0383028fe2690011b535188e04fcbb19269516e1e8f0c325f1aa51a52394ba8f05b5834cb5d7dca025e0cc16e16ace85c7b74d278a126312447
   languageName: node
   linkType: hard
 

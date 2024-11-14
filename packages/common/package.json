@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "",
   "exports": {
     "./arithmetic": {
@@ -15,21 +15,17 @@
       "default": "./domain-cqrs-components/dist/websocket-messages/index.js",
       "types": "./domain-cqrs-components/dist/websocket-messages/index.d.ts"
     },
-    "./domain-cqrs-components/bitcoin-indexer": {
-      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-indexer/index.js",
-      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-indexer/index.d.ts"
+    "./domain-cqrs-components/ethereum": {
+      "default": "./domain-cqrs-components/dist/evm/ethereum/index.js",
+      "types": "./domain-cqrs-components/dist/evm/ethereum/index.d.ts"
     },
-    "./domain-cqrs-components/bitcoin-listener": {
-      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-listener/index.js",
-      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-listener/index.d.ts"
+    "./domain-cqrs-components/bsc": {
+      "default": "./domain-cqrs-components/dist/evm/bsc/index.js",
+      "types": "./domain-cqrs-components/dist/evm/bsc/index.d.ts"
     },
-    "./domain-cqrs-components/bitcoin-loader": {
-      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-loader/index.js",
-      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-loader/index.d.ts"
-    },
-    "./domain-cqrs-components/bitcoin-wallet": {
-      "default": "./domain-cqrs-components/dist/bitcoin/bitcoin-wallet/index.js",
-      "types": "./domain-cqrs-components/dist/bitcoin/bitcoin-wallet/index.d.ts"
+    "./domain-cqrs-components/bitcoin": {
+      "default": "./domain-cqrs-components/dist/bitcoin/index.js",
+      "types": "./domain-cqrs-components/dist/bitcoin/index.d.ts"
     },
     "./exponential-interval-async": {
       "default": "./exponential-interval-async/dist/index.js",
