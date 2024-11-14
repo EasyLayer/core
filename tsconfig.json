@@ -22,14 +22,12 @@
       "@easylayer/common/domain-cqrs-components/*": ["packages/common/domain-cqrs-components/dist/*"],
       "@easylayer/common/domain-cqrs-components/websocket-messages": ["packages/common/domain-cqrs-components/dist/websocket-messages/index"],
       "@easylayer/common/domain-cqrs-components/websocket-messages/*": ["packages/common/domain-cqrs-components/dist/websocket-messages/*"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-indexer": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-indexer/index"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-indexer/*": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-indexer/*"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-loader": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-loader/index"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-loader/*": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-loader/*"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-listener": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-listener/index"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-listener/*": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-listener/*"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-wallet": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-wallet/index"],
-      "@easylayer/common/domain-cqrs-components/bitcoin-wallet/*": ["packages/common/domain-cqrs-components/dist/bitcoin/bitcoin-wallet/*"]
+      "@easylayer/common/domain-cqrs-components/bitcoin": ["packages/common/domain-cqrs-components/dist/bitcoin/index"],
+      "@easylayer/common/domain-cqrs-components/bitcoin/*": ["packages/common/domain-cqrs-components/dist/bitcoin/*"],
+      "@easylayer/common/domain-cqrs-components/ethereum": ["packages/common/domain-cqrs-components/dist/evm/ethereum/index"],
+      "@easylayer/common/domain-cqrs-components/ethereum/*": ["packages/common/domain-cqrs-components/dist/evm/ethereum/*"],
+      "@easylayer/common/domain-cqrs-components/bsc": ["packages/common/domain-cqrs-components/dist/evm/bsc/index"],
+      "@easylayer/common/domain-cqrs-components/bsc/*": ["packages/common/domain-cqrs-components/dist/evm/bsc/*"]
     }
   }
 }

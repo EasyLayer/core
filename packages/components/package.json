@@ -35,13 +35,13 @@
       "default": "./bitcoin-network-provider/dist/index.js",
       "types": "./bitcoin-network-provider/dist/index.d.ts"
     },
+    "./bitcoin-network-state": {
+      "default": "./bitcoin-network-state/dist/index.js",
+      "types": "./bitcoin-network-state/dist/index.d.ts"
+    },
     "./views-keyvalue-db": {
       "default": "./views-keyvalue-db/dist/index.js",
       "types": "./views-keyvalue-db/dist/index.d.ts"
-    },
-    "./bitcoin-loader": {
-      "default": "./bitcoin-loader/dist/index.js",
-      "types": "./bitcoin-loader/dist/index.d.ts"
     },
     "./secure-storage": {
       "default": "./secure-storage/dist/index.js",
@@ -55,6 +55,7 @@
   "files": [
     "bitcoin-blocks-queue/dist",
     "bitcoin-network-provider/dist",
+    "bitcoin-network-state/dist",
     "cqrs/dist",
     "logger/dist",
     "cqrs-transport/dist",

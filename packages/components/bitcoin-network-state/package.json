@@ -1,0 +1,29 @@
+{
+  "name": "@easylayer/bitcoin-network-state",
+  "version": "0.1.1",
+  "description": "",
+  "private": true,
+  "scripts": {
+    "clear": "yarn run clear:dist && yarn run clear:node_modules",
+    "clear:node_modules": "rimraf node_modules",
+    "clear:dist": "rimraf dist && rimraf tsconfig.build.tsbuildinfo",
+    "lint": "eslint -c .eslintrc.js \"{src,apps,libs,test}/**/*.ts\"",
+    "lint:fix": "eslint -c .eslintrc.js \"{src,apps,libs,test}/**/*.ts\" --fix",
+    "format": "prettier -с .prettierrc.js --write \"src/**/*.ts\""
+  },
+  "author": "Yaroslav Pavliuk",
+  "license": "",
+  "packageManager": "yarn@3.6.0",
+  "dependencies": {
+    "@easylayer/common": "0.1.1",
+    "reflect-metadata": "0.1.14",
+    "rxjs": "7.8.1",
+    "uuid": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.10.4",
+    "@types/uuid": "9.0.7",
+    "ts-node": "10.9.2",
+    "typescript": "5.3.3"
+  }
+}
