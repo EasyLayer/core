@@ -9,6 +9,7 @@
     {"path": "./views-rdbms-db/tsconfig.build.json"},
     {"path": "./bitcoin-blocks-queue/tsconfig.build.json"},
     {"path": "./bitcoin-network-provider/tsconfig.build.json"},
+    {"path": "./bitcoin-network-state/tsconfig.build.json"},
     {"path": "./views-keyvalue-db/tsconfig.build.json"},
     {"path": "./secure-storage/tsconfig.build.json"},
     {"path": "./websocket-messages/tsconfig.build.json"}
