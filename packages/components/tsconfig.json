@@ -14,6 +14,7 @@
     {"path": "./views-rdbms-db/tsconfig.json"},
     {"path": "./bitcoin-blocks-queue/tsconfig.json"},
     {"path": "./bitcoin-network-provider/tsconfig.json"},
+    {"path": "./bitcoin-network-state/tsconfig.json"},
     {"path": "./views-keyvalue-db/tsconfig.json"},
     {"path": "./secure-storage/tsconfig.json"},
     {"path": "./websocket-messages/tsconfig.json"}
