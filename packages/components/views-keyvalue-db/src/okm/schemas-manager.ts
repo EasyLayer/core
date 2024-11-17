@@ -6,16 +6,20 @@ import { TransactionsRunner } from './transactions-runner';
 
 @Injectable()
 export class SchemasManager {
-  private schemas: Map<string, EntitySchema>;
+  private _schemas: Map<string, EntitySchema>;
 
   constructor(
     schemas: EntitySchema[],
     private readonly connectionManager: ConnectionManager
   ) {
-    this.schemas = new Map();
+    this._schemas = new Map();
     schemas.forEach((schema) => {
-      this.schemas.set(schema.prefix, schema);
+      this._schemas.set(schema.prefix, schema);
     });
+  }
+
+  get schemas() {
+    return this._schemas;
   }
 
   /**
@@ -24,7 +28,7 @@ export class SchemasManager {
    * @returns Схема сущности или undefined
    */
   getSchemaByPrefix(prefix: string): EntitySchema | undefined {
-    return this.schemas.get(prefix);
+    return this._schemas.get(prefix);
   }
 
   /**

@@ -1,8 +1,8 @@
 import RocksDB from 'rocksdb';
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 
 @Injectable()
-export class ConnectionManager {
+export class ConnectionManager implements OnModuleDestroy {
   private db: any;
 
   constructor(database: string, type: string) {
@@ -10,8 +10,18 @@ export class ConnectionManager {
       throw new Error('Now mainteing only RocksDB');
     }
 
+    if (!database) {
+      throw new Error('database is missed');
+    }
+
     this.db = RocksDB(database);
     this.db.open({ create_if_missing: true }, (err: any) => {
+      if (err) throw err;
+    });
+  }
+
+  onModuleDestroy() {
+    this.db.close((err: any) => {
       if (err) throw err;
     });
   }
