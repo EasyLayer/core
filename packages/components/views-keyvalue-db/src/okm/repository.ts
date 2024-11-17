@@ -3,7 +3,7 @@ import { ConnectionManager } from './connection-manager';
 import { TransactionsRunner } from './transactions-runner';
 import { EntitySchema } from './schema';
 
-export class Repository<T> {
+export class Repository<S extends EntitySchema> {
   constructor(
     private readonly connectionManager: ConnectionManager,
     private readonly schema: EntitySchema,
@@ -29,7 +29,7 @@ export class Repository<T> {
    * @param paths Values for generating the key (without prefix)
    * @param data Data to be saved
    */
-  async put(paths: Record<string, any>, data: T): Promise<void> {
+  async put(paths: Record<string, any>, data: S['data']): Promise<void> {
     const key = this.schema.generateKey(paths);
     const value = this.serialize(data);
 
@@ -75,9 +75,9 @@ export class Repository<T> {
   /**
    * Method to retrieve data by key
    * @param paths Values for generating the key (without prefix)
-   * @returns Data or null
+   * @returns Result or null
    */
-  async get(paths: Record<string, any>): Promise<T | null> {
+  async get(paths: Record<string, any>): Promise<S | null> {
     const key = this.schema.generateKey(paths);
 
     return new Promise((resolve, reject) => {
@@ -88,8 +88,8 @@ export class Repository<T> {
           }
           return reject(err);
         }
-        const data = this.deserialize(value.toString());
-        resolve(data);
+        const result = this.deserialize(value.toString());
+        resolve(result);
       });
     });
   }
@@ -97,11 +97,11 @@ export class Repository<T> {
   /**
    * Method to check if data exists by key
    * @param paths Values for generating the key (without prefix)
-   * @returns true if data exists, otherwise false
+   * @returns true if result exists, otherwise false
    */
   async exists(paths: Record<string, any>): Promise<boolean> {
-    const data = await this.get(paths);
-    return data !== null;
+    const result = await this.get(paths);
+    return result !== null;
   }
 
   /**
@@ -110,8 +110,8 @@ export class Repository<T> {
    * @param filter Data filter function
    * @returns Array of data
    */
-  async getByPartialKey(prefixPaths?: Record<string, any>, filter?: (data: T) => boolean): Promise<T[]> {
-    const results: T[] = [];
+  async getByPartialKey(prefixPaths?: Record<string, any>, filter?: (data: S['data']) => boolean): Promise<S[]> {
+    const results: S[] = [];
 
     const prefixKey = this.schema.generatePrefix(prefixPaths);
 
@@ -135,12 +135,12 @@ export class Repository<T> {
           }
 
           try {
-            const data = this.deserialize(value);
-            if (!filter || filter(data)) {
-              results.push(data);
+            const result = this.deserialize(value);
+            if (!filter || filter(result)) {
+              results.push(result);
             }
-          } catch (parseError) {
-            // Incorrect data, skip the record
+          } catch (error) {
+            // Incorrect result, skip the record
           }
 
           next();

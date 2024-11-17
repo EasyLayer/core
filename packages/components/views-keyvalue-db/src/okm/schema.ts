@@ -4,8 +4,10 @@ interface PathDefinition {
   value?: string; // Value for static paths
 }
 
-interface ValueDefinition {
+export interface ValueDefinition {
   type: 'object' | 'string' | 'number' | 'boolean' | 'array'; // Type of the stored value
+  fields?: Record<string, ValueDefinition>; // For objects
+  items?: ValueDefinition; // For arrays
 }
 
 export interface SchemaDefinition {
