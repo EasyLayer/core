@@ -1,5 +1,5 @@
+import RocksDB from 'rocksdb';
 import { Injectable } from '@nestjs/common';
-import rocksdb from 'rocksdb';
 
 @Injectable()
 export class ConnectionManager {
@@ -9,7 +9,8 @@ export class ConnectionManager {
     if (type !== 'rocksdb') {
       throw new Error('Now mainteing only RocksDB');
     }
-    this.db = rocksdb(database);
+
+    this.db = RocksDB(database);
     this.db.open({ create_if_missing: true }, (err: any) => {
       if (err) throw err;
     });
@@ -22,6 +23,8 @@ export class ConnectionManager {
   }
 
   public closeConnection() {
-    this.db.close();
+    this.db.close((err: any) => {
+      if (err) throw err;
+    });
   }
 }
