@@ -1,192 +1,232 @@
-import { Injectable } from '@nestjs/common';
-import RocksDB from 'rocksdb';
-import {
-  AbstractBatch,
-  AbstractChainedBatch,
-  // AbstractGetOptions,
-  // AbstractIterator,
-  // AbstractIteratorOptions,
-  // AbstractLevelDOWN,
-  // AbstractOpenOptions,
-  // AbstractOptions,
-} from 'abstract-leveldown';
+import { AbstractBatch } from 'abstract-leveldown';
 import { ConnectionManager } from './connection-manager';
-import { SchemasManager } from './schemas-manager';
-import { generateModelFromSchema } from './generate-model-from-schema';
+import { TransactionsRunner } from './transactions-runner';
+import { EntitySchema } from './schema';
 
-export type Bytes = string | Buffer;
-
-@Injectable()
-export class Repository {
+export class Repository<T> {
   constructor(
     private readonly connectionManager: ConnectionManager,
-    private readonly schemasManager: SchemasManager
+    private readonly schema: EntitySchema,
+    private readonly transactionsRunner?: TransactionsRunner
   ) {}
 
   get connection() {
     return this.connectionManager.getConnection();
   }
 
-  async put(key: Bytes, data: Record<string, any>): Promise<void> {
-    const db = this.connectionManager.getConnection();
-    return new Promise((resolve, reject) => {
-      db.put(key, data, (err: any) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
+  // Private method for serializing data
+  private serialize(value: any): string {
+    return JSON.stringify(value);
   }
 
-  async del(key: Bytes): Promise<void> {
-    const db = this.connectionManager.getConnection();
-    return new Promise((resolve, reject) => {
-      db.del(key, (err: any) => {
-        if (err) return reject(err);
-        resolve();
-      });
-    });
+  // Private method for deserializing data
+  private deserialize(value: string): any {
+    return JSON.parse(value);
   }
 
-  public batch(): AbstractChainedBatch<Bytes, Bytes>;
-  public batch(array: AbstractBatch[]): Promise<void>;
-  public batch(array: AbstractBatch[], options: RocksDB.BatchOptions): Promise<void>;
-  public batch(
-    array?: AbstractBatch[],
-    options?: RocksDB.BatchOptions
-  ): AbstractChainedBatch<RocksDB.Bytes, RocksDB.Bytes> | Promise<void> {
-    const db = this.connectionManager.getConnection();
-    if (!array) {
-      // Return an empty batch if no parameters are passed
-      return db.batch();
+  /**
+   * Method to save data
+   * @param paths Values for generating the key (without prefix)
+   * @param data Data to be saved
+   */
+  async put(paths: Record<string, any>, data: T): Promise<void> {
+    const key = this.schema.generateKey(paths);
+    const value = this.serialize(data);
+
+    const operation: AbstractBatch = { type: 'put', key, value };
+
+    if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+      // Add operation to the transaction
+      this.transactionsRunner.addOperation(operation);
+    } else {
+      // Execute operation immediately
+      return new Promise<void>((resolve, reject) => {
+        this.connection.put(key, value, (err: any) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
     }
-
-    // If an array of operations is passed, process them
-    return new Promise<void>((resolve, reject) => {
-      if (options) {
-        db.batch(array, options, (err: any) => {
-          if (err) return reject(err);
-          resolve();
-        });
-      } else {
-        db.batch(array, (err: any) => {
-          if (err) return reject(err);
-          resolve();
-        });
-      }
-    });
   }
 
-  async get(key: RocksDB.Bytes): Promise<RocksDB.Bytes | null> {
-    const db = this.connectionManager.getConnection();
+  /**
+   * Method to delete data
+   * @param paths Values for generating the key (without prefix)
+   */
+  async del(paths: Record<string, any>): Promise<void> {
+    const key = this.schema.generateKey(paths);
+
+    const operation: AbstractBatch = { type: 'del', key };
+
+    if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+      // Add operation to the transaction
+      this.transactionsRunner.addOperation(operation);
+    } else {
+      // Execute operation immediately
+      return new Promise<void>((resolve, reject) => {
+        this.connection.del(key, (err: any) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+    }
+  }
+
+  /**
+   * Method to retrieve data by key
+   * @param paths Values for generating the key (without prefix)
+   * @returns Data or null
+   */
+  async get(paths: Record<string, any>): Promise<T | null> {
+    const key = this.schema.generateKey(paths);
+
     return new Promise((resolve, reject) => {
-      db.get(key, (err: any, value: any) => {
+      this.connection.get(key, (err: any, value: any) => {
         if (err) {
-          if (err.message && err.message.includes('NotFound')) {
+          if (err.notFound || (err.message && err.message.includes('NotFound'))) {
             return resolve(null);
           }
           return reject(err);
         }
-        resolve(value.toString());
+        const data = this.deserialize(value.toString());
+        resolve(data);
       });
     });
   }
 
-  // Метод для получения данных с учетом условий и связей
-  async find(prefix: string, conditions: Record<string, any>, relations: string[] = []): Promise<any[]> {
-    const schema = this.schemasManager.getSchema(prefix);
-    if (!schema) {
-      throw new Error(`Schema for prefix ${prefix} not found`);
-    }
+  /**
+   * Method to check if data exists by key
+   * @param paths Values for generating the key (without prefix)
+   * @returns true if data exists, otherwise false
+   */
+  async exists(paths: Record<string, any>): Promise<boolean> {
+    const data = await this.get(paths);
+    return data !== null;
+  }
 
-    const db = this.connectionManager.getConnection();
-    const results: any[] = [];
+  /**
+   * Method to retrieve data by partial key with a filter
+   * @param prefixPaths Values for generating the prefix (without prefix)
+   * @param filter Data filter function
+   * @returns Array of data
+   */
+  async getByPartialKey(prefixPaths?: Record<string, any>, filter?: (data: T) => boolean): Promise<T[]> {
+    const results: T[] = [];
 
-    const modelClass = generateModelFromSchema(schema);
-    const model = new modelClass();
-    model.paths = conditions;
-    const prefixKey = model.generateKey();
-
-    const iterator = db.iterator({
-      gte: prefixKey,
-      lte: `${prefixKey}\xff`,
-    });
+    const prefixKey = this.schema.generatePrefix(prefixPaths);
 
     return new Promise((resolve, reject) => {
-      iterator.each(
-        async (err: any, key: string, value: string) => {
-          if (err) return reject(err);
-
-          const recordModel = new modelClass();
-          recordModel.parseKey(key);
-          recordModel.parseValue(JSON.parse(value));
-
-          // Обработка условий
-          let conditionsMet = true;
-          for (const [conditionKey, conditionValue] of Object.entries(conditions)) {
-            if (recordModel.paths[conditionKey] !== conditionValue) {
-              conditionsMet = false; // пропускаем, если условие не выполнено
-              break;
-            }
-          }
-
-          if (!conditionsMet) {
-            return;
-          }
-
-          // Обработка связей
-          const relationsToReturn: Record<string, any> = {}; // Создаем пустой объект для связей
-          for (const relationName of relations) {
-            const relation = schema.relations[relationName];
-            if (relation) {
-              const joinPath = relation.join_paths[0];
-
-              const relatedCondition = {
-                [joinPath.referencedPathName]: recordModel.paths[joinPath.name],
-              };
-
-              // Переиспользуем метод `this.find` для поиска связанных моделей
-              relationsToReturn[relationName] = await this.find(relation.target, relatedCondition);
-            }
-          }
-
-          if (Object.keys(relationsToReturn).length > 0) {
-            recordModel.relations = relationsToReturn; // Присваиваем объект связей в модель
-          }
-
-          results.push(recordModel);
-        },
-        (err: any) => {
-          if (err) return reject(err);
-          resolve(results);
-        }
-      );
-    });
-  }
-
-  async count(prefix: string): Promise<number> {
-    const db = this.connectionManager.getConnection();
-    return new Promise<number>((resolve, reject) => {
-      let count = 0;
-      const iterator = db.iterator({
-        gte: prefix,
-        lte: `${prefix}\xFF`, // Range to iterate over
+      const iterator = this.connection.iterator({
+        gte: prefixKey,
+        lte: `${prefixKey}\xFF`,
+        keyAsBuffer: false,
+        valueAsBuffer: false,
       });
 
-      function next() {
-        iterator.next((err: any, key: any, value: any) => {
+      const next = () => {
+        iterator.next((err: any, key: string, value: string) => {
           if (err) {
             return reject(err);
           }
+
           if (key === undefined && value === undefined) {
-            // End iteration, return quantity
+            // End of iteration
+            return resolve(results);
+          }
+
+          try {
+            const data = this.deserialize(value);
+            if (!filter || filter(data)) {
+              results.push(data);
+            }
+          } catch (parseError) {
+            // Incorrect data, skip the record
+          }
+
+          next();
+        });
+      };
+
+      next();
+    });
+  }
+
+  /**
+   * Method to delete data by partial key
+   * @param prefixPaths Values for generating the prefix (without prefix)
+   */
+  async deleteByPartialKey(prefixPaths?: Record<string, any>): Promise<void> {
+    const prefixKey = this.schema.generatePrefix(prefixPaths);
+
+    return new Promise((resolve, reject) => {
+      const iterator = this.connection.iterator({
+        gte: prefixKey,
+        lte: `${prefixKey}\xFF`,
+        keyAsBuffer: false,
+        keyAsString: true,
+      });
+
+      const deleteNextKey = () => {
+        iterator.next((err: any, key: string) => {
+          if (err) {
+            return reject(err);
+          }
+
+          if (key === undefined) {
+            // End of iteration
+            return resolve();
+          }
+
+          if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+            // Add operation to the transaction
+            this.transactionsRunner.addOperation({ type: 'del', key });
+            deleteNextKey();
+          } else {
+            // Delete the record immediately
+            this.connection.del(key, (delErr: any) => {
+              if (delErr) return reject(delErr);
+              deleteNextKey();
+            });
+          }
+        });
+      };
+
+      deleteNextKey();
+    });
+  }
+
+  /**
+   * Method to count the number of records by partial key
+   * @param prefixPaths Values for generating the prefix (without prefix)
+   * @returns Number of records
+   */
+  async countByPartialKey(prefixPaths?: Record<string, any>): Promise<number> {
+    let count = 0;
+
+    const prefixKey = this.schema.generatePrefix(prefixPaths);
+
+    return new Promise((resolve, reject) => {
+      const iterator = this.connection.iterator({
+        gte: prefixKey,
+        lte: `${prefixKey}\xFF`,
+        keyAsBuffer: false,
+        valueAsBuffer: false,
+      });
+
+      const next = () => {
+        iterator.next((err: any, key: any) => {
+          if (err) {
+            return reject(err);
+          }
+          if (key === undefined) {
+            // End of iteration
             return resolve(count);
           }
 
-          // Increment the counter for each entry found
           count += 1;
           next();
         });
-      }
+      };
 
       next();
     });
