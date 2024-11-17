@@ -26,7 +26,7 @@ export class SchemasManager {
     return this._schemas.get(prefix);
   }
 
-  getRepository<T>(prefix: string, transactionsRunner?: TransactionsRunner): Repository<T> {
+  getRepository<T extends EntitySchema>(prefix: string, transactionsRunner?: TransactionsRunner): Repository<T> {
     const schema = this.getSchemaByPrefix(prefix);
     if (!schema) {
       throw new Error(`Schema with prefix ${prefix} not found`);
