@@ -1,3 +1,4 @@
+import { reject } from 'lodash';
 import { ConnectionManager } from './connection-manager';
 import { AbstractBatch } from 'abstract-leveldown';
 
@@ -14,12 +15,14 @@ export class TransactionsRunner {
   /**
    * Starts a transaction
    */
-  startTransaction(): void {
-    if (this.transactionActive) {
-      throw new Error('Transaction is already active');
-    }
-    this.transactionActive = true;
-    this.operations = [];
+  async startTransaction(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.transactionActive) {
+        reject('Transaction is already active');
+      }
+      this.transactionActive = true;
+      resolve();
+    });
   }
 
   /**

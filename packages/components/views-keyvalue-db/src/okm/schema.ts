@@ -12,20 +12,20 @@ export interface SchemaDefinition {
   prefix: string; // Key prefix
   separator: string; // Separator between key parts
   paths: Record<string, PathDefinition>; // Description of key paths
-  values: ValueDefinition; // Description of the stored value
+  data: ValueDefinition; // Description of the stored value
 }
 
 export class EntitySchema {
   prefix: string;
   separator: string;
   paths: Record<string, PathDefinition>;
-  values: ValueDefinition;
+  data: ValueDefinition;
 
   constructor(definition: SchemaDefinition) {
     this.prefix = definition.prefix;
     this.separator = definition.separator;
     this.paths = definition.paths;
-    this.values = definition.values;
+    this.data = definition.data;
   }
 
   /**

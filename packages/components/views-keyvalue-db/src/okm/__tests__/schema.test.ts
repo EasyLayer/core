@@ -10,7 +10,7 @@ describe('EntitySchema', () => {
           id: { type: 'dynamic', required: true },
           type: { type: 'static', required: true, value: 'user' },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -18,7 +18,7 @@ describe('EntitySchema', () => {
       expect(entitySchema.prefix).toBe('test');
       expect(entitySchema.separator).toBe(':');
       expect(entitySchema.paths).toEqual(schemaDefinition.paths);
-      expect(entitySchema.values).toEqual(schemaDefinition.values);
+      expect(entitySchema.data).toEqual(schemaDefinition.data);
     });
   });
 
@@ -30,7 +30,7 @@ describe('EntitySchema', () => {
         id: { type: 'dynamic', required: true },
         role: { type: 'static', required: true, value: 'admin' },
       },
-      values: { type: 'object' },
+      data: { type: 'object' },
     };
 
     const entitySchema = new EntitySchema(schemaDefinition);
@@ -59,7 +59,7 @@ describe('EntitySchema', () => {
           orderId: { type: 'dynamic', required: true },
           status: { type: 'static', required: true, value: 'active' },
         },
-        values: { type: 'string' },
+        data: { type: 'string' },
       };
 
       const multiEntitySchema = new EntitySchema(multiDynamicSchema);
@@ -80,7 +80,7 @@ describe('EntitySchema', () => {
           subCategory: { type: 'dynamic', required: false },
           id: { type: 'dynamic', required: true },
         },
-        values: { type: 'number' },
+        data: { type: 'number' },
       };
 
       const optionalEntitySchema = new EntitySchema(optionalDynamicSchema);
@@ -101,7 +101,7 @@ describe('EntitySchema', () => {
           subCategory: { type: 'dynamic', required: false },
           id: { type: 'dynamic', required: true },
         },
-        values: { type: 'number' },
+        data: { type: 'number' },
       };
 
       const optionalEntitySchema = new EntitySchema(optionalDynamicSchema);
@@ -120,7 +120,7 @@ describe('EntitySchema', () => {
         prefix: 'inventory',
         separator: '/',
         paths: {},
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -138,7 +138,7 @@ describe('EntitySchema', () => {
           subCategory: { type: 'dynamic', required: false },
           type: { type: 'static', required: false, value: 'item' },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -159,7 +159,7 @@ describe('EntitySchema', () => {
           subCategory: { type: 'dynamic', required: false },
           type: { type: 'static', required: true, value: 'item' },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -181,7 +181,7 @@ describe('EntitySchema', () => {
           subCategory: { type: 'dynamic', required: false },
           type: { type: 'static', required: true, value: 'item' },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -202,7 +202,7 @@ describe('EntitySchema', () => {
         id: { type: 'dynamic', required: true },
         role: { type: 'static', required: true, value: 'admin' },
       },
-      values: { type: 'object' },
+      data: { type: 'object' },
     };
 
     const entitySchema = new EntitySchema(schemaDefinition);
@@ -249,7 +249,7 @@ describe('EntitySchema', () => {
           orderId: { type: 'dynamic', required: true },
           status: { type: 'static', required: true, value: 'active' },
         },
-        values: { type: 'string' },
+        data: { type: 'string' },
       };
 
       const multiEntitySchema = new EntitySchema(multiDynamicSchema);
@@ -269,7 +269,7 @@ describe('EntitySchema', () => {
           category: { type: 'static', required: true, value: 'electronics' },
           id: { type: 'dynamic', required: true },
         },
-        values: { type: 'number' },
+        data: { type: 'number' },
       };
 
       const dashSchema = new EntitySchema(dashSeparatorSchema);
@@ -297,7 +297,7 @@ describe('EntitySchema', () => {
           code: { type: 'dynamic', required: true },
           type: { type: 'static', required: true, value: 'A' },
         },
-        values: { type: 'string' },
+        data: { type: 'string' },
       };
 
       const schemaB: SchemaDefinition = {
@@ -307,7 +307,7 @@ describe('EntitySchema', () => {
           id: { type: 'dynamic', required: true },
           category: { type: 'static', required: true, value: 'B' },
         },
-        values: { type: 'number' },
+        data: { type: 'number' },
       };
 
       const entitySchemaA = new EntitySchema(schemaA);
@@ -338,7 +338,7 @@ describe('EntitySchema', () => {
             id: { type: 'dynamic', required: true },
             role: { type: 'static', required: true, value: 'admin' },
           },
-          values: { type: 'object' },
+          data: { type: 'object' },
         },
         {
           prefix: 'product',
@@ -347,7 +347,7 @@ describe('EntitySchema', () => {
             category: { type: 'static', required: true, value: 'electronics' },
             id: { type: 'dynamic', required: true },
           },
-          values: { type: 'number' },
+          data: { type: 'number' },
         },
       ];
 
@@ -381,7 +381,7 @@ describe('EntitySchema', () => {
           version: { type: 'static', required: true, value: 'v1' },
           instance: { type: 'dynamic', required: false },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(complexSchema);
@@ -409,7 +409,7 @@ describe('EntitySchema', () => {
         prefix: 'empty',
         separator: ':',
         paths: {},
-        values: { type: 'string' },
+        data: { type: 'string' },
       };
 
       const entitySchema = new EntitySchema(emptyPathsSchema);
@@ -429,7 +429,7 @@ describe('EntitySchema', () => {
           type: { type: 'static', required: true, value: 'fixed' },
           category: { type: 'static', required: true, value: 'constant' },
         },
-        values: { type: 'boolean' },
+        data: { type: 'boolean' },
       };
 
       const entitySchema = new EntitySchema(staticOnlySchema);
@@ -451,7 +451,7 @@ describe('EntitySchema', () => {
           userId: { type: 'dynamic', required: true },
           sessionId: { type: 'dynamic', required: true },
         },
-        values: { type: 'array' },
+        data: { type: 'array' },
       };
 
       const entitySchema = new EntitySchema(dynamicOnlySchema);
@@ -474,7 +474,7 @@ describe('EntitySchema', () => {
           id: { type: 'dynamic', required: true },
           name: { type: 'dynamic', required: true },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);
@@ -492,7 +492,7 @@ describe('EntitySchema', () => {
           part1: { type: 'dynamic', required: true },
           part2: { type: 'static', required: true, value: 'fixed' },
         },
-        values: { type: 'object' },
+        data: { type: 'object' },
       };
 
       const entitySchema = new EntitySchema(schemaDefinition);

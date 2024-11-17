@@ -22,25 +22,14 @@ export class SchemasManager {
     return this._schemas;
   }
 
-  /**
-   * Метод для получения схемы по префиксу
-   * @param prefix Префикс схемы
-   * @returns Схема сущности или undefined
-   */
   getSchemaByPrefix(prefix: string): EntitySchema | undefined {
     return this._schemas.get(prefix);
   }
 
-  /**
-   * Получает репозиторий для заданной схемы
-   * @param prefix Префикс схемы
-   * @param transactionsRunner Опциональный TransactionsRunner для транзакций
-   * @returns Репозиторий
-   */
   getRepository<T>(prefix: string, transactionsRunner?: TransactionsRunner): Repository<T> {
     const schema = this.getSchemaByPrefix(prefix);
     if (!schema) {
-      throw new Error(`Схема с префиксом ${prefix} не найдена`);
+      throw new Error(`Schema with prefix ${prefix} not found`);
     }
 
     return new Repository<T>(this.connectionManager, schema, transactionsRunner);
