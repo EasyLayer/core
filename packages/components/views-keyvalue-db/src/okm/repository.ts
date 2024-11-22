@@ -88,8 +88,20 @@ export class Repository<S extends EntitySchema> {
           }
           return reject(err);
         }
-        const result = this.deserialize(value.toString());
-        resolve(result);
+
+        // Ensure value is a string before deserialization
+        if (Buffer.isBuffer(value)) {
+          value = value.toString('utf-8');
+        } else if (typeof value !== 'string') {
+          return reject(new Error(`Unexpected value type for key ${key}: ${typeof value}`));
+        }
+
+        try {
+          const result = this.deserialize(value);
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
       });
     });
   }
@@ -134,13 +146,20 @@ export class Repository<S extends EntitySchema> {
             return resolve(results);
           }
 
+          // Ensure value is a string before deserialization
+          if (Buffer.isBuffer(value)) {
+            value = value.toString('utf-8');
+          } else if (typeof value !== 'string') {
+            return reject(new Error(`Unexpected value type for key ${key}: ${typeof value}`));
+          }
+
           try {
             const result = this.deserialize(value);
             if (!filter || filter(result)) {
               results.push(result);
             }
           } catch (error) {
-            // Incorrect result, skip the record
+            return reject(error);
           }
 
           next();
