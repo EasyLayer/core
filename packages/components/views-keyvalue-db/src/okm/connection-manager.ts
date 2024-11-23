@@ -1,11 +1,18 @@
 import RocksDB from 'rocksdb';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { mergeRocksDBOptions, IRocksDBOptions } from './rocksdb.config';
+
+export interface ConnectionOptions {
+  database: string;
+  type: 'rocksdb' | 'leveldb';
+  options: IRocksDBOptions | any;
+}
 
 @Injectable()
 export class ConnectionManager implements OnModuleDestroy {
   private db: any;
 
-  constructor(database: string, type: string) {
+  constructor({ type, database, options }: ConnectionOptions) {
     if (type !== 'rocksdb') {
       throw new Error('Now mainteing only RocksDB');
     }
@@ -14,8 +21,10 @@ export class ConnectionManager implements OnModuleDestroy {
       throw new Error('database is missed');
     }
 
+    const rocksdbOptions = mergeRocksDBOptions(options);
+
     this.db = RocksDB(database);
-    this.db.open({ create_if_missing: true }, (err: any) => {
+    this.db.open(rocksdbOptions, (err: any) => {
       if (err) throw err;
     });
   }

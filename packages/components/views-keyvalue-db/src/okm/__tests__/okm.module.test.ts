@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { OKMModule, OKMModuleConfig } from '../okm.module';
+import { OKMModule, OKMModuleOptions } from '../okm.module';
 import { ConnectionManager } from '../connection-manager';
 import { SchemasManager } from '../schemas-manager';
 import { TransactionsRunner } from '../transactions-runner';
@@ -49,10 +49,11 @@ describe('OKMModule', () => {
   const mockSchemas: EntitySchema[] = [OutputSchema, BalanceSchema];
 
   // Configuration for the module in tests
-  const mockConfig: OKMModuleConfig = {
+  const mockConfig: OKMModuleOptions = {
     database: 'test-db',
     type: 'rocksdb',
     schemas: mockSchemas,
+    options: {},
   };
 
   beforeEach(async () => {
@@ -112,10 +113,11 @@ describe('OKMModule', () => {
 
   describe('Edge Cases', () => {
     it('should handle an empty list of schemas correctly', async () => {
-      const configWithNoSchemas: OKMModuleConfig = {
+      const configWithNoSchemas: OKMModuleOptions = {
         database: 'test-db',
         type: 'rocksdb',
         schemas: [],
+        options: {},
       };
 
       const testModule = await Test.createTestingModule({

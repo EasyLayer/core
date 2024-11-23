@@ -1,27 +1,23 @@
 import { Module, DynamicModule } from '@nestjs/common';
-import { ConnectionManager } from './connection-manager';
+import { ConnectionManager, ConnectionOptions } from './connection-manager';
 import { SchemasManager } from './schemas-manager';
 import { EntitySchema } from './schema';
 import { TransactionsRunner } from './transactions-runner';
 
-type OKMDatabaseType = 'rocksdb'; // Now support only rocksdb
-
-export type OKMModuleConfig = {
-  database: string;
-  type: OKMDatabaseType;
+export interface OKMModuleOptions extends ConnectionOptions {
   schemas: EntitySchema[];
-};
+}
 
 @Module({})
 export class OKMModule {
-  static forRoot({ database, type, schemas }: OKMModuleConfig): DynamicModule {
+  static forRoot({ schemas, ...restOptions }: OKMModuleOptions): DynamicModule {
     return {
       module: OKMModule,
       imports: [],
       providers: [
         {
           provide: ConnectionManager,
-          useFactory: () => new ConnectionManager(database, type),
+          useFactory: () => new ConnectionManager(restOptions),
         },
         {
           provide: SchemasManager,
