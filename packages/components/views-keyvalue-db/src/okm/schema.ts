@@ -31,31 +31,56 @@ export class EntitySchema {
   }
 
   /**
-   * Method to validate required dynamic paths
-   * @param paths Dynamic path values
+   * Validates that all required dynamic paths are present in the key.
+   * @param key Key as an object
    */
-  private validateRequiredPaths(paths: Record<string, any>) {
-    for (const [key, definition] of Object.entries(this.paths)) {
-      if (definition.type === 'dynamic' && definition.required && (paths[key] === undefined || paths[key] === null)) {
-        throw new Error(`Missing required dynamic path: ${key}`);
+  private validateRequiredPaths(key: Record<string, string>): void {
+    for (const [pathName, definition] of Object.entries(this.paths)) {
+      if (
+        definition.type === 'dynamic' &&
+        definition.required &&
+        (key[pathName] === undefined || key[pathName] === null || key[pathName] === '')
+      ) {
+        throw new Error(`Missing required dynamic path: ${pathName}`);
       }
     }
   }
 
   /**
-   * Method to generate a key based on paths
-   * @param paths Dynamic path values
-   * @returns Generated key
+   * Generates a string key based on the input, adding prefix if necessary and validating against the schema.
+   * Prevents duplicate prefixes.
+   * @param key Key as an object or string
+   * @returns Generated string key
    */
-  public generateKey(paths: Record<string, any>): string {
-    // Validate required paths before generating the key
-    this.validateRequiredPaths(paths);
+  public generateKey(key: Record<string, string> | string): string {
+    let paths: Record<string, string>;
 
+    if (typeof key === 'string') {
+      // If key is a string, check for prefix and prevent duplication
+      const expectedPrefix = this.prefix + this.separator;
+      if (!key.startsWith(expectedPrefix)) {
+        throw new Error(`Key string must start with the prefix '${this.prefix}${this.separator}'`);
+      }
+
+      const withoutPrefix = key.slice(expectedPrefix.length);
+      if (withoutPrefix.startsWith(this.prefix + this.separator)) {
+        throw new Error('Duplicate prefix detected in the key string');
+      }
+
+      // Parse the key to extract dynamic paths
+      paths = this.parseKey(key);
+    } else {
+      // If key is an object, validate required paths
+      this.validateRequiredPaths(key);
+      paths = key;
+    }
+
+    // Generate path segments based on the schema
     const pathSegments = Object.entries(this.paths).reduce<string[]>((segments, [name, def]) => {
       if (def.type === 'static') {
         segments.push(def.value!);
       } else {
-        if (paths[name] !== undefined && paths[name] !== null) {
+        if (paths[name] !== undefined && paths[name] !== null && paths[name] !== '') {
           segments.push(String(paths[name]));
         } else if (def.required) {
           // This condition should already be handled by validateRequiredPaths
@@ -70,11 +95,11 @@ export class EntitySchema {
   }
 
   /**
-   * Method to generate a prefix based on paths
+   * Generates a prefix based on the provided dynamic path values.
    * @param paths Dynamic path values
-   * @returns Generated prefix
+   * @returns Generated prefix string
    */
-  public generatePrefix(paths?: Record<string, any>): string {
+  public generatePrefix(paths?: Record<string, string>): string {
     const keyParts: string[] = [this.prefix];
 
     if (paths) {
@@ -86,7 +111,7 @@ export class EntitySchema {
           // If the static path is optional, skip it
         } else {
           const value = paths[pathName];
-          if (value !== undefined && value !== null) {
+          if (value !== undefined && value !== null && value !== '') {
             keyParts.push(String(value));
           }
           // If the dynamic path is optional and not provided, skip it
@@ -98,127 +123,79 @@ export class EntitySchema {
   }
 
   /**
-   * Method to parse a key and retrieve paths
-   * @param key Key from the database
-   * @returns Object containing path values
+   * Parses a string key and retrieves the dynamic path values.
+   * Ensures that the key does not contain duplicate prefixes.
+   * @param key Key string from the database
+   * @returns Object containing dynamic path values
    */
-  public parseKey(key: string): Record<string, any> {
-    // Retrieve the path definitions from the schema
+  public parseKey(key: string): Record<string, string> {
     const pathsDef = this.paths;
-
-    // Determine if the schema has any defined paths
     const hasPaths = Object.keys(pathsDef).length > 0;
 
-    // If there are no paths defined in the schema
     if (!hasPaths) {
-      // The key must exactly match the prefix
       if (key !== this.prefix) {
         throw new Error('Key does not match the schema paths');
       }
-      // Return an empty object as there are no paths to parse
       return {};
     }
 
-    // Construct the expected prefix by combining the schema prefix and separator
     const expectedPrefix = this.prefix + this.separator;
-
-    // Check if the key starts with the expected prefix
     if (!key.startsWith(expectedPrefix)) {
       throw new Error('Key does not match the schema paths');
     }
 
-    // Remove the prefix from the key to isolate the path segments
     const keyWithoutPrefix = key.slice(expectedPrefix.length);
-
-    // Split the remaining key into individual segments based on the separator
     const keyParts = keyWithoutPrefix.split(this.separator);
 
-    // Convert the path definitions into an array of [pathName, pathDefinition] pairs
     const pathEntries = Object.entries(pathsDef);
-
-    // Total number of paths defined in the schema
     const totalPathCount = pathEntries.length;
-
-    // Number of required paths (both static and dynamic)
-    /* eslint-disable @typescript-eslint/no-unused-vars */
     const requiredPathCount = pathEntries.filter(
-      ([_, def]) => (def.type === 'dynamic' && def.required) || (def.type === 'static' && def.required)
+      ([, def]) => (def.type === 'dynamic' && def.required) || (def.type === 'static' && def.required)
     ).length;
-    /* eslint-disable @typescript-eslint/no-unused-vars */
 
-    // Check that the number of key segments is within the acceptable range
-    // It should be at least the number of required paths and no more than the total paths
     if (keyParts.length < requiredPathCount || keyParts.length > totalPathCount) {
       throw new Error('Key does not match the schema paths');
     }
 
-    // Object to store the parsed dynamic path values
-    const parsedPaths: Record<string, any> = {};
-
-    // Index to keep track of the current position in keyParts
+    const parsedPaths: Record<string, string> = {};
     let keyIndex = 0;
 
-    // Iterate over each path definition
     for (const [name, def] of pathEntries) {
       if (def.type === 'static') {
-        // If the current path is static
-
-        // Ensure there are enough key segments to match the path definitions
         if (keyIndex >= keyParts.length) {
           if (def.required) {
-            // If the static path is required but missing, throw an error
             throw new Error(`Missing required path: ${name}`);
           }
-          // If the static path is not required, skip to the next path
           continue;
         }
 
-        // Retrieve the corresponding segment from the key
         const keyPart = keyParts[keyIndex];
-
-        // Check if the static path segment matches the expected value
         if (keyPart !== def.value) {
           throw new Error(`Static path mismatch for ${name}`);
         }
-
-        // Move to the next segment
         keyIndex++;
       } else {
-        // dynamic
-        // If the current path is dynamic
-
-        // Ensure there are enough key segments to match the path definitions
         if (keyIndex >= keyParts.length) {
           if (def.required) {
-            // If the dynamic path is required but missing, throw an error
             throw new Error(`Missing required path: ${name}`);
           }
-          // If the dynamic path is not required, skip to the next path
           continue;
         }
 
-        // Retrieve the corresponding segment from the key
         const keyPart = keyParts[keyIndex];
-
-        // Check if the dynamic path segment has a valid value
         if (keyPart === undefined || keyPart === null || keyPart === '') {
           if (def.required) {
-            // If the dynamic path is required but the value is invalid, throw an error
             throw new Error(`Missing required path: ${name}`);
           }
-          // If the dynamic path is not required, skip to the next path
           continue;
         }
 
-        // Assign the dynamic path value to the parsedPaths object
         parsedPaths[name] = keyPart;
-
-        // Move to the next segment
         keyIndex++;
       }
     }
 
-    // Additional check to ensure all required dynamic paths have been parsed correctly
+    // Ensure all required dynamic paths are present
     for (const [name, def] of pathEntries) {
       if (def.type === 'dynamic' && def.required) {
         const value = parsedPaths[name];
@@ -228,7 +205,6 @@ export class EntitySchema {
       }
     }
 
-    // Return the object containing the parsed dynamic path values
     return parsedPaths;
   }
 }

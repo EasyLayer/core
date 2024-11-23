@@ -112,6 +112,66 @@ describe('EntitySchema', () => {
 
       expect(key).toBe(expectedKey);
     });
+
+    // Added Tests
+    it('should generate key correctly when key is a string with prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const keyWithPrefix = 'user:67890:admin';
+
+      const generatedKey = entitySchemaWithPrefixCheck.generateKey(keyWithPrefix);
+
+      // Since the key already contains the prefix, generateKey should not add it again
+      expect(generatedKey).toBe('user:67890:admin');
+    });
+
+    it('should throw an error when key is a string without the required prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const keyWithoutPrefix = 'invalid:67890:admin';
+
+      expect(() => entitySchemaWithPrefixCheck.generateKey(keyWithoutPrefix)).toThrow(
+        "Key string must start with the prefix 'user:'"
+      );
+    });
+
+    it('should throw an error when key is a string with duplicated prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const duplicatedPrefixKey = 'user:user:67890:admin';
+
+      // Expect an error due to duplicate prefix
+      expect(() => entitySchemaWithPrefixCheck.generateKey(duplicatedPrefixKey)).toThrow(
+        'Duplicate prefix detected in the key string'
+      );
+    });
   });
 
   describe('generatePrefix', () => {
@@ -187,6 +247,48 @@ describe('EntitySchema', () => {
       const entitySchema = new EntitySchema(schemaDefinition);
       const paths = { category: 'electronics', subCategory: 'smartphones' };
       const expectedPrefix = 'inventory/electronics/smartphones/item';
+
+      const prefix = entitySchema.generatePrefix(paths);
+
+      expect(prefix).toBe(expectedPrefix);
+    });
+
+    // Added Tests
+    it('should generate prefix correctly when key is a string with prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const keyWithPrefix = 'user:67890:admin';
+
+      const prefix = entitySchemaWithPrefixCheck.generatePrefix(entitySchemaWithPrefixCheck.parseKey(keyWithPrefix));
+
+      expect(prefix).toBe('user:67890:admin');
+    });
+
+    it('should handle prefix generation with multiple optional dynamic paths', () => {
+      const complexSchema: SchemaDefinition = {
+        prefix: 'data',
+        separator: '-',
+        paths: {
+          category: { type: 'static', required: true, value: 'books' },
+          author: { type: 'dynamic', required: false },
+          title: { type: 'dynamic', required: false },
+          isbn: { type: 'dynamic', required: true },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchema = new EntitySchema(complexSchema);
+      const paths = { isbn: '978-3-16-148410-0', author: 'Doe' };
+      const expectedPrefix = 'data-books-Doe-978-3-16-148410-0';
 
       const prefix = entitySchema.generatePrefix(paths);
 
@@ -285,6 +387,47 @@ describe('EntitySchema', () => {
       const incompleteKey = 'user::admin'; // Missing id
 
       expect(() => entitySchema.parseKey(incompleteKey)).toThrow('Missing required path: id');
+    });
+
+    // Added Tests
+    it('should parse a key correctly when key is passed as string with prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const keyWithPrefix = 'user:67890:admin';
+      const expectedPaths = { id: '67890' };
+
+      const parsedPaths = entitySchemaWithPrefixCheck.parseKey(keyWithPrefix);
+
+      expect(parsedPaths).toEqual(expectedPaths);
+    });
+
+    it('should throw an error when parsing key with duplicated prefix', () => {
+      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
+      const duplicatedPrefixKey = 'user:user:67890:admin';
+
+      // Expect an error due to duplicate prefix
+      expect(() => entitySchemaWithPrefixCheck.parseKey(duplicatedPrefixKey)).toThrow(
+        'Key does not match the schema paths'
+      );
     });
   });
 
@@ -500,6 +643,47 @@ describe('EntitySchema', () => {
       const invalidKey = 'sample:dynamic'; // Missing 'fixed'
 
       expect(() => entitySchema.parseKey(invalidKey)).toThrow('Key does not match the schema paths');
+    });
+
+    // Added Tests
+    it('should handle keys with special characters correctly', () => {
+      const specialCharSchema: SchemaDefinition = {
+        prefix: 'special',
+        separator: ':',
+        paths: {
+          code: { type: 'dynamic', required: true },
+          type: { type: 'static', required: true, value: 'test@123' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchema = new EntitySchema(specialCharSchema);
+      const paths = { code: 'c#100' };
+      const expectedKey = 'special:c#100:test@123';
+
+      const key = entitySchema.generateKey(paths);
+      expect(key).toBe(expectedKey);
+
+      const parsedPaths = entitySchema.parseKey(expectedKey);
+      expect(parsedPaths).toEqual({ code: 'c#100' });
+    });
+
+    it('should throw an error when parsing key with empty dynamic path', () => {
+      const schemaDefinition: SchemaDefinition = {
+        prefix: 'user',
+        separator: ':',
+        paths: {
+          id: { type: 'dynamic', required: true },
+          role: { type: 'static', required: true, value: 'admin' },
+        },
+        data: { type: 'object' },
+      };
+
+      const entitySchema = new EntitySchema(schemaDefinition);
+
+      const keyWithEmptyDynamicPath = 'user::admin'; // Empty 'id'
+
+      expect(() => entitySchema.parseKey(keyWithEmptyDynamicPath)).toThrow('Missing required path: id');
     });
   });
 });

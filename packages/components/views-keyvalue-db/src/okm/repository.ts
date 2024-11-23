@@ -1,3 +1,4 @@
+import { promisify } from 'node:util';
 import { AbstractBatch } from 'abstract-leveldown';
 import { ConnectionManager } from './connection-manager';
 import { TransactionsRunner } from './transactions-runner';
@@ -26,228 +27,305 @@ export class Repository<S extends EntitySchema> {
 
   /**
    * Method to save data
-   * @param paths Values for generating the key (without prefix)
+   * @param key Values for generating the key (object or string)
    * @param data Data to be saved
+   * @returns Promise<void>
    */
-  async put(paths: Record<string, any>, data: S['data']): Promise<void> {
-    const key = this.schema.generateKey(paths);
-    const value = this.serialize(data);
+  public async put(key: Record<string, string> | string, data: S['data']): Promise<void> {
+    try {
+      // Generate the full key using the schema (adds prefix and validates the key)
+      const validKey = this.schema.generateKey(key);
 
-    const operation: AbstractBatch = { type: 'put', key, value };
+      const serializedData = this.serialize(data);
 
-    if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
-      // Add operation to the transaction
-      this.transactionsRunner.addOperation(operation);
-    } else {
-      // Execute operation immediately
-      return new Promise<void>((resolve, reject) => {
-        this.connection.put(key, value, (err: any) => {
-          if (err) return reject(err);
-          resolve();
-        });
-      });
+      const operation: AbstractBatch = { type: 'put', key: validKey, value: serializedData };
+
+      if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+        // Add operation to the transaction
+        this.transactionsRunner.addOperation(operation);
+      } else {
+        const putAsync = promisify(this.connection.put).bind(this.connection);
+        await putAsync(validKey, serializedData);
+      }
+    } catch (error) {
+      throw error;
     }
   }
 
   /**
    * Method to delete data
-   * @param paths Values for generating the key (without prefix)
+   * @param key Values for generating the key (object or string)
+   * @returns Promise<void>
    */
-  async del(paths: Record<string, any>): Promise<void> {
-    const key = this.schema.generateKey(paths);
+  public async del(key: Record<string, string> | string): Promise<void> {
+    try {
+      // Generate the full key using the schema
+      const validKey = this.schema.generateKey(key);
 
-    const operation: AbstractBatch = { type: 'del', key };
+      const operation: AbstractBatch = { type: 'del', key: validKey };
 
-    if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
-      // Add operation to the transaction
-      this.transactionsRunner.addOperation(operation);
-    } else {
-      // Execute operation immediately
-      return new Promise<void>((resolve, reject) => {
-        this.connection.del(key, (err: any) => {
-          if (err) return reject(err);
-          resolve();
-        });
-      });
+      if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+        // Add operation to the transaction
+        this.transactionsRunner.addOperation(operation);
+      } else {
+        const delAsync = promisify(this.connection.del).bind(this.connection);
+        await delAsync(validKey);
+      }
+    } catch (error) {
+      throw error;
     }
   }
 
   /**
    * Method to retrieve data by key
-   * @param paths Values for generating the key (without prefix)
-   * @returns Result or null
+   * @param key Values for generating the key (object or string)
+   * @returns Promise<S['data'] | null>
    */
-  async get(paths: Record<string, any>): Promise<S | null> {
-    const key = this.schema.generateKey(paths);
+  public async get(key: Record<string, string> | string): Promise<S['data'] | null> {
+    try {
+      // Generate the full key using the schema
+      const validKey = this.schema.generateKey(key);
 
-    return new Promise((resolve, reject) => {
-      this.connection.get(key, (err: any, value: any) => {
-        if (err) {
-          if (err.notFound || (err.message && err.message.includes('NotFound'))) {
-            return resolve(null);
-          }
-          return reject(err);
-        }
+      const getAsync = promisify(this.connection.get).bind(this.connection);
 
-        // Ensure value is a string before deserialization
-        if (Buffer.isBuffer(value)) {
-          value = value.toString('utf-8');
-        } else if (typeof value !== 'string') {
-          return reject(new Error(`Unexpected value type for key ${key}: ${typeof value}`));
-        }
+      let value = await getAsync(validKey);
 
-        try {
-          const result = this.deserialize(value);
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+      // Ensure value is a string before deserialization
+      if (Buffer.isBuffer(value)) {
+        value = value.toString('utf-8');
+      } else if (typeof value !== 'string') {
+        throw new Error(`Unexpected value type for key ${validKey}: ${typeof value}`);
+      }
+
+      // Deserialize the JSON string to object
+      const result = this.deserialize(value);
+      return result;
+    } catch (error: any) {
+      // Handle not found error
+      if (error.notFound || (error.message && error.message.includes('NotFound'))) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
    * Method to check if data exists by key
-   * @param paths Values for generating the key (without prefix)
-   * @returns true if result exists, otherwise false
+   * @param key Values for generating the key (object or string)
+   * @returns Promise<boolean>
    */
-  async exists(paths: Record<string, any>): Promise<boolean> {
-    const result = await this.get(paths);
-    return result !== null;
+  public async exists(key: Record<string, string> | string): Promise<boolean> {
+    try {
+      const result = await this.get(key);
+      return result !== null;
+    } catch (error) {
+      throw error;
+    }
   }
 
   /**
    * Method to retrieve data by partial key with a filter
-   * @param prefixPaths Values for generating the prefix (without prefix)
-   * @param filter Data filter function
-   * @returns Array of data
+   * @param pathOfKey Values for generating the partial key (object or string)
+   * @param filter Optional filter function for data
+   * @returns Promise<S['data'][]>
    */
-  async getByPartialKey(prefixPaths?: Record<string, any>, filter?: (data: S['data']) => boolean): Promise<S[]> {
-    const results: S[] = [];
+  public async getByPartialKey(
+    pathOfKey: Record<string, string> | string,
+    filter?: (data: S['data']) => boolean
+  ): Promise<S['data'][]> {
+    const results: S['data'][] = [];
 
-    const prefixKey = this.schema.generatePrefix(prefixPaths);
+    let iterator: any;
 
-    return new Promise((resolve, reject) => {
-      const iterator = this.connection.iterator({
+    try {
+      // Generate the prefix key using the schema
+      const prefixKey = this.schema.generatePrefix(
+        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
+      );
+
+      // Create iterator
+      iterator = this.connection.iterator({
         gte: prefixKey,
         lte: `${prefixKey}\xFF`,
         keyAsBuffer: false,
         valueAsBuffer: false,
       });
 
-      const next = () => {
-        iterator.next((err: any, key: string, value: string) => {
-          if (err) {
-            return reject(err);
-          }
-
-          if (key === undefined && value === undefined) {
-            // End of iteration
-            return resolve(results);
-          }
-
-          // Ensure value is a string before deserialization
-          if (Buffer.isBuffer(value)) {
-            value = value.toString('utf-8');
-          } else if (typeof value !== 'string') {
-            return reject(new Error(`Unexpected value type for key ${key}: ${typeof value}`));
-          }
-
-          try {
-            const result = this.deserialize(value);
-            if (!filter || filter(result)) {
-              results.push(result);
+      // Wrap iterator.next in a promise that returns both key and value
+      const nextAsync = (): Promise<[string | undefined, string | undefined]> => {
+        return new Promise((resolve, reject) => {
+          iterator.next((err: any, key: string, value: string) => {
+            if (err) {
+              return reject(err);
             }
-          } catch (error) {
-            return reject(error);
-          }
-
-          next();
+            resolve([key, value]);
+          });
         });
       };
 
-      next();
-    });
+      while (true) {
+        const [key, value] = await nextAsync();
+        if (key === undefined) {
+          // End of iteration
+          break;
+        }
+
+        // Ensure value is a string before deserialization
+        let valueStr: string;
+        if (Buffer.isBuffer(value)) {
+          valueStr = value.toString('utf-8');
+        } else if (typeof value === 'string') {
+          valueStr = value;
+        } else {
+          throw new Error(`Unexpected value type for key ${key}: ${typeof value}`);
+        }
+
+        const data = this.deserialize(valueStr);
+        if (!filter || filter(data)) {
+          results.push(data);
+        }
+      }
+
+      return results;
+    } catch (error) {
+      throw error;
+    } finally {
+      if (iterator) {
+        // Ensure the iterator is closed
+        const endAsync = promisify(iterator.end).bind(iterator);
+        try {
+          await endAsync();
+        } catch (err: any) {
+          throw new Error(`Error closing iterator in getByPartialKey: ${err}`);
+        }
+      }
+    }
   }
 
   /**
    * Method to delete data by partial key
-   * @param prefixPaths Values for generating the prefix (without prefix)
+   * @param pathOfKey Values for generating the prefix key (object or string)
+   * @returns Promise<void>
    */
-  async deleteByPartialKey(prefixPaths?: Record<string, any>): Promise<void> {
-    const prefixKey = this.schema.generatePrefix(prefixPaths);
+  public async deleteByPartialKey(pathOfKey: Record<string, string> | string): Promise<void> {
+    let iterator: any;
 
-    return new Promise((resolve, reject) => {
-      const iterator = this.connection.iterator({
-        gte: prefixKey,
-        lte: `${prefixKey}\xFF`,
-        keyAsBuffer: false,
-        keyAsString: true,
-      });
+    try {
+      // Generate the prefix key using the schema
+      const prefixKey = this.schema.generatePrefix(
+        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
+      );
 
-      const deleteNextKey = () => {
-        iterator.next((err: any, key: string) => {
-          if (err) {
-            return reject(err);
-          }
-
-          if (key === undefined) {
-            // End of iteration
-            return resolve();
-          }
-
-          if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
-            // Add operation to the transaction
-            this.transactionsRunner.addOperation({ type: 'del', key });
-            deleteNextKey();
-          } else {
-            // Delete the record immediately
-            this.connection.del(key, (delErr: any) => {
-              if (delErr) return reject(delErr);
-              deleteNextKey();
-            });
-          }
-        });
-      };
-
-      deleteNextKey();
-    });
-  }
-
-  /**
-   * Method to count the number of records by partial key
-   * @param prefixPaths Values for generating the prefix (without prefix)
-   * @returns Number of records
-   */
-  async countByPartialKey(prefixPaths?: Record<string, any>): Promise<number> {
-    let count = 0;
-
-    const prefixKey = this.schema.generatePrefix(prefixPaths);
-
-    return new Promise((resolve, reject) => {
-      const iterator = this.connection.iterator({
+      // Create iterator
+      iterator = this.connection.iterator({
         gte: prefixKey,
         lte: `${prefixKey}\xFF`,
         keyAsBuffer: false,
         valueAsBuffer: false,
       });
 
-      const next = () => {
-        iterator.next((err: any, key: any) => {
-          if (err) {
-            return reject(err);
-          }
-          if (key === undefined) {
-            // End of iteration
-            return resolve(count);
-          }
-
-          count += 1;
-          next();
+      // Wrap iterator.next in a promise that returns key
+      const nextAsync = (): Promise<string | undefined> => {
+        return new Promise((resolve, reject) => {
+          iterator.next((err: any, key: string) => {
+            if (err) {
+              return reject(err);
+            }
+            resolve(key);
+          });
         });
       };
 
-      next();
-    });
+      while (true) {
+        const key = await nextAsync();
+        if (key === undefined) {
+          // End of iteration
+          break;
+        }
+
+        if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+          // Add operation to the transaction
+          this.transactionsRunner.addOperation({ type: 'del', key });
+        } else {
+          // Promisify the del method
+          const delAsync = promisify(this.connection.del).bind(this.connection);
+          // Delete the record immediately
+          await delAsync(key);
+        }
+      }
+    } catch (error) {
+      throw error;
+    } finally {
+      if (iterator) {
+        // Ensure the iterator is closed
+        const endAsync = promisify(iterator.end).bind(iterator);
+        try {
+          await endAsync();
+        } catch (err: any) {
+          throw new Error(`Error closing iterator in deleteByPartialKey: ${err}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Method to count the number of records by partial key
+   * @param pathOfKey Values for generating the prefix key (object or string)
+   * @returns Promise<number>
+   */
+  public async countByPartialKey(pathOfKey: Record<string, string> | string): Promise<number> {
+    let count = 0;
+    let iterator: any;
+
+    try {
+      // Generate the prefix key using the schema
+      const prefixKey = this.schema.generatePrefix(
+        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
+      );
+
+      // Create iterator
+      iterator = this.connection.iterator({
+        gte: prefixKey,
+        lte: `${prefixKey}\xFF`,
+        keyAsBuffer: false,
+        valueAsBuffer: false,
+      });
+
+      // Wrap iterator.next in a promise that returns key
+      const nextAsync = (): Promise<string | undefined> => {
+        return new Promise((resolve, reject) => {
+          iterator.next((err: any, key: string) => {
+            if (err) {
+              return reject(err);
+            }
+            resolve(key);
+          });
+        });
+      };
+
+      while (true) {
+        const key = await nextAsync();
+        if (key === undefined) {
+          // End of iteration
+          break;
+        }
+
+        count += 1;
+      }
+
+      return count;
+    } catch (error) {
+      throw error;
+    } finally {
+      if (iterator) {
+        // Ensure the iterator is closed
+        const endAsync = promisify(iterator.end).bind(iterator);
+        try {
+          await endAsync();
+        } catch (err: any) {
+          throw new Error(`Error closing iterator in countByPartialKey: ${err}`);
+        }
+      }
+    }
   }
 }
