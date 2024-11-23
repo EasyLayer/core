@@ -1,8 +1,8 @@
+import { AbstractBatch } from 'abstract-leveldown';
 import { Repository } from '../repository';
 import { ConnectionManager } from '../connection-manager';
 import { EntitySchema } from '../schema';
 import { TransactionsRunner } from '../transactions-runner';
-import { AbstractBatch } from 'abstract-leveldown';
 
 // Define specific callback types
 type CallbackWithError = (err: any) => void;
@@ -29,6 +29,9 @@ class ConnectionManagerMock implements Partial<ConnectionManager> {
           // By default, iteration is complete
           setImmediate(() => cb(null, undefined, undefined));
         }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
       })),
       batch: jest.fn((operations: AbstractBatch[], callback: BatchCallback) => {
         setImmediate(() => callback(null));
@@ -53,11 +56,14 @@ class ConnectionManagerMock implements Partial<ConnectionManager> {
 }
 
 class EntitySchemaMock implements Partial<EntitySchema> {
-  generateKey = jest.fn((paths: Record<string, any>) => {
-    return Object.values(paths).join(':');
+  generateKey = jest.fn((key: Record<string, string> | string) => {
+    if (typeof key === 'string') {
+      return key;
+    }
+    return Object.values(key).join(':');
   });
 
-  generatePrefix = jest.fn((paths?: Record<string, any>) => {
+  generatePrefix = jest.fn((paths?: Record<string, string>) => {
     return paths ? Object.values(paths).join(':') : 'mocked:prefix';
   });
 
@@ -286,6 +292,9 @@ describe('Repository', () => {
           .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, undefined, undefined));
           }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
@@ -301,11 +310,34 @@ describe('Repository', () => {
         valueAsBuffer: false,
       });
       expect(mockedIterator.next).toHaveBeenCalledTimes(3);
+      expect(mockedIterator.end).toHaveBeenCalled();
       expect(repository['deserialize']).toHaveBeenCalledWith(value1);
       expect(repository['deserialize']).toHaveBeenCalledWith(value2);
       expect(filter).toHaveBeenCalledWith({ active: true });
       expect(filter).toHaveBeenCalledWith({ active: false });
       expect(result).toEqual([{ active: true }]);
+    });
+
+    it('should close iterator and throw error if next fails', async () => {
+      const prefixPaths = { service: 'auth' };
+      const generatedPrefix = 'auth';
+
+      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+
+      const mockedIterator = {
+        next: jest.fn((cb: IteratorCallback) => {
+          setImmediate(() => cb(new Error('Iterator error'), undefined, undefined));
+        }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+
+      await expect(repository.getByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+
+      expect(mockedIterator.end).toHaveBeenCalled();
     });
   });
 
@@ -321,15 +353,18 @@ describe('Repository', () => {
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key1));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key2));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, undefined));
           }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
@@ -342,10 +377,14 @@ describe('Repository', () => {
         gte: generatedPrefix,
         lte: `${generatedPrefix}\xFF`,
         keyAsBuffer: false,
-        keyAsString: true,
+        valueAsBuffer: false,
       });
-      expect(db.del).toHaveBeenCalledWith(key1, expect.any(Function) as unknown as CallbackWithError);
-      expect(db.del).toHaveBeenCalledWith(key2, expect.any(Function) as unknown as CallbackWithError);
+
+      expect(db.del).toHaveBeenCalledTimes(2);
+      expect(db.del).toHaveBeenNthCalledWith(1, key1, expect.any(Function));
+      expect(db.del).toHaveBeenNthCalledWith(2, key2, expect.any(Function));
+
+      expect(mockedIterator.end).toHaveBeenCalled();
     });
 
     it('should add delete operations to transaction if active', async () => {
@@ -359,15 +398,18 @@ describe('Repository', () => {
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key1));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key2));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, undefined));
           }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
@@ -381,6 +423,29 @@ describe('Repository', () => {
       expect(transactionsRunner.addOperation).toHaveBeenCalledWith(expectedOperation1);
       expect(transactionsRunner.addOperation).toHaveBeenCalledWith(expectedOperation2);
       expect(db.del).not.toHaveBeenCalled();
+      expect(mockedIterator.end).toHaveBeenCalled();
+    });
+
+    it('should close iterator and throw error if next fails', async () => {
+      const prefixPaths = { service: 'auth' };
+      const generatedPrefix = 'auth';
+
+      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+
+      const mockedIterator = {
+        next: jest.fn((cb: IteratorCallback) => {
+          setImmediate(() => cb(new Error('Iterator error'), undefined));
+        }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+
+      await expect(repository.deleteByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+
+      expect(mockedIterator.end).toHaveBeenCalled();
     });
   });
 
@@ -396,15 +461,18 @@ describe('Repository', () => {
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key1));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, key2));
           })
-          .mockImplementationOnce((cb: CallbackWithErrorAndData) => {
+          .mockImplementationOnce((cb: IteratorCallback) => {
             setImmediate(() => cb(null, undefined));
           }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
@@ -420,6 +488,29 @@ describe('Repository', () => {
       });
       expect(mockedIterator.next).toHaveBeenCalledTimes(3);
       expect(count).toBe(2);
+      expect(mockedIterator.end).toHaveBeenCalled();
+    });
+
+    it('should close iterator and throw error if next fails', async () => {
+      const prefixPaths = { service: 'auth' };
+      const generatedPrefix = 'auth';
+
+      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+
+      const mockedIterator = {
+        next: jest.fn((cb: IteratorCallback) => {
+          setImmediate(() => cb(new Error('Iterator error'), undefined));
+        }),
+        end: jest.fn((cb: CallbackWithError) => {
+          setImmediate(() => cb(null));
+        }),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+
+      await expect(repository.countByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+
+      expect(mockedIterator.end).toHaveBeenCalled();
     });
   });
 });
