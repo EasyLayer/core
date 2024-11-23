@@ -4,6 +4,11 @@ import { ConnectionManager } from './connection-manager';
 import { TransactionsRunner } from './transactions-runner';
 import { EntitySchema } from './schema';
 
+export interface SimpleModel<T> {
+  key: Record<string, string>; // Parsed key parts
+  data: T; // Data value
+}
+
 export class Repository<S extends EntitySchema> {
   constructor(
     private readonly connectionManager: ConnectionManager,
@@ -15,12 +20,10 @@ export class Repository<S extends EntitySchema> {
     return this.connectionManager.getConnection();
   }
 
-  // Private method for serializing data
   private serialize(value: any): string {
     return JSON.stringify(value);
   }
 
-  // Private method for deserializing data
   private deserialize(value: string): any {
     return JSON.parse(value);
   }
@@ -79,9 +82,9 @@ export class Repository<S extends EntitySchema> {
   /**
    * Method to retrieve data by key
    * @param key Values for generating the key (object or string)
-   * @returns Promise<S['data'] | null>
+   * @returns Promise<SimpleModel | null>
    */
-  public async get(key: Record<string, string> | string): Promise<S['data'] | null> {
+  public async get(key: Record<string, string> | string): Promise<SimpleModel<S['data']> | null> {
     try {
       // Generate the full key using the schema
       const validKey = this.schema.generateKey(key);
@@ -98,8 +101,12 @@ export class Repository<S extends EntitySchema> {
       }
 
       // Deserialize the JSON string to object
-      const result = this.deserialize(value);
-      return result;
+      const data = this.deserialize(value);
+
+      // Parse the key to get dynamic path values
+      const keyParts = this.schema.parseKey(validKey);
+
+      return { key: keyParts, data };
     } catch (error: any) {
       // Handle not found error
       if (error.notFound || (error.message && error.message.includes('NotFound'))) {
@@ -124,26 +131,18 @@ export class Repository<S extends EntitySchema> {
   }
 
   /**
-   * Method to retrieve data by partial key with a filter
-   * @param pathOfKey Values for generating the partial key (object or string)
-   * @param filter Optional filter function for data
-   * @returns Promise<S['data'][]>
+   * Method to retrieve data by partial key
+   * @returns Promise<SimpleModel[]>
    */
-  public async getByPartialKey(
-    pathOfKey: Record<string, string> | string,
-    filter?: (data: S['data']) => boolean
-  ): Promise<S['data'][]> {
-    const results: S['data'][] = [];
-
+  public async getByPartial(prefix?: string, suffix?: string): Promise<SimpleModel<S['data']>[]> {
+    const results: SimpleModel<S['data']>[] = [];
     let iterator: any;
 
     try {
-      // Generate the prefix key using the schema
-      const prefixKey = this.schema.generatePrefix(
-        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
-      );
+      // Determine the prefix key
+      const prefixKey = prefix ? this.schema.generatePrefixFromString(prefix) : this.schema.prefix;
 
-      // Create iterator
+      // Create iterator starting from prefixKey
       iterator = this.connection.iterator({
         gte: prefixKey,
         lte: `${prefixKey}\xFF`,
@@ -151,7 +150,6 @@ export class Repository<S extends EntitySchema> {
         valueAsBuffer: false,
       });
 
-      // Wrap iterator.next in a promise that returns both key and value
       const nextAsync = (): Promise<[string | undefined, string | undefined]> => {
         return new Promise((resolve, reject) => {
           iterator.next((err: any, key: string, value: string) => {
@@ -170,19 +168,30 @@ export class Repository<S extends EntitySchema> {
           break;
         }
 
-        // Ensure value is a string before deserialization
-        let valueStr: string;
-        if (Buffer.isBuffer(value)) {
-          valueStr = value.toString('utf-8');
-        } else if (typeof value === 'string') {
-          valueStr = value;
-        } else {
-          throw new Error(`Unexpected value type for key ${key}: ${typeof value}`);
+        let matches = true;
+
+        if (suffix) {
+          // Use the schema method to check if the key matches the suffix
+          matches = this.schema.matchesSuffix(key, suffix);
         }
 
-        const data = this.deserialize(valueStr);
-        if (!filter || filter(data)) {
-          results.push(data);
+        if (matches) {
+          // Ensure value is a string before deserialization
+          let valueStr: string;
+          if (Buffer.isBuffer(value)) {
+            valueStr = value.toString('utf-8');
+          } else if (typeof value === 'string') {
+            valueStr = value;
+          } else {
+            throw new Error(`Unexpected value type for key ${key}: ${typeof value}`);
+          }
+
+          const data = this.deserialize(valueStr);
+
+          // Parse the key to get dynamic path values
+          const keyParts = this.schema.parseKey(key);
+
+          results.push({ key: keyParts, data });
         }
       }
 
@@ -196,7 +205,7 @@ export class Repository<S extends EntitySchema> {
         try {
           await endAsync();
         } catch (err: any) {
-          throw new Error(`Error closing iterator in getByPartialKey: ${err}`);
+          throw new Error(`Error closing iterator in getByPartial: ${err}`);
         }
       }
     }
@@ -204,19 +213,16 @@ export class Repository<S extends EntitySchema> {
 
   /**
    * Method to delete data by partial key
-   * @param pathOfKey Values for generating the prefix key (object or string)
    * @returns Promise<void>
    */
-  public async deleteByPartialKey(pathOfKey: Record<string, string> | string): Promise<void> {
+  public async deleteByPartial(prefix?: string, suffix?: string): Promise<void> {
     let iterator: any;
 
     try {
-      // Generate the prefix key using the schema
-      const prefixKey = this.schema.generatePrefix(
-        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
-      );
+      // Determine the prefix key
+      const prefixKey = prefix ? this.schema.generatePrefixFromString(prefix) : this.schema.prefix;
 
-      // Create iterator
+      // Create iterator starting from prefixKey
       iterator = this.connection.iterator({
         gte: prefixKey,
         lte: `${prefixKey}\xFF`,
@@ -224,7 +230,6 @@ export class Repository<S extends EntitySchema> {
         valueAsBuffer: false,
       });
 
-      // Wrap iterator.next in a promise that returns key
       const nextAsync = (): Promise<string | undefined> => {
         return new Promise((resolve, reject) => {
           iterator.next((err: any, key: string) => {
@@ -243,14 +248,23 @@ export class Repository<S extends EntitySchema> {
           break;
         }
 
-        if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
-          // Add operation to the transaction
-          this.transactionsRunner.addOperation({ type: 'del', key });
-        } else {
-          // Promisify the del method
-          const delAsync = promisify(this.connection.del).bind(this.connection);
-          // Delete the record immediately
-          await delAsync(key);
+        let matches = true;
+
+        if (suffix) {
+          // Use the schema method to check if the key matches the suffix
+          matches = this.schema.matchesSuffix(key, suffix);
+        }
+
+        if (matches) {
+          const operation: AbstractBatch = { type: 'del', key };
+
+          if (this.transactionsRunner && this.transactionsRunner.isTransactionActive()) {
+            // Add operation to the transaction
+            this.transactionsRunner.addOperation(operation);
+          } else {
+            const delAsync = promisify(this.connection.del).bind(this.connection);
+            await delAsync(key);
+          }
         }
       }
     } catch (error) {
@@ -262,7 +276,7 @@ export class Repository<S extends EntitySchema> {
         try {
           await endAsync();
         } catch (err: any) {
-          throw new Error(`Error closing iterator in deleteByPartialKey: ${err}`);
+          throw new Error(`Error closing iterator in deleteByPartial: ${err}`);
         }
       }
     }
@@ -270,20 +284,17 @@ export class Repository<S extends EntitySchema> {
 
   /**
    * Method to count the number of records by partial key
-   * @param pathOfKey Values for generating the prefix key (object or string)
    * @returns Promise<number>
    */
-  public async countByPartialKey(pathOfKey: Record<string, string> | string): Promise<number> {
+  public async countByPartial(prefix?: string, suffix?: string): Promise<number> {
     let count = 0;
     let iterator: any;
 
     try {
-      // Generate the prefix key using the schema
-      const prefixKey = this.schema.generatePrefix(
-        typeof pathOfKey === 'string' ? this.schema.parseKey(pathOfKey) : pathOfKey
-      );
+      // Determine the prefix key
+      const prefixKey = prefix ? this.schema.generatePrefixFromString(prefix) : this.schema.prefix;
 
-      // Create iterator
+      // Create iterator starting from prefixKey
       iterator = this.connection.iterator({
         gte: prefixKey,
         lte: `${prefixKey}\xFF`,
@@ -291,7 +302,6 @@ export class Repository<S extends EntitySchema> {
         valueAsBuffer: false,
       });
 
-      // Wrap iterator.next in a promise that returns key
       const nextAsync = (): Promise<string | undefined> => {
         return new Promise((resolve, reject) => {
           iterator.next((err: any, key: string) => {
@@ -310,7 +320,16 @@ export class Repository<S extends EntitySchema> {
           break;
         }
 
-        count += 1;
+        let matches = true;
+
+        if (suffix) {
+          // Use the schema method to check if the key matches the suffix
+          matches = this.schema.matchesSuffix(key, suffix);
+        }
+
+        if (matches) {
+          count += 1;
+        }
       }
 
       return count;
@@ -323,7 +342,7 @@ export class Repository<S extends EntitySchema> {
         try {
           await endAsync();
         } catch (err: any) {
-          throw new Error(`Error closing iterator in countByPartialKey: ${err}`);
+          throw new Error(`Error closing iterator in countByPartial: ${err}`);
         }
       }
     }
