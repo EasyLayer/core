@@ -56,22 +56,11 @@ class ConnectionManagerMock implements Partial<ConnectionManager> {
 }
 
 class EntitySchemaMock implements Partial<EntitySchema> {
-  generateKey = jest.fn((key: Record<string, string> | string) => {
-    if (typeof key === 'string') {
-      return key;
-    }
-    return Object.values(key).join(':');
-  });
-
-  generatePrefix = jest.fn((paths?: Record<string, string>) => {
-    return paths ? Object.values(paths).join(':') : 'mocked:prefix';
-  });
-
-  parseKey = jest.fn((key: string) => {
-    const parts = key.split(':');
-    // Assuming the first element is a prefix, skip it
-    return { id: parts[1] };
-  });
+  generateKey = jest.fn();
+  generatePrefix = jest.fn();
+  parseKey = jest.fn();
+  generatePrefixFromString = jest.fn();
+  matchesSuffix = jest.fn();
 }
 
 class TransactionsRunnerMock implements Partial<TransactionsRunner> {
@@ -164,15 +153,18 @@ describe('Repository', () => {
       const generatedKey = '123';
       const serializedData = '{"name":"Test"}';
       const deserializedData = { name: 'Test' };
+      const parsedKey = { id: '123' };
 
       entitySchema.generateKey.mockReturnValue(generatedKey);
+      entitySchema.parseKey.mockReturnValue(parsedKey);
       jest.spyOn(repository as any, 'deserialize').mockReturnValue(deserializedData);
 
-      await expect(repository.get(paths)).resolves.toEqual(deserializedData);
+      await expect(repository.get(paths)).resolves.toEqual({ key: parsedKey, data: deserializedData });
 
       expect(entitySchema.generateKey).toHaveBeenCalledWith(paths);
       expect(db.get).toHaveBeenCalledWith(generatedKey, expect.any(Function) as unknown as CallbackWithErrorAndData);
       expect(repository['deserialize']).toHaveBeenCalledWith(serializedData);
+      expect(entitySchema.parseKey).toHaveBeenCalledWith(generatedKey);
     });
 
     it('should return null if not found', async () => {
@@ -238,8 +230,10 @@ describe('Repository', () => {
     it('should return true if data exists', async () => {
       const paths = { id: '123' };
       const generatedKey = '123';
+      const parsedKey = { id: '123' };
 
       entitySchema.generateKey.mockReturnValue(generatedKey);
+      entitySchema.parseKey.mockReturnValue(parsedKey);
       db.get.mockImplementationOnce((key: string, callback: CallbackWithErrorAndData) => {
         setImmediate(() => callback(null, '{"name":"Test"}'));
       });
@@ -268,111 +262,152 @@ describe('Repository', () => {
     });
   });
 
-  describe('getByPartialKey', () => {
-    it('should iterate over keys, deserialize data and apply filter', async () => {
-      const prefixPaths = { service: 'auth' };
-      const filter = jest.fn((data: any) => data.active);
-      const generatedPrefix = 'auth';
-      const key1 = 'auth:1';
+  describe('getByPartial', () => {
+    it('should retrieve data when only prefix is provided', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1';
       const value1 = '{"active":true}';
-      const key2 = 'auth:2';
+      const key2 = 'prefix:user:2';
       const value2 = '{"active":false}';
+      const parsedKey1 = { id: '1' };
+      const parsedKey2 = { id: '2' };
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+      entitySchema.parseKey.mockImplementationOnce(() => parsedKey1).mockImplementationOnce(() => parsedKey2);
 
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key1, value1));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key2, value2));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, undefined, undefined));
-          }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1, value1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2, value2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
       jest.spyOn(repository as any, 'deserialize').mockImplementation((value: any) => JSON.parse(value));
 
-      const result = await repository.getByPartialKey(prefixPaths, filter);
+      const result = await repository.getByPartial(prefix);
 
-      expect(entitySchema.generatePrefix).toHaveBeenCalledWith(prefixPaths);
+      expect(entitySchema.generatePrefixFromString).toHaveBeenCalledWith(prefix);
       expect(db.iterator).toHaveBeenCalledWith({
         gte: generatedPrefix,
         lte: `${generatedPrefix}\xFF`,
         keyAsBuffer: false,
         valueAsBuffer: false,
       });
+
       expect(mockedIterator.next).toHaveBeenCalledTimes(3);
       expect(mockedIterator.end).toHaveBeenCalled();
       expect(repository['deserialize']).toHaveBeenCalledWith(value1);
       expect(repository['deserialize']).toHaveBeenCalledWith(value2);
-      expect(filter).toHaveBeenCalledWith({ active: true });
-      expect(filter).toHaveBeenCalledWith({ active: false });
-      expect(result).toEqual([{ active: true }]);
+
+      expect(entitySchema.parseKey).toHaveBeenCalledWith(key1);
+      expect(entitySchema.parseKey).toHaveBeenCalledWith(key2);
+
+      expect(result).toEqual([
+        { key: parsedKey1, data: { active: true } },
+        { key: parsedKey2, data: { active: false } },
+      ]);
     });
 
-    it('should close iterator and throw error if next fails', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
+    it('should retrieve data when both prefix and suffix are provided', async () => {
+      const prefix = 'user';
+      const suffix = 'active';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1:active';
+      const value1 = '{"name":"Alice"}';
+      const key2 = 'prefix:user:2:inactive';
+      const value2 = '{"name":"Bob"}';
+      const parsedKey1 = { id: '1', status: 'active' };
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+      entitySchema.matchesSuffix.mockImplementation((key: string, suff: string) => {
+        const separator = ':';
+        return key.endsWith(separator + suff);
+      });
+      entitySchema.parseKey.mockReturnValue(parsedKey1);
 
       const mockedIterator = {
-        next: jest.fn((cb: IteratorCallback) => {
-          setImmediate(() => cb(new Error('Iterator error'), undefined, undefined));
-        }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+        next: jest
+          .fn()
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1, value1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2, value2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+      jest.spyOn(repository as any, 'deserialize').mockImplementation((value: any) => JSON.parse(value));
+
+      const result = await repository.getByPartial(prefix, suffix);
+
+      expect(entitySchema.generatePrefixFromString).toHaveBeenCalledWith(prefix);
+      expect(db.iterator).toHaveBeenCalledWith({
+        gte: generatedPrefix,
+        lte: `${generatedPrefix}\xFF`,
+        keyAsBuffer: false,
+        valueAsBuffer: false,
+      });
+
+      expect(mockedIterator.next).toHaveBeenCalledTimes(3);
+      expect(mockedIterator.end).toHaveBeenCalled();
+
+      expect(entitySchema.matchesSuffix).toHaveBeenCalledWith(key1, suffix);
+      expect(entitySchema.matchesSuffix).toHaveBeenCalledWith(key2, suffix);
+
+      expect(repository['deserialize']).toHaveBeenCalledWith(value1);
+      expect(repository['deserialize']).toHaveBeenCalledTimes(1);
+
+      expect(entitySchema.parseKey).toHaveBeenCalledWith(key1);
+
+      expect(result).toEqual([{ key: parsedKey1, data: { name: 'Alice' } }]);
+    });
+
+    it('should handle errors and close iterator', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
+
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+
+      const mockedIterator = {
+        next: jest.fn((cb: any) => setImmediate(() => cb(new Error('Iterator error'), undefined, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
 
-      await expect(repository.getByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+      await expect(repository.getByPartial(prefix)).rejects.toThrow('Iterator error');
 
       expect(mockedIterator.end).toHaveBeenCalled();
     });
   });
 
-  describe('deleteByPartialKey', () => {
-    it('should iterate over keys and delete them', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
-      const key1 = 'auth:1';
-      const key2 = 'auth:2';
+  describe('deleteByPartial', () => {
+    it('should delete records when only prefix is provided', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1';
+      const key2 = 'prefix:user:2';
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
 
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key1));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key2));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, undefined));
-          }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
-      transactionsRunner.deactivateTransaction();
+      transactionsRunner.isTransactionActive.mockReturnValue(false);
 
-      await repository.deleteByPartialKey(prefixPaths);
+      await repository.deleteByPartial(prefix);
 
-      expect(entitySchema.generatePrefix).toHaveBeenCalledWith(prefixPaths);
+      expect(entitySchema.generatePrefixFromString).toHaveBeenCalledWith(prefix);
       expect(db.iterator).toHaveBeenCalledWith({
         gte: generatedPrefix,
         lte: `${generatedPrefix}\xFF`,
@@ -383,132 +418,172 @@ describe('Repository', () => {
       expect(db.del).toHaveBeenCalledTimes(2);
       expect(db.del).toHaveBeenNthCalledWith(1, key1, expect.any(Function));
       expect(db.del).toHaveBeenNthCalledWith(2, key2, expect.any(Function));
-
       expect(mockedIterator.end).toHaveBeenCalled();
     });
 
-    it('should add delete operations to transaction if active', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
-      const key1 = 'auth:1';
-      const key2 = 'auth:2';
+    it('should delete records when both prefix and suffix are provided', async () => {
+      const prefix = 'user';
+      const suffix = 'active';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1:active';
+      const key2 = 'prefix:user:2:inactive';
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+      entitySchema.matchesSuffix.mockImplementation((key: string, suff: string) => {
+        const separator = ':';
+        return key.endsWith(separator + suff);
+      });
 
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key1));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key2));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, undefined));
-          }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
-      transactionsRunner.activateTransaction();
+      transactionsRunner.isTransactionActive.mockReturnValue(false);
 
-      await repository.deleteByPartialKey(prefixPaths);
+      await repository.deleteByPartial(prefix, suffix);
 
-      const expectedOperation1: AbstractBatch = { type: 'del', key: key1 };
-      const expectedOperation2: AbstractBatch = { type: 'del', key: key2 };
+      expect(db.del).toHaveBeenCalledTimes(1);
+      expect(db.del).toHaveBeenCalledWith(key1, expect.any(Function));
+      expect(mockedIterator.end).toHaveBeenCalled();
+    });
 
-      expect(transactionsRunner.addOperation).toHaveBeenCalledWith(expectedOperation1);
-      expect(transactionsRunner.addOperation).toHaveBeenCalledWith(expectedOperation2);
+    it('should add delete operations to transaction if active', async () => {
+      const prefix = 'user';
+      const suffix = 'active';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1:active';
+      const key2 = 'prefix:user:2:inactive';
+
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+      entitySchema.matchesSuffix.mockImplementation((key: string, suff: string) => {
+        const separator = ':';
+        return key.endsWith(separator + suff);
+      });
+      transactionsRunner.isTransactionActive.mockReturnValue(true);
+
+      const mockedIterator = {
+        next: jest
+          .fn()
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+
+      await repository.deleteByPartial(prefix, suffix);
+
+      const expectedOperation: AbstractBatch = { type: 'del', key: key1 };
+
+      expect(transactionsRunner.addOperation).toHaveBeenCalledWith(expectedOperation);
       expect(db.del).not.toHaveBeenCalled();
       expect(mockedIterator.end).toHaveBeenCalled();
     });
 
-    it('should close iterator and throw error if next fails', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
+    it('should handle errors and close iterator', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
 
       const mockedIterator = {
-        next: jest.fn((cb: IteratorCallback) => {
-          setImmediate(() => cb(new Error('Iterator error'), undefined));
-        }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+        next: jest.fn((cb: any) => setImmediate(() => cb(new Error('Iterator error'), undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
 
-      await expect(repository.deleteByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+      await expect(repository.deleteByPartial(prefix)).rejects.toThrow('Iterator error');
 
       expect(mockedIterator.end).toHaveBeenCalled();
     });
   });
 
-  describe('countByPartialKey', () => {
-    it('should iterate over keys and count them', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
-      const key1 = 'auth:1';
-      const key2 = 'auth:2';
+  describe('countByPartial', () => {
+    it('should count records when only prefix is provided', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1';
+      const key2 = 'prefix:user:2';
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
 
       const mockedIterator = {
         next: jest
           .fn()
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key1));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, key2));
-          })
-          .mockImplementationOnce((cb: IteratorCallback) => {
-            setImmediate(() => cb(null, undefined));
-          }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
 
-      const count = await repository.countByPartialKey(prefixPaths);
+      const count = await repository.countByPartial(prefix);
 
-      expect(entitySchema.generatePrefix).toHaveBeenCalledWith(prefixPaths);
+      expect(entitySchema.generatePrefixFromString).toHaveBeenCalledWith(prefix);
       expect(db.iterator).toHaveBeenCalledWith({
         gte: generatedPrefix,
         lte: `${generatedPrefix}\xFF`,
         keyAsBuffer: false,
         valueAsBuffer: false,
       });
-      expect(mockedIterator.next).toHaveBeenCalledTimes(3);
+
       expect(count).toBe(2);
       expect(mockedIterator.end).toHaveBeenCalled();
     });
 
-    it('should close iterator and throw error if next fails', async () => {
-      const prefixPaths = { service: 'auth' };
-      const generatedPrefix = 'auth';
+    it('should count records when both prefix and suffix are provided', async () => {
+      const prefix = 'user';
+      const suffix = 'active';
+      const generatedPrefix = 'prefix:user';
+      const key1 = 'prefix:user:1:active';
+      const key2 = 'prefix:user:2:inactive';
 
-      entitySchema.generatePrefix.mockReturnValue(generatedPrefix);
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+      entitySchema.matchesSuffix.mockImplementation((key: string, suff: string) => {
+        const separator = ':';
+        return key.endsWith(separator + suff);
+      });
 
       const mockedIterator = {
-        next: jest.fn((cb: IteratorCallback) => {
-          setImmediate(() => cb(new Error('Iterator error'), undefined));
-        }),
-        end: jest.fn((cb: CallbackWithError) => {
-          setImmediate(() => cb(null));
-        }),
+        next: jest
+          .fn()
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key1)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, key2)))
+          .mockImplementationOnce((cb: any) => setImmediate(() => cb(null, undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
       };
 
       db.iterator.mockReturnValue(mockedIterator);
 
-      await expect(repository.countByPartialKey(prefixPaths)).rejects.toThrow('Iterator error');
+      const count = await repository.countByPartial(prefix, suffix);
+
+      expect(count).toBe(1);
+      expect(mockedIterator.end).toHaveBeenCalled();
+    });
+
+    it('should handle errors and close iterator', async () => {
+      const prefix = 'user';
+      const generatedPrefix = 'prefix:user';
+
+      entitySchema.generatePrefixFromString.mockReturnValue(generatedPrefix);
+
+      const mockedIterator = {
+        next: jest.fn((cb: any) => setImmediate(() => cb(new Error('Iterator error'), undefined))),
+        end: jest.fn((cb: any) => setImmediate(() => cb(null))),
+      };
+
+      db.iterator.mockReturnValue(mockedIterator);
+
+      await expect(repository.countByPartial(prefix)).rejects.toThrow('Iterator error');
 
       expect(mockedIterator.end).toHaveBeenCalled();
     });

@@ -207,4 +207,25 @@ export class EntitySchema {
 
     return parsedPaths;
   }
+
+  public generatePrefixFromString(prefix: string): string {
+    // Check if the prefix already starts with the schema's prefix
+    if (prefix.startsWith(this.prefix + this.separator)) {
+      return prefix;
+    } else {
+      return [this.prefix, prefix].join(this.separator);
+    }
+  }
+
+  /**
+   * Checks if the key ends with the given suffix by comparing the last segment.
+   * @param key The full key string.
+   * @param suffix The suffix to match.
+   * @returns True if the last segment of the key matches the suffix.
+   */
+  public matchesSuffix(key: string, suffix: string): boolean {
+    const keyParts = key.split(this.separator);
+    const lastPart = keyParts[keyParts.length - 1];
+    return lastPart === suffix;
+  }
 }
