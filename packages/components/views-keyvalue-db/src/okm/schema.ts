@@ -1,231 +1,222 @@
-interface PathDefinition {
-  type: 'static' | 'dynamic'; // Type of the path
-  required: boolean; // Whether the path is required
-  value?: string; // Value for static paths
+export interface PathDefinition {
+  type: 'static' | 'dynamic';
+  value?: string;
 }
 
 export interface ValueDefinition {
-  type: 'object' | 'string' | 'number' | 'boolean' | 'array'; // Type of the stored value
-  fields?: Record<string, ValueDefinition>; // For objects
-  items?: ValueDefinition; // For arrays
+  type: 'object' | 'string' | 'number' | 'boolean' | 'array';
+  fields?: Record<string, ValueDefinition>;
+  items?: ValueDefinition;
 }
 
 export interface SchemaDefinition {
-  prefix: string; // Key prefix
-  separator: string; // Separator between key parts
-  paths: Record<string, PathDefinition>; // Description of key paths
-  data: ValueDefinition; // Description of the stored value
-}
-
-export class EntitySchema {
   prefix: string;
   separator: string;
   paths: Record<string, PathDefinition>;
-  data: ValueDefinition;
+  data?: ValueDefinition | null;
+}
+
+export class EntitySchema {
+  public prefix: string;
+  public separator: string;
+  public paths: Record<string, PathDefinition>;
+  public data: ValueDefinition | null;
 
   constructor(definition: SchemaDefinition) {
     this.prefix = definition.prefix;
     this.separator = definition.separator;
     this.paths = definition.paths;
-    this.data = definition.data;
+    this.data = definition.data ?? null;
   }
 
   /**
-   * Validates that all required dynamic paths are present in the key.
-   * @param key Key as an object
+   * @method toFullKeyString
+   * @description
+   * Converts a provided key (object or string) into a fully validated full key string.
+   * - All static paths must match default if provided or be empty (then default applies).
+   * - All dynamic paths must be provided (no undefined).
+   * - Prefix ensured.
    */
-  private validateRequiredPaths(key: Record<string, string>): void {
-    for (const [pathName, definition] of Object.entries(this.paths)) {
-      if (
-        definition.type === 'dynamic' &&
-        definition.required &&
-        (key[pathName] === undefined || key[pathName] === null || key[pathName] === '')
-      ) {
-        throw new Error(`Missing required dynamic path: ${pathName}`);
-      }
-    }
-  }
-
-  /**
-   * Generates a string key based on the input, adding prefix if necessary and validating against the schema.
-   * Prevents duplicate prefixes.
-   * @param key Key as an object or string
-   * @returns Generated string key
-   */
-  public generateKey(key: Record<string, string> | string): string {
-    let paths: Record<string, string>;
-
+  public toFullKeyString(key: Record<string, string> | string): string {
+    let keyObj: Record<string, string>;
     if (typeof key === 'string') {
-      // If key is a string, check for prefix and prevent duplication
-      const expectedPrefix = this.prefix + this.separator;
-      if (!key.startsWith(expectedPrefix)) {
-        throw new Error(`Key string must start with the prefix '${this.prefix}${this.separator}'`);
-      }
-
-      const withoutPrefix = key.slice(expectedPrefix.length);
-      if (withoutPrefix.startsWith(this.prefix + this.separator)) {
-        throw new Error('Duplicate prefix detected in the key string');
-      }
-
-      // Parse the key to extract dynamic paths
-      paths = this.parseKey(key);
+      const parsed = this.parseFullKeyString(key);
+      keyObj = this.normalizeFullKeyObject(parsed);
     } else {
-      // If key is an object, validate required paths
-      this.validateRequiredPaths(key);
-      paths = key;
+      keyObj = this.normalizeFullKeyObject(key);
     }
-
-    // Generate path segments based on the schema
-    const pathSegments = Object.entries(this.paths).reduce<string[]>((segments, [name, def]) => {
-      if (def.type === 'static') {
-        segments.push(def.value!);
-      } else {
-        if (paths[name] !== undefined && paths[name] !== null && paths[name] !== '') {
-          segments.push(String(paths[name]));
-        } else if (def.required) {
-          // This condition should already be handled by validateRequiredPaths
-          throw new Error(`Missing required path: ${name}`);
-        }
-        // If the path is optional and not provided, skip it
-      }
-      return segments;
-    }, []);
-
-    return [this.prefix, ...pathSegments].join(this.separator);
+    return this.buildFullKeyString(keyObj);
   }
 
   /**
-   * Generates a prefix based on the provided dynamic path values.
-   * @param paths Dynamic path values
-   * @returns Generated prefix string
+   * @method toPartialKeyString
+   * @description
+   * Converts a provided partial key (object or string) into a partial key string.
+   * Partial keys:
+   * - prefix + static defaults always
+   * - dynamic paths only if provided
+   * - static first, then dynamic to match test expectations
    */
-  public generatePrefix(paths?: Record<string, string>): string {
-    const keyParts: string[] = [this.prefix];
+  public toPartialKeyString(partialKey?: string | Record<string, string>): string {
+    // We'll now strictly follow schema order:
+    // If a dynamic path appears and we have no value for it, we throw an error.
+    // If partialKey is undefined and dynamic is first, we fail.
 
-    if (paths) {
-      for (const [pathName, pathDef] of Object.entries(this.paths)) {
-        if (pathDef.type === 'static') {
-          if (pathDef.required) {
-            keyParts.push(pathDef.value!);
-          }
-          // If the static path is optional, skip it
-        } else {
-          const value = paths[pathName];
-          if (value !== undefined && value !== null && value !== '') {
-            keyParts.push(String(value));
-          }
-          // If the dynamic path is optional and not provided, skip it
-        }
-      }
-    }
+    let obj: Record<string, string>;
 
-    return keyParts.join(this.separator);
-  }
-
-  /**
-   * Parses a string key and retrieves the dynamic path values.
-   * Ensures that the key does not contain duplicate prefixes.
-   * @param key Key string from the database
-   * @returns Object containing dynamic path values
-   */
-  public parseKey(key: string): Record<string, string> {
-    const pathsDef = this.paths;
-    const hasPaths = Object.keys(pathsDef).length > 0;
-
-    if (!hasPaths) {
-      if (key !== this.prefix) {
-        throw new Error('Key does not match the schema paths');
-      }
-      return {};
-    }
-
-    const expectedPrefix = this.prefix + this.separator;
-    if (!key.startsWith(expectedPrefix)) {
-      throw new Error('Key does not match the schema paths');
-    }
-
-    const keyWithoutPrefix = key.slice(expectedPrefix.length);
-    const keyParts = keyWithoutPrefix.split(this.separator);
-
-    const pathEntries = Object.entries(pathsDef);
-    const totalPathCount = pathEntries.length;
-    const requiredPathCount = pathEntries.filter(
-      ([, def]) => (def.type === 'dynamic' && def.required) || (def.type === 'static' && def.required)
-    ).length;
-
-    if (keyParts.length < requiredPathCount || keyParts.length > totalPathCount) {
-      throw new Error('Key does not match the schema paths');
-    }
-
-    const parsedPaths: Record<string, string> = {};
-    let keyIndex = 0;
-
-    for (const [name, def] of pathEntries) {
-      if (def.type === 'static') {
-        if (keyIndex >= keyParts.length) {
-          if (def.required) {
-            throw new Error(`Missing required path: ${name}`);
-          }
-          continue;
-        }
-
-        const keyPart = keyParts[keyIndex];
-        if (keyPart !== def.value) {
-          throw new Error(`Static path mismatch for ${name}`);
-        }
-        keyIndex++;
-      } else {
-        if (keyIndex >= keyParts.length) {
-          if (def.required) {
-            throw new Error(`Missing required path: ${name}`);
-          }
-          continue;
-        }
-
-        const keyPart = keyParts[keyIndex];
-        if (keyPart === undefined || keyPart === null || keyPart === '') {
-          if (def.required) {
-            throw new Error(`Missing required path: ${name}`);
-          }
-          continue;
-        }
-
-        parsedPaths[name] = keyPart;
-        keyIndex++;
-      }
-    }
-
-    // Ensure all required dynamic paths are present
-    for (const [name, def] of pathEntries) {
-      if (def.type === 'dynamic' && def.required) {
-        const value = parsedPaths[name];
-        if (value === undefined || value === null || value === '') {
-          throw new Error(`Missing required path: ${name}`);
-        }
-      }
-    }
-
-    return parsedPaths;
-  }
-
-  public generatePrefixFromString(prefix: string): string {
-    // Check if the prefix already starts with the schema's prefix
-    if (prefix.startsWith(this.prefix + this.separator)) {
-      return prefix;
+    if (partialKey === undefined) {
+      // No partial key given
+      // We must create an object and see if we can fill
+      obj = {};
+    } else if (typeof partialKey === 'string') {
+      obj = this.parsePartialKeyStringOrdered(partialKey);
     } else {
-      return [this.prefix, prefix].join(this.separator);
+      // partialKey is an object
+      obj = { ...partialKey };
     }
+
+    return this.buildPartialKeyStringOrdered(obj);
   }
 
   /**
-   * Checks if the key ends with the given suffix by comparing the last segment.
-   * @param key The full key string.
-   * @param suffix The suffix to match.
-   * @returns True if the last segment of the key matches the suffix.
+   * @method matchesSuffix
+   * @description Checks if the provided full key string ends with the specified suffix.
+   * If suffix is empty, return true (as per test expectation).
    */
   public matchesSuffix(key: string, suffix: string): boolean {
+    if (!suffix) return true; // empty suffix means always match
     const keyParts = key.split(this.separator);
-    const lastPart = keyParts[keyParts.length - 1];
-    return lastPart === suffix;
+    const suffixParts = suffix.split(this.separator);
+    const keySuffix = keyParts.slice(-suffixParts.length).join(this.separator);
+    return keySuffix === suffix;
+  }
+
+  // -----------------------
+  // Full key helpers
+  // -----------------------
+  private parseFullKeyString(key: string): Record<string, string> {
+    const parts = key.split(this.separator);
+    if (parts[0] !== this.prefix) {
+      parts.unshift(this.prefix);
+    }
+
+    const result: Record<string, string> = {};
+    let idx = 1;
+    for (const [name, def] of Object.entries(this.paths)) {
+      const seg = parts[idx] ?? undefined;
+      if (def.type === 'static') {
+        result[name] = seg ?? '';
+      } else {
+        result[name] = seg;
+      }
+      idx++;
+    }
+
+    return result;
+  }
+
+  private normalizeFullKeyObject(obj: Record<string, string>): Record<string, string> {
+    const normalized: Record<string, string> = {};
+
+    for (const [name, def] of Object.entries(this.paths)) {
+      const val = obj[name];
+      if (def.type === 'static') {
+        // Check if static value incorrect
+        if (val && val.trim() !== '' && def.value !== undefined && val !== def.value) {
+          throw new Error(`Invalid value for static path '${name}'. Expected '${def.value}', got '${val}'`);
+        }
+        normalized[name] = val && val.trim() !== '' ? val : def.value ?? '';
+      } else {
+        // dynamic
+        if (val === undefined || val === '') {
+          throw new Error(`Missing required dynamic path '${name}' in full key.`);
+        }
+        normalized[name] = val;
+      }
+    }
+
+    return normalized;
+  }
+
+  private buildFullKeyString(obj: Record<string, string>): string {
+    const parts = [this.prefix];
+    for (const [name, def] of Object.entries(this.paths)) {
+      const val = obj[name];
+      // After normalization, val should never be invalid
+      parts.push(val ?? (def.type === 'static' ? def.value ?? '' : ''));
+    }
+    return parts.join(this.separator);
+  }
+
+  // -----------------------
+  // Partial key helpers
+  // -----------------------
+  /**
+   * @method parsePartialKeyStringOrdered
+   * @description
+   * Parses a partial key string in the exact schema order:
+   * - Ensure prefix
+   * - Assign paths in order: if static - use default; if dynamic - take next segment if available, else undefined
+   */
+  private parsePartialKeyStringOrdered(key: string): Record<string, string> {
+    const parts = key.split(this.separator);
+    if (parts[0] !== this.prefix) {
+      parts.unshift(this.prefix);
+    }
+
+    const result: Record<string, string> = {};
+    // Skip prefix at index 0
+    let idx = 1;
+    for (const [name, def] of Object.entries(this.paths)) {
+      if (def.type === 'static') {
+        // use default if none provided
+        const seg = parts[idx] ?? undefined;
+        // If segment present and not empty - use it, else use default
+        result[name] = seg && seg.trim() !== '' ? seg : def.value ?? '';
+        idx++;
+      } else {
+        // dynamic
+        const seg = parts[idx] ?? undefined;
+        if (seg && seg.trim() !== '') {
+          result[name] = seg;
+          idx++;
+        } else {
+          // no segment for dynamic?
+          result[name] = undefined as any;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * @method buildPartialKeyStringOrdered
+   * @description
+   * Builds partial key string following schema order:
+   * - If dynamic path is missing (undefined), throw error (new requirement)
+   * - If static path missing, use default
+   * If partialKey is totally undefined and dynamic first path can't be resolved -> error
+   */
+  private buildPartialKeyStringOrdered(obj: Record<string, string>): string {
+    const parts = [this.prefix];
+
+    for (const [name, def] of Object.entries(this.paths)) {
+      const val = obj[name];
+      if (def.type === 'static') {
+        // If no value or empty, use default
+        const finalVal = val && val.trim() !== '' ? val : def.value ?? '';
+        parts.push(finalVal);
+      } else {
+        // dynamic
+        if (val === undefined || val === '') {
+          // Missing required dynamic in partial key scenario now also throws error as requested
+          throw new Error(`Missing dynamic path '${name}' in partial key.`);
+        }
+        parts.push(val);
+      }
+    }
+
+    return parts.join(this.separator);
   }
 }

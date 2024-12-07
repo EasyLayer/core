@@ -26,10 +26,26 @@ export class SchemasManager {
     return this._schemas.get(prefix);
   }
 
-  getRepository<T extends EntitySchema>(prefix: string, transactionsRunner?: TransactionsRunner): Repository<T> {
+  /**
+   * Type guard to check if a schema is of type T.
+   * @param schema The schema to check.
+   */
+  private isSchemaOfType<T extends EntitySchema>(schema: EntitySchema, type: new () => T): schema is T {
+    return schema instanceof type;
+  }
+
+  getRepository<T extends EntitySchema>(
+    prefix: string,
+    type: new () => T,
+    transactionsRunner?: TransactionsRunner
+  ): Repository<T> {
     const schema = this.getSchemaByPrefix(prefix);
     if (!schema) {
       throw new Error(`Schema with prefix ${prefix} not found`);
+    }
+
+    if (!this.isSchemaOfType(schema, type)) {
+      throw new Error(`Schema with prefix ${prefix} is not of the expected type`);
     }
 
     return new Repository<T>(this.connectionManager, schema, transactionsRunner);
