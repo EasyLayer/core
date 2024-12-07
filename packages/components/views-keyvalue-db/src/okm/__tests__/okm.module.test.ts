@@ -20,7 +20,7 @@ export const OutputSchema = new EntitySchema({
   prefix: 'utxo',
   separator: ':',
   paths: {
-    txid_vout: { type: 'dynamic', required: true },
+    txid_vout: { type: 'dynamic' },
   },
   data: {
     type: 'object',
@@ -31,8 +31,8 @@ export const BalanceSchema = new EntitySchema({
   prefix: 'balance',
   separator: ':',
   paths: {
-    address: { type: 'dynamic', required: true },
-    txid_vout: { type: 'dynamic', required: true },
+    address: { type: 'dynamic' },
+    txid_vout: { type: 'dynamic' },
   },
   data: {
     type: 'string',

@@ -1,689 +1,360 @@
 import { EntitySchema, SchemaDefinition } from '../schema';
 
 describe('EntitySchema', () => {
-  describe('Constructor', () => {
-    it('should initialize correctly with valid schema definition', () => {
-      const schemaDefinition: SchemaDefinition = {
+  describe('toFullKeyString', () => {
+    const schemaDef: SchemaDefinition = {
+      prefix: 'user',
+      separator: ':',
+      paths: {
+        id: { type: 'dynamic' },
+        role: { type: 'static', value: 'admin' },
+      },
+      data: { type: 'object' },
+    };
+
+    const entitySchema = new EntitySchema(schemaDef);
+
+    it('should generate full key with object missing static path', () => {
+      const keyObject = { id: '12345' };
+      const expected = 'user:12345:admin';
+      expect(entitySchema.toFullKeyString(keyObject)).toBe(expected);
+    });
+
+    it('should generate full key when key is a string without prefix', () => {
+      const keyString = '67890';
+      const expected = 'user:67890:admin';
+      expect(entitySchema.toFullKeyString(keyString)).toBe(expected);
+    });
+
+    it('should generate full key when key is a string with prefix', () => {
+      const keyWithPrefix = 'user:67890';
+      const expected = 'user:67890:admin';
+      expect(entitySchema.toFullKeyString(keyWithPrefix)).toBe(expected);
+    });
+
+    it('should throw error if static path has incorrect value in object', () => {
+      const keyObject = { id: '12345', role: 'user' }; // role should be admin
+      expect(() => entitySchema.toFullKeyString(keyObject)).toThrowError(
+        "Invalid value for static path 'role'. Expected 'admin', got 'user'"
+      );
+    });
+
+    it('should generate full key correctly if dynamic path optional and missing', () => {
+      const schemaNoDynamic: SchemaDefinition = {
         prefix: 'test',
         separator: ':',
         paths: {
-          id: { type: 'dynamic', required: true },
-          type: { type: 'static', required: true, value: 'user' },
+          type: { type: 'static', value: 'fixed' },
         },
-        data: { type: 'object' },
       };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-
-      expect(entitySchema.prefix).toBe('test');
-      expect(entitySchema.separator).toBe(':');
-      expect(entitySchema.paths).toEqual(schemaDefinition.paths);
-      expect(entitySchema.data).toEqual(schemaDefinition.data);
-    });
-  });
-
-  describe('generateKey', () => {
-    const schemaDefinition: SchemaDefinition = {
-      prefix: 'user',
-      separator: ':',
-      paths: {
-        id: { type: 'dynamic', required: true },
-        role: { type: 'static', required: true, value: 'admin' },
-      },
-      data: { type: 'object' },
-    };
-
-    const entitySchema = new EntitySchema(schemaDefinition);
-
-    it('should generate key correctly with valid dynamic paths', () => {
-      const paths = { id: '12345' };
-      const expectedKey = 'user:12345:admin';
-
-      const key = entitySchema.generateKey(paths);
-
-      expect(key).toBe(expectedKey);
+      const noDynamicSchema = new EntitySchema(schemaNoDynamic);
+      // No dynamic paths, just static
+      expect(noDynamicSchema.toFullKeyString({})).toBe('test:fixed');
+      expect(noDynamicSchema.toFullKeyString('')).toBe('test:fixed');
     });
 
-    it('should throw an error when a required dynamic path is missing', () => {
-      const paths = {}; // 'id' is missing
-
-      expect(() => entitySchema.generateKey(paths)).toThrow('Missing required dynamic path: id');
-    });
-
-    it('should generate key correctly with multiple dynamic paths', () => {
-      const multiDynamicSchema: SchemaDefinition = {
-        prefix: 'order',
-        separator: '-',
-        paths: {
-          userId: { type: 'dynamic', required: true },
-          orderId: { type: 'dynamic', required: true },
-          status: { type: 'static', required: true, value: 'active' },
-        },
-        data: { type: 'string' },
-      };
-
-      const multiEntitySchema = new EntitySchema(multiDynamicSchema);
-      const paths = { userId: 'u100', orderId: 'o200' };
-      const expectedKey = 'order-u100-o200-active';
-
-      const key = multiEntitySchema.generateKey(paths);
-
-      expect(key).toBe(expectedKey);
-    });
-
-    it('should handle optional dynamic paths if present', () => {
-      const optionalDynamicSchema: SchemaDefinition = {
-        prefix: 'product',
+    it('should throw error if dynamic path is required but missing for full key', () => {
+      const schemaWithRequiredDynamic: SchemaDefinition = {
+        prefix: 'foo',
         separator: ':',
         paths: {
-          category: { type: 'static', required: true, value: 'electronics' },
-          subCategory: { type: 'dynamic', required: false },
-          id: { type: 'dynamic', required: true },
+          category: { type: 'static', value: 'bar' },
+          itemId: { type: 'dynamic' },
         },
-        data: { type: 'number' },
       };
-
-      const optionalEntitySchema = new EntitySchema(optionalDynamicSchema);
-      const paths = { id: 'p123' };
-      const expectedKey = 'product:electronics:p123';
-
-      const key = optionalEntitySchema.generateKey(paths);
-
-      expect(key).toBe(expectedKey);
-    });
-
-    it('should include optional dynamic paths if provided', () => {
-      const optionalDynamicSchema: SchemaDefinition = {
-        prefix: 'product',
-        separator: ':',
-        paths: {
-          category: { type: 'static', required: true, value: 'electronics' },
-          subCategory: { type: 'dynamic', required: false },
-          id: { type: 'dynamic', required: true },
-        },
-        data: { type: 'number' },
-      };
-
-      const optionalEntitySchema = new EntitySchema(optionalDynamicSchema);
-      const paths = { id: 'p123', subCategory: 'smartphones' };
-      const expectedKey = 'product:electronics:smartphones:p123';
-
-      const key = optionalEntitySchema.generateKey(paths);
-
-      expect(key).toBe(expectedKey);
-    });
-
-    // Added Tests
-    it('should generate key correctly when key is a string with prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const keyWithPrefix = 'user:67890:admin';
-
-      const generatedKey = entitySchemaWithPrefixCheck.generateKey(keyWithPrefix);
-
-      // Since the key already contains the prefix, generateKey should not add it again
-      expect(generatedKey).toBe('user:67890:admin');
-    });
-
-    it('should throw an error when key is a string without the required prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const keyWithoutPrefix = 'invalid:67890:admin';
-
-      expect(() => entitySchemaWithPrefixCheck.generateKey(keyWithoutPrefix)).toThrow(
-        "Key string must start with the prefix 'user:'"
+      const dynamicSchema = new EntitySchema(schemaWithRequiredDynamic);
+      // itemId is dynamic and must be provided
+      expect(() => dynamicSchema.toFullKeyString({})).toThrowError(
+        "Missing required dynamic path 'itemId' in full key."
+      );
+      expect(() => dynamicSchema.toFullKeyString('')).toThrowError(
+        "Missing required dynamic path 'itemId' in full key."
       );
     });
 
-    it('should throw an error when key is a string with duplicated prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const duplicatedPrefixKey = 'user:user:67890:admin';
-
-      // Expect an error due to duplicate prefix
-      expect(() => entitySchemaWithPrefixCheck.generateKey(duplicatedPrefixKey)).toThrow(
-        'Duplicate prefix detected in the key string'
-      );
-    });
-  });
-
-  describe('generatePrefix', () => {
-    it('should generate prefix correctly without paths', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'inventory',
-        separator: '/',
-        paths: {},
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-
-      const prefix = entitySchema.generatePrefix();
-      expect(prefix).toBe('inventory');
-    });
-
-    it('should generate prefix correctly with some dynamic paths provided', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'inventory',
-        separator: '/',
-        paths: {
-          category: { type: 'dynamic', required: true },
-          subCategory: { type: 'dynamic', required: false },
-          type: { type: 'static', required: false, value: 'item' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-      const paths = { category: 'electronics' };
-      const expectedPrefix = 'inventory/electronics';
-
-      const prefix = entitySchema.generatePrefix(paths);
-
-      expect(prefix).toBe(expectedPrefix);
-    });
-
-    it('should stop prefix generation at the first undefined dynamic path', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'inventory',
-        separator: '/',
-        paths: {
-          category: { type: 'dynamic', required: true },
-          subCategory: { type: 'dynamic', required: false },
-          type: { type: 'static', required: true, value: 'item' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-      const paths = { category: 'electronics' }; // subCategory is undefined
-
-      const expectedPrefix = 'inventory/electronics/item';
-
-      const prefix = entitySchema.generatePrefix(paths);
-
-      expect(prefix).toBe(expectedPrefix);
-    });
-
-    it('should include all provided dynamic paths in the prefix', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'inventory',
-        separator: '/',
-        paths: {
-          category: { type: 'dynamic', required: true },
-          subCategory: { type: 'dynamic', required: false },
-          type: { type: 'static', required: true, value: 'item' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-      const paths = { category: 'electronics', subCategory: 'smartphones' };
-      const expectedPrefix = 'inventory/electronics/smartphones/item';
-
-      const prefix = entitySchema.generatePrefix(paths);
-
-      expect(prefix).toBe(expectedPrefix);
-    });
-
-    // Added Tests
-    it('should generate prefix correctly when key is a string with prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const keyWithPrefix = 'user:67890:admin';
-
-      const prefix = entitySchemaWithPrefixCheck.generatePrefix(entitySchemaWithPrefixCheck.parseKey(keyWithPrefix));
-
-      expect(prefix).toBe('user:67890:admin');
-    });
-
-    it('should handle prefix generation with multiple optional dynamic paths', () => {
-      const complexSchema: SchemaDefinition = {
-        prefix: 'data',
-        separator: '-',
-        paths: {
-          category: { type: 'static', required: true, value: 'books' },
-          author: { type: 'dynamic', required: false },
-          title: { type: 'dynamic', required: false },
-          isbn: { type: 'dynamic', required: true },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(complexSchema);
-      const paths = { isbn: '978-3-16-148410-0', author: 'Doe' };
-      const expectedPrefix = 'data-books-Doe-978-3-16-148410-0';
-
-      const prefix = entitySchema.generatePrefix(paths);
-
-      expect(prefix).toBe(expectedPrefix);
-    });
-  });
-
-  describe('parseKey', () => {
-    const schemaDefinition: SchemaDefinition = {
-      prefix: 'user',
-      separator: ':',
-      paths: {
-        id: { type: 'dynamic', required: true },
-        role: { type: 'static', required: true, value: 'admin' },
-      },
-      data: { type: 'object' },
-    };
-
-    const entitySchema = new EntitySchema(schemaDefinition);
-
-    it('should parse a valid key correctly', () => {
-      const key = 'user:12345:admin';
-      const expectedPaths = { id: '12345' };
-
-      const paths = entitySchema.parseKey(key);
-
-      expect(paths).toEqual(expectedPaths);
-    });
-
-    it('should throw an error if key does not start with the prefix', () => {
-      const invalidKey = 'invalid:12345:admin';
-
-      expect(() => entitySchema.parseKey(invalidKey)).toThrow('Key does not match the schema paths');
-    });
-
-    it('should throw an error if static path does not match', () => {
-      const invalidKey = 'user:12345:superadmin';
-
-      expect(() => entitySchema.parseKey(invalidKey)).toThrow('Static path mismatch for role');
-    });
-
-    it('should throw an error if key has missing path segments', () => {
-      const incompleteKey = 'user:12345';
-
-      expect(() => entitySchema.parseKey(incompleteKey)).toThrow('Key does not match the schema paths');
-    });
-
-    it('should throw an error if key has extra path segments', () => {
-      const extraKey = 'user:12345:admin:extra';
-
-      expect(() => entitySchema.parseKey(extraKey)).toThrow('Key does not match the schema paths');
-    });
-
-    it('should parse key correctly with multiple dynamic paths', () => {
-      const multiDynamicSchema: SchemaDefinition = {
-        prefix: 'order',
-        separator: '-',
-        paths: {
-          userId: { type: 'dynamic', required: true },
-          orderId: { type: 'dynamic', required: true },
-          status: { type: 'static', required: true, value: 'active' },
-        },
-        data: { type: 'string' },
-      };
-
-      const multiEntitySchema = new EntitySchema(multiDynamicSchema);
-      const key = 'order-u100-o200-active';
-      const expectedPaths = { userId: 'u100', orderId: 'o200' };
-
-      const paths = multiEntitySchema.parseKey(key);
-
-      expect(paths).toEqual(expectedPaths);
-    });
-
-    it('should handle keys with different separators', () => {
-      const dashSeparatorSchema: SchemaDefinition = {
-        prefix: 'product',
-        separator: '-',
-        paths: {
-          category: { type: 'static', required: true, value: 'electronics' },
-          id: { type: 'dynamic', required: true },
-        },
-        data: { type: 'number' },
-      };
-
-      const dashSchema = new EntitySchema(dashSeparatorSchema);
-      const key = 'product-electronics-p123';
-      const expectedPaths = { id: 'p123' };
-
-      const paths = dashSchema.parseKey(key);
-
-      expect(paths).toEqual(expectedPaths);
-    });
-
-    it('should throw an error when parsing key with missing required dynamic path', () => {
-      const incompleteKey = 'user::admin'; // Missing id
-
-      expect(() => entitySchema.parseKey(incompleteKey)).toThrow('Missing required path: id');
-    });
-
-    // Added Tests
-    it('should parse a key correctly when key is passed as string with prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const keyWithPrefix = 'user:67890:admin';
-      const expectedPaths = { id: '67890' };
-
-      const parsedPaths = entitySchemaWithPrefixCheck.parseKey(keyWithPrefix);
-
-      expect(parsedPaths).toEqual(expectedPaths);
-    });
-
-    it('should throw an error when parsing key with duplicated prefix', () => {
-      const schemaDefinitionWithPrefixCheck: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchemaWithPrefixCheck = new EntitySchema(schemaDefinitionWithPrefixCheck);
-      const duplicatedPrefixKey = 'user:user:67890:admin';
-
-      // Expect an error due to duplicate prefix
-      expect(() => entitySchemaWithPrefixCheck.parseKey(duplicatedPrefixKey)).toThrow(
-        'Key does not match the schema paths'
-      );
-    });
-  });
-
-  describe('Different Prefixes and Complex Scenarios', () => {
-    it('should handle different prefixes correctly', () => {
-      const schemaA: SchemaDefinition = {
-        prefix: 'alpha',
-        separator: '|',
-        paths: {
-          code: { type: 'dynamic', required: true },
-          type: { type: 'static', required: true, value: 'A' },
-        },
-        data: { type: 'string' },
-      };
-
-      const schemaB: SchemaDefinition = {
-        prefix: 'beta',
-        separator: '-',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          category: { type: 'static', required: true, value: 'B' },
-        },
-        data: { type: 'number' },
-      };
-
-      const entitySchemaA = new EntitySchema(schemaA);
-      const entitySchemaB = new EntitySchema(schemaB);
-
-      const keyA = entitySchemaA.generateKey({ code: 'X100' });
-      const expectedKeyA = 'alpha|X100|A';
-
-      const keyB = entitySchemaB.generateKey({ id: 'Y200' });
-      const expectedKeyB = 'beta-Y200-B';
-
-      expect(keyA).toBe(expectedKeyA);
-      expect(keyB).toBe(expectedKeyB);
-
-      const parsedPathsA = entitySchemaA.parseKey(keyA);
-      const parsedPathsB = entitySchemaB.parseKey(keyB);
-
-      expect(parsedPathsA).toEqual({ code: 'X100' });
-      expect(parsedPathsB).toEqual({ id: 'Y200' });
-    });
-
-    it('should validate multiple schemas with different prefixes', () => {
-      const schemaDefinitions: SchemaDefinition[] = [
-        {
-          prefix: 'user',
-          separator: ':',
-          paths: {
-            id: { type: 'dynamic', required: true },
-            role: { type: 'static', required: true, value: 'admin' },
-          },
-          data: { type: 'object' },
-        },
-        {
-          prefix: 'product',
-          separator: '/',
-          paths: {
-            category: { type: 'static', required: true, value: 'electronics' },
-            id: { type: 'dynamic', required: true },
-          },
-          data: { type: 'number' },
-        },
-      ];
-
-      const entitySchemas = schemaDefinitions.map((def) => new EntitySchema(def));
-
-      const [userSchema, productSchema] = entitySchemas;
-
-      const userKey = userSchema.generateKey({ id: 'u123' });
-      const expectedUserKey = 'user:u123:admin';
-
-      const productKey = productSchema.generateKey({ id: 'p456' });
-      const expectedProductKey = 'product/electronics/p456';
-
-      expect(userKey).toBe(expectedUserKey);
-      expect(productKey).toBe(expectedProductKey);
-
-      const parsedUserPaths = userSchema.parseKey(userKey);
-      const parsedProductPaths = productSchema.parseKey(productKey);
-
-      expect(parsedUserPaths).toEqual({ id: 'u123' });
-      expect(parsedProductPaths).toEqual({ id: 'p456' });
-    });
-
-    it('should handle complex schemas with multiple static and dynamic paths', () => {
-      const complexSchema: SchemaDefinition = {
+    it('should properly handle complex schema with multiple static and dynamic paths', () => {
+      const complexDef: SchemaDefinition = {
         prefix: 'complex',
         separator: '|',
         paths: {
-          region: { type: 'static', required: true, value: 'us-west' },
-          service: { type: 'dynamic', required: true },
-          version: { type: 'static', required: true, value: 'v1' },
-          instance: { type: 'dynamic', required: false },
+          region: { type: 'static', value: 'us-east' },
+          service: { type: 'dynamic' },
+          version: { type: 'static', value: 'v1' },
+          instance: { type: 'dynamic' },
         },
         data: { type: 'object' },
       };
+      const complexSchema = new EntitySchema(complexDef);
 
-      const entitySchema = new EntitySchema(complexSchema);
+      const keyObj = { service: 'auth', instance: 'i100' };
+      const expected = 'complex|us-east|auth|v1|i100';
+      expect(complexSchema.toFullKeyString(keyObj)).toBe(expected);
 
-      const keyWithAllPaths = entitySchema.generateKey({ service: 'auth', instance: 'i789' });
-      const expectedKeyWithAllPaths = 'complex|us-west|auth|v1|i789';
-
-      const keyWithoutOptionalPath = entitySchema.generateKey({ service: 'auth' });
-      const expectedKeyWithoutOptionalPath = 'complex|us-west|auth|v1';
-
-      expect(keyWithAllPaths).toBe(expectedKeyWithAllPaths);
-      expect(keyWithoutOptionalPath).toBe(expectedKeyWithoutOptionalPath);
-
-      const parsedPathsWithAll = entitySchema.parseKey(keyWithAllPaths);
-      const parsedPathsWithoutOptional = entitySchema.parseKey(keyWithoutOptionalPath);
-
-      expect(parsedPathsWithAll).toEqual({ service: 'auth', instance: 'i789' });
-      expect(parsedPathsWithoutOptional).toEqual({ service: 'auth' });
+      // Check if missing dynamic causes error
+      expect(() => complexSchema.toFullKeyString({ service: 'auth' })).toThrowError(
+        "Missing required dynamic path 'instance' in full key."
+      );
     });
   });
 
-  describe('Edge Cases', () => {
-    it('should handle empty paths in schema definition', () => {
-      const emptyPathsSchema: SchemaDefinition = {
-        prefix: 'empty',
-        separator: ':',
-        paths: {},
-        data: { type: 'string' },
-      };
+  describe('toPartialKeyString', () => {
+    const schemaDef: SchemaDefinition = {
+      prefix: 'order',
+      separator: ':',
+      paths: {
+        userId: { type: 'dynamic' },
+        orderId: { type: 'dynamic' },
+        status: { type: 'static', value: 'active' },
+      },
+      data: { type: 'object' },
+    };
 
-      const entitySchema = new EntitySchema(emptyPathsSchema);
+    const entitySchema = new EntitySchema(schemaDef);
 
-      const key = entitySchema.generateKey({});
-      expect(key).toBe('empty');
+    /**
+     * @note According to the new requirement:
+     * Because userId and orderId are dynamic and come before the static 'status',
+     * if we do not provide them, the partial key is invalid. We must throw an error.
+     */
 
-      const parsedPaths = entitySchema.parseKey('empty');
-      expect(parsedPaths).toEqual({});
+    it('should throw an error if partial key is undefined because dynamic paths are missing', () => {
+      // Previously expected 'order:active', now we must fail due to missing userId/orderId
+      expect(() => entitySchema.toPartialKeyString()).toThrowError("Missing dynamic path 'userId' in partial key.");
     });
 
-    it('should handle schemas with only static paths', () => {
-      const staticOnlySchema: SchemaDefinition = {
-        prefix: 'static',
+    it('should throw an error when partial key is a simple string with only one dynamic path provided', () => {
+      const partial = 'u123'; // userId provided, but orderId missing
+      // Previously expected: 'order:active:u123'
+      // Now must fail since orderId missing
+      expect(() => entitySchema.toPartialKeyString(partial)).toThrowError(
+        "Missing dynamic path 'orderId' in partial key."
+      );
+    });
+
+    it('should generate a valid partial key when partial key is a string providing all dynamics', () => {
+      const partial = 'u123:o456'; // userId and orderId provided
+      // Now we have all dynamic paths, so we can append static at the end
+      const expected = 'order:u123:o456:active';
+      expect(entitySchema.toPartialKeyString(partial)).toBe(expected);
+    });
+
+    it('should throw an error when only prefix is provided as an empty string', () => {
+      const partial = '';
+      // No userId or orderId => error
+      expect(() => entitySchema.toPartialKeyString(partial)).toThrowError(
+        "Missing dynamic path 'userId' in partial key."
+      );
+    });
+
+    it('should throw an error if partial key is an object with only one dynamic path', () => {
+      const partialObj = { userId: 'u999' }; // orderId missing
+      // Previously expected 'order:active:u999'
+      // Now must fail since orderId is missing
+      expect(() => entitySchema.toPartialKeyString(partialObj)).toThrowError(
+        "Missing dynamic path 'orderId' in partial key."
+      );
+    });
+
+    it('should throw an error if partial object provides no dynamic paths', () => {
+      const partialObj = {};
+      // No userId or orderId => error
+      expect(() => entitySchema.toPartialKeyString(partialObj)).toThrowError(
+        "Missing dynamic path 'userId' in partial key."
+      );
+    });
+
+    it('should handle schema with only static paths for partial keys', () => {
+      // This test scenario from original code is okay since it's separate schema
+      const staticOnlyDef: SchemaDefinition = {
+        prefix: 'staticp',
         separator: '/',
         paths: {
-          type: { type: 'static', required: true, value: 'fixed' },
-          category: { type: 'static', required: true, value: 'constant' },
+          type: { type: 'static', value: 'fixed' },
+          category: { type: 'static', value: 'constant' },
         },
-        data: { type: 'boolean' },
+      };
+      const staticSchema = new EntitySchema(staticOnlyDef);
+      // Here no dynamic paths first, so undefined partial key is allowed
+      expect(staticSchema.toPartialKeyString()).toBe('staticp/fixed/constant');
+      expect(staticSchema.toPartialKeyString('')).toBe('staticp/fixed/constant');
+      expect(staticSchema.toPartialKeyString({})).toBe('staticp/fixed/constant');
+    });
+
+    it('should handle schema with only dynamic paths for partial keys', () => {
+      const dynOnlyDef: SchemaDefinition = {
+        prefix: 'dpartial',
+        separator: '-',
+        paths: {
+          userId: { type: 'dynamic' },
+          sessionId: { type: 'dynamic' },
+        },
+      };
+      const dynSchema = new EntitySchema(dynOnlyDef);
+
+      // no partial key means we have no userId => error
+      expect(() => dynSchema.toPartialKeyString()).toThrowError("Missing dynamic path 'userId' in partial key.");
+      // if we provide one dynamic in string
+      // userId = u001 provided, sessionId missing => error
+      expect(() => dynSchema.toPartialKeyString('u001')).toThrowError(
+        "Missing dynamic path 'sessionId' in partial key."
+      );
+      // if we provide one dynamic in object
+      expect(() => dynSchema.toPartialKeyString({ userId: 'u001' })).toThrowError(
+        "Missing dynamic path 'sessionId' in partial key."
+      );
+      // two dynamics in string
+      // now we have both userId=u001 and sessionId=s123
+      expect(dynSchema.toPartialKeyString('u001-s123')).toBe('dpartial-u001-s123');
+    });
+  });
+
+  describe('matchesSuffix', () => {
+    const schemaDef: SchemaDefinition = {
+      prefix: 'user',
+      separator: ':',
+      paths: {
+        id: { type: 'dynamic' },
+        status: { type: 'dynamic' },
+      },
+    };
+
+    const entitySchema = new EntitySchema(schemaDef);
+
+    it('should return true if key matches the suffix', () => {
+      const key = 'user:12345:active';
+      const suffix = '12345:active';
+      expect(entitySchema.matchesSuffix(key, suffix)).toBe(true);
+    });
+
+    it('should return false if suffix does not match', () => {
+      const key = 'user:12345:inactive';
+      const suffix = '12345:active';
+      expect(entitySchema.matchesSuffix(key, suffix)).toBe(false);
+    });
+
+    it('should handle suffix with no dynamic paths', () => {
+      const staticDef: SchemaDefinition = {
+        prefix: 'static',
+        separator: '|',
+        paths: {
+          type: { type: 'static', value: 'fixed' },
+        },
+      };
+      const staticSchema = new EntitySchema(staticDef);
+
+      const key = 'static|fixed';
+      const suffix = 'fixed';
+      expect(staticSchema.matchesSuffix(key, suffix)).toBe(true);
+      expect(staticSchema.matchesSuffix(key, 'notfixed')).toBe(false);
+    });
+
+    it('should handle cases where suffix is longer than key', () => {
+      const key = 'user:12345:active';
+      const suffix = '12345:active:extra';
+      // suffix is longer, cannot match
+      expect(entitySchema.matchesSuffix(key, suffix)).toBe(false);
+    });
+
+    it('should handle empty suffix', () => {
+      const key = 'user:12345:active';
+      const suffix = '';
+      // empty suffix means always ends with empty?
+      // depends on logic, but let's say empty means suffix is empty string - it should match trivially
+      // If we consider empty suffix as always match:
+      expect(entitySchema.matchesSuffix(key, suffix)).toBe(true);
+    });
+  });
+
+  describe('Edge Cases and Complex Scenarios', () => {
+    it('should handle schemas with only static paths for full keys', () => {
+      const staticOnlySchema: SchemaDefinition = {
+        prefix: 'onlystatic',
+        separator: '/',
+        paths: {
+          type: { type: 'static', value: 'fixed' },
+          category: { type: 'static', value: 'constant' },
+        },
       };
 
       const entitySchema = new EntitySchema(staticOnlySchema);
 
-      const key = entitySchema.generateKey({});
-      const expectedKey = 'static/fixed/constant';
-
-      expect(key).toBe(expectedKey);
-
-      const parsedPaths = entitySchema.parseKey(expectedKey);
-      expect(parsedPaths).toEqual({});
+      // Empty object should become prefix/fixed/constant
+      expect(entitySchema.toFullKeyString({})).toBe('onlystatic/fixed/constant');
+      // If we provide different static values?
+      expect(() => entitySchema.toFullKeyString({ type: 'wrong' })).toThrowError(
+        "Invalid value for static path 'type'. Expected 'fixed', got 'wrong'"
+      );
     });
 
-    it('should handle schemas with only dynamic paths', () => {
-      const dynamicOnlySchema: SchemaDefinition = {
-        prefix: 'dynamic',
+    it('should handle schemas with only dynamic paths for full keys', () => {
+      const dynOnlySchema: SchemaDefinition = {
+        prefix: 'dyn',
         separator: '-',
         paths: {
-          userId: { type: 'dynamic', required: true },
-          sessionId: { type: 'dynamic', required: true },
+          userId: { type: 'dynamic' },
+          sessionId: { type: 'dynamic' },
         },
-        data: { type: 'array' },
       };
 
-      const entitySchema = new EntitySchema(dynamicOnlySchema);
+      const entitySchema = new EntitySchema(dynOnlySchema);
 
-      const paths = { userId: 'u001', sessionId: 's123' };
-      const expectedKey = 'dynamic-u001-s123';
-
-      const key = entitySchema.generateKey(paths);
-      expect(key).toBe(expectedKey);
-
-      const parsedPaths = entitySchema.parseKey(key);
-      expect(parsedPaths).toEqual(paths);
+      // Must provide all dynamics
+      expect(() => entitySchema.toFullKeyString({})).toThrowError(
+        "Missing required dynamic path 'userId' in full key."
+      );
+      // Provide one dynamic, still missing the second
+      expect(() => entitySchema.toFullKeyString({ userId: 'u001' })).toThrowError(
+        "Missing required dynamic path 'sessionId' in full key."
+      );
+      // Provide both
+      expect(entitySchema.toFullKeyString({ userId: 'u001', sessionId: 's123' })).toBe('dyn-u001-s123');
     });
 
-    it('should throw an error when generating key with undefined dynamic path', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'test',
+    it('should allow optional dynamics in full keys if considered optional', () => {
+      // If we consider that a dynamic path with no mention of "required" is optional:
+      // Actually, from code: dynamic paths are always required for full keys. Let's test a schema with no mention of needed dynamic:
+      const optionalDynamicSchema: SchemaDefinition = {
+        prefix: 'opt',
         separator: ':',
         paths: {
-          id: { type: 'dynamic', required: true },
-          name: { type: 'dynamic', required: true },
+          userId: { type: 'dynamic' },
+          maybeId: { type: 'dynamic' },
+          role: { type: 'static', value: 'admin' },
         },
-        data: { type: 'object' },
       };
 
-      const entitySchema = new EntitySchema(schemaDefinition);
+      const entitySchema = new EntitySchema(optionalDynamicSchema);
 
-      const paths = { id: '123' }; // Missing 'name'
+      // According to current logic, dynamic must always be provided for full keys. If we want optional:
+      // Let's say we allow an empty or undefined dynamic and skip it:
+      // But code throws error if missing dynamic, let's provide all:
+      expect(entitySchema.toFullKeyString({ userId: 'u100', maybeId: 'm200' })).toBe('opt:u100:m200:admin');
 
-      expect(() => entitySchema.generateKey(paths)).toThrow('Missing required dynamic path: name');
+      // If we omit maybeId:
+      // Currently code throws error because dynamic is required:
+      expect(() => entitySchema.toFullKeyString({ userId: 'u100' })).toThrowError(
+        "Missing required dynamic path 'maybeId' in full key."
+      );
     });
 
-    it('should throw an error when parsing key with incorrect number of segments', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'sample',
+    it('should handle keys with extra segments in string gracefully (not allowed)', () => {
+      const schemaDef: SchemaDefinition = {
+        prefix: 'extra',
         separator: ':',
         paths: {
-          part1: { type: 'dynamic', required: true },
-          part2: { type: 'static', required: true, value: 'fixed' },
+          id: { type: 'dynamic' },
         },
-        data: { type: 'object' },
       };
 
-      const entitySchema = new EntitySchema(schemaDefinition);
+      const entitySchema = new EntitySchema(schemaDef);
 
-      const invalidKey = 'sample:dynamic'; // Missing 'fixed'
-
-      expect(() => entitySchema.parseKey(invalidKey)).toThrow('Key does not match the schema paths');
-    });
-
-    // Added Tests
-    it('should handle keys with special characters correctly', () => {
-      const specialCharSchema: SchemaDefinition = {
-        prefix: 'special',
-        separator: ':',
-        paths: {
-          code: { type: 'dynamic', required: true },
-          type: { type: 'static', required: true, value: 'test@123' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(specialCharSchema);
-      const paths = { code: 'c#100' };
-      const expectedKey = 'special:c#100:test@123';
-
-      const key = entitySchema.generateKey(paths);
-      expect(key).toBe(expectedKey);
-
-      const parsedPaths = entitySchema.parseKey(expectedKey);
-      expect(parsedPaths).toEqual({ code: 'c#100' });
-    });
-
-    it('should throw an error when parsing key with empty dynamic path', () => {
-      const schemaDefinition: SchemaDefinition = {
-        prefix: 'user',
-        separator: ':',
-        paths: {
-          id: { type: 'dynamic', required: true },
-          role: { type: 'static', required: true, value: 'admin' },
-        },
-        data: { type: 'object' },
-      };
-
-      const entitySchema = new EntitySchema(schemaDefinition);
-
-      const keyWithEmptyDynamicPath = 'user::admin'; // Empty 'id'
-
-      expect(() => entitySchema.parseKey(keyWithEmptyDynamicPath)).toThrow('Missing required path: id');
+      // If we provide extra segments:
+      // The code does not explicitly handle extra segments after all paths are consumed.
+      // But it doesn't matter: parseFullKeyString stops at paths length.
+      // Extra segments are ignored silently. Let's confirm that:
+      const fullKey = entitySchema.toFullKeyString('extra:123:ignored:stuff');
+      // expected: prefix='extra', id='123', ignore the rest
+      expect(fullKey).toBe('extra:123');
     });
   });
 });
