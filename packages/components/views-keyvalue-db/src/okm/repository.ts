@@ -10,6 +10,9 @@ export interface SimpleModel<T> {
 }
 
 export type PathFactory<S extends EntitySchema> = (repository: Repository<S>) => Promise<string | string[]>;
+export type DataFactory<S extends EntitySchema> = (
+  currentData: S['data'] | null
+) => Partial<S['data']> | S['data'] | null;
 
 /**
  * @class Repository
@@ -303,67 +306,24 @@ export class Repository<S extends EntitySchema> {
   }
 
   /**
-   * @method updateData
+   * @method update
    * @description
-   * Updates data for a full key by simply calling put with validated full key.
-   * @param key Full key as object or string.
-   * @param data New data.
+   * Updates both paths and data for records matching the provided paths.
+   * @param paths Paths that identify the records to update.
+   * @param updates Object containing paths to update and/or data to update.
    */
-  public async updateData(key: Record<string, string> | string, data: S['data']): Promise<void> {
-    await this.put(key, data);
-  }
-
-  /**
-   * @method updateDataByPartial
-   * @description
-   * Updates data for all records matching a partial key inside a transaction.
-   */
-  public async updateDataByPartial(
-    data: Partial<S['data']>,
-    prefix?: string | Record<string, string>,
-    suffix?: string
-  ): Promise<void> {
-    if (!this.transactionsRunner || !this.transactionsRunner.isTransactionActive()) {
-      throw new Error('updateDataByPartial must be called within an active transaction');
-    }
-
-    const records = await this.getByPartial(prefix, suffix);
-    if (records.length === 0) return;
-
-    const batchOps: AbstractBatch[] = [];
-
-    for (const record of records) {
-      const keyString = this.schema.toFullKeyString(record.key);
-
-      let updatedData: S['data'];
-      if (typeof record.data === 'object' && record.data !== null) {
-        updatedData = { ...record.data, ...data } as S['data'];
-      } else {
-        updatedData = data as S['data'];
-      }
-
-      const operation: AbstractBatch = { type: 'put', key: keyString, value: this.serialize(updatedData) };
-      batchOps.push(operation);
-    }
-
-    this.transactionsRunner.addOperations(batchOps);
-  }
-
-  /**
-   * @method updateKey
-   * @description
-   * Updates a key by resolving paths (including factories), generating all combinations, and updating keys.
-   * Works only inside a transaction.
-   * @param paths Paths that may contain factories returning multiple values.
-   * @param pathToUpdate Key parts to update.
-   */
-  public async updateKey(
+  public async update(
     paths: Record<string, string | PathFactory<S>>,
-    pathToUpdate: Record<string, string>
+    updates: {
+      pathToUpdate?: Record<string, string>;
+      dataToUpdate?: Partial<S['data']> | S['data'] | null;
+    }
   ): Promise<void> {
     if (!this.transactionsRunner || !this.transactionsRunner.isTransactionActive()) {
-      throw new Error('updateKey must be called within an active transaction');
+      throw new Error('update must be called within an active transaction');
     }
+
+    const { pathToUpdate, dataToUpdate } = updates;
 
     const resolvedPaths = await this.resolvePaths(paths);
     const pathCombinations = this.generatePathCombinations(resolvedPaths);
@@ -374,28 +334,62 @@ export class Repository<S extends EntitySchema> {
       const oldValidKey = this.schema.toFullKeyString(combination);
       const existingRecord = await this.get(combination);
 
-      const newKeyPaths = { ...combination, ...pathToUpdate };
+      // Update paths if provided
+      let newKeyPaths = { ...combination };
+      if (pathToUpdate) {
+        newKeyPaths = { ...newKeyPaths, ...pathToUpdate };
+      }
+
       const newValidKey = this.schema.toFullKeyString(newKeyPaths);
 
+      // Initialize updatedData with existing data or null
+      let updatedData: S['data'] | null = existingRecord?.data ?? null;
+
+      if (dataToUpdate !== undefined) {
+        if (dataToUpdate === null || typeof dataToUpdate !== 'object') {
+          // For null or primitive types, validate and replace all data
+          this.schema.validateData(dataToUpdate);
+          updatedData = dataToUpdate as S['data'] | null;
+        } else {
+          // dataToUpdate is an object
+          this.schema.validateData(dataToUpdate);
+          if (updatedData && typeof updatedData === 'object') {
+            // Merge existing data with updates
+            updatedData = { ...updatedData, ...dataToUpdate };
+          } else {
+            // If existing data is not an object, replace entirely
+            updatedData = dataToUpdate as S['data'];
+          }
+        }
+      }
+
+      // Add operations to batch
       batchOps.push({ type: 'del', key: oldValidKey });
-      batchOps.push({ type: 'put', key: newValidKey, value: this.serialize(existingRecord?.data ?? null) });
+      batchOps.push({ type: 'put', key: newValidKey, value: this.serialize(updatedData) });
     }
 
     this.transactionsRunner.addOperations(batchOps);
   }
 
   /**
-   * @method updateKeyByPartial
+   * @method updateByPartial
    * @description
-   * Similar to updateKey but works with partial keys. Generates combinations, gets records, updates keys inside a transaction.
+   * Updates records by partial key. Allows updating both paths and data.
+   * @param paths Partial paths to identify records.
+   * @param updates Object containing paths to update and/or data to update.
    */
-  public async updateKeyByPartial(
+  public async updateByPartial(
     paths: Record<string, string | string[] | PathFactory<S>>,
-    pathToUpdate: Record<string, string>
+    updates: {
+      pathToUpdate?: Record<string, string>;
+      dataToUpdate?: Partial<S['data']> | S['data'] | DataFactory<S> | null;
+    }
   ): Promise<void> {
     if (!this.transactionsRunner || !this.transactionsRunner.isTransactionActive()) {
-      throw new Error('updateKeyByPartial must be called within an active transaction');
+      throw new Error('updateByPartial must be called within an active transaction');
     }
+
+    const { pathToUpdate, dataToUpdate } = updates;
 
     const resolvedPaths = await this.resolvePaths(paths);
     const pathCombinations = this.generatePathCombinations(resolvedPaths);
@@ -406,11 +400,64 @@ export class Repository<S extends EntitySchema> {
       const validKey = this.schema.toFullKeyString(combination);
       const existingRecord = await this.get(combination);
 
-      const newKeyPaths = { ...combination, ...pathToUpdate };
+      // Update paths if provided
+      let newKeyPaths = { ...combination };
+      if (pathToUpdate) {
+        newKeyPaths = { ...newKeyPaths, ...pathToUpdate };
+      }
+
       const newValidKey = this.schema.toFullKeyString(newKeyPaths);
 
-      batchOps.push({ type: 'del', key: validKey });
-      batchOps.push({ type: 'put', key: newValidKey, value: this.serialize(existingRecord?.data ?? null) });
+      // Initialize updatedData with existing data or null
+      let updatedData: S['data'] | null = existingRecord?.data ?? null;
+
+      if (dataToUpdate !== undefined) {
+        // If dataToUpdate is null or a primitive type
+        if (dataToUpdate === null || (typeof dataToUpdate !== 'object' && typeof dataToUpdate !== 'function')) {
+          // Validate and replace all data
+          this.schema.validateData(dataToUpdate);
+          updatedData = dataToUpdate as S['data'] | null;
+        } else if (typeof dataToUpdate === 'function') {
+          // dataToUpdate is a factory function
+          // Call it with current data
+          const factoryResult = (dataToUpdate as DataFactory<S>)(existingRecord?.data ?? null);
+          if (factoryResult !== null && typeof factoryResult === 'object') {
+            // Validate factoryResult against schema
+            this.schema.validateData(factoryResult);
+            if (updatedData && typeof updatedData === 'object') {
+              // Merge factory result with existing data
+              updatedData = { ...updatedData, ...factoryResult };
+            } else {
+              // If existing data is not an object, replace entirely
+              updatedData = factoryResult as S['data'];
+            }
+          } else {
+            // If factoryResult is null or not an object, set data to factoryResult
+            updatedData = factoryResult as S['data'] | null;
+          }
+        } else {
+          // dataToUpdate is an object
+          // Validate dataToUpdate against schema
+          this.schema.validateData(dataToUpdate);
+          if (updatedData && typeof updatedData === 'object') {
+            // Merge existing data with updates
+            updatedData = { ...updatedData, ...dataToUpdate };
+          } else {
+            // If existing data is not an object, replace entirely
+            updatedData = dataToUpdate as S['data'];
+          }
+        }
+      }
+
+      // Add operations to batch
+      if (validKey !== newValidKey) {
+        // If the key has changed, delete the old key and put the new key with updated data
+        batchOps.push({ type: 'del', key: validKey });
+        batchOps.push({ type: 'put', key: newValidKey, value: this.serialize(updatedData) });
+      } else if (dataToUpdate !== undefined) {
+        // If the key hasn't changed but data has, update the data
+        batchOps.push({ type: 'put', key: newValidKey, value: this.serialize(updatedData) });
+      }
     }
 
     this.transactionsRunner.addOperations(batchOps);

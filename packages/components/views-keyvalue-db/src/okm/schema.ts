@@ -91,6 +91,24 @@ export class EntitySchema {
     return keySuffix === suffix;
   }
 
+  /**
+   * @method validateData
+   * @description
+   * Validates the provided data against the schema's ValueDefinition.
+   * @param data The data to validate.
+   * @throws Error if the data does not conform to the schema.
+   */
+  public validateData(data: any): void {
+    if (!this.data) {
+      if (data !== null && data !== undefined) {
+        throw new Error('Data should be null or undefined as per schema definition.');
+      }
+      return;
+    }
+
+    this.validateValue(data, this.data, 'Root');
+  }
+
   // -----------------------
   // Full key helpers
   // -----------------------
@@ -218,5 +236,64 @@ export class EntitySchema {
     }
 
     return parts.join(this.separator);
+  }
+
+  /**
+   * @method validateValue
+   * @description
+   * Helper method to validate a single value against its definition.
+   * @param value The value to validate.
+   * @param definition The ValueDefinition to validate against.
+   * @param context Contextual information for error messages.
+   * @throws Error if the value does not conform to the definition.
+   */
+  private validateValue(value: any, definition: ValueDefinition, context: string): void {
+    switch (definition.type) {
+      case 'object':
+        if (typeof value !== 'object' || Array.isArray(value) || value === null) {
+          throw new Error(`${context}: Expected an object.`);
+        }
+        if (definition.fields) {
+          for (const [field, fieldDef] of Object.entries(definition.fields)) {
+            if (!(field in value)) {
+              throw new Error(`${context}: Missing field '${field}'.`);
+            }
+            this.validateValue(value[field], fieldDef, `Field '${field}'`);
+          }
+        }
+        break;
+
+      case 'string':
+        if (typeof value !== 'string') {
+          throw new Error(`${context}: Expected a string.`);
+        }
+        break;
+
+      case 'number':
+        if (typeof value !== 'number') {
+          throw new Error(`${context}: Expected a number.`);
+        }
+        break;
+
+      case 'boolean':
+        if (typeof value !== 'boolean') {
+          throw new Error(`${context}: Expected a boolean.`);
+        }
+        break;
+
+      case 'array':
+        if (!Array.isArray(value)) {
+          throw new Error(`${context}: Expected an array.`);
+        }
+        if (definition.items) {
+          value.forEach((item, index) => {
+            this.validateValue(item, definition.items!, `${context} [${index}]`);
+          });
+        }
+        break;
+
+      default:
+        throw new Error(`${context}: Unsupported type '${(definition as any).type}'.`);
+    }
   }
 }
