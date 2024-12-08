@@ -265,6 +265,162 @@ describe('EntitySchema', () => {
     });
   });
 
+  describe('validateData', () => {
+    it('should accept null or undefined when schema.data is null', () => {
+      // schema with no data definition means data must be null or undefined
+      const schemaNoData: SchemaDefinition = {
+        prefix: 'nodef',
+        separator: ':',
+        // no paths defined, just no data
+      };
+      const entitySchema = new EntitySchema(schemaNoData);
+
+      expect(() => entitySchema.validateData(null)).not.toThrow();
+      expect(() => entitySchema.validateData(undefined)).not.toThrow();
+      expect(() => entitySchema.validateData({})).toThrowError(
+        'Data should be null or undefined as per schema definition.'
+      );
+    });
+
+    it('should validate object data according to fields', () => {
+      // schema expects an object with specific fields
+      const schemaObj: SchemaDefinition = {
+        prefix: 'obj',
+        separator: ':',
+        data: {
+          type: 'object',
+          fields: {
+            name: { type: 'string' },
+            age: { type: 'number' },
+          },
+        },
+      };
+
+      const entitySchema = new EntitySchema(schemaObj);
+
+      // valid data
+      const validData = { name: 'Alice', age: 30 };
+      expect(() => entitySchema.validateData(validData)).not.toThrow();
+
+      // missing field
+      const missingField = { name: 'Bob' };
+      expect(() => entitySchema.validateData(missingField)).toThrowError("Root: Missing field 'age'.");
+
+      // incorrect type
+      const incorrectType = { name: 'Charlie', age: 'thirty' };
+      expect(() => entitySchema.validateData(incorrectType)).toThrowError("Field 'age': Expected a number.");
+    });
+
+    it('should validate string data', () => {
+      const schemaString: SchemaDefinition = {
+        prefix: 'str',
+        separator: '/',
+        data: { type: 'string' },
+      };
+
+      const entitySchema = new EntitySchema(schemaString);
+
+      expect(() => entitySchema.validateData('hello')).not.toThrow();
+      expect(() => entitySchema.validateData(123)).toThrowError('Root: Expected a string.');
+      expect(() => entitySchema.validateData(null)).toThrowError('Root: Expected a string.');
+    });
+
+    it('should validate number data', () => {
+      const schemaNumber: SchemaDefinition = {
+        prefix: 'num',
+        separator: ':',
+        data: { type: 'number' },
+      };
+
+      const entitySchema = new EntitySchema(schemaNumber);
+
+      expect(() => entitySchema.validateData(42)).not.toThrow();
+      expect(() => entitySchema.validateData('42')).toThrowError('Root: Expected a number.');
+      expect(() => entitySchema.validateData(null)).toThrowError('Root: Expected a number.');
+    });
+
+    it('should validate boolean data', () => {
+      const schemaBoolean: SchemaDefinition = {
+        prefix: 'bool',
+        separator: '|',
+        data: { type: 'boolean' },
+      };
+
+      const entitySchema = new EntitySchema(schemaBoolean);
+
+      expect(() => entitySchema.validateData(true)).not.toThrow();
+      expect(() => entitySchema.validateData(false)).not.toThrow();
+      expect(() => entitySchema.validateData('true')).toThrowError('Root: Expected a boolean.');
+      expect(() => entitySchema.validateData(null)).toThrowError('Root: Expected a boolean.');
+    });
+
+    it('should validate array data', () => {
+      const schemaArray: SchemaDefinition = {
+        prefix: 'arr',
+        separator: ',',
+        data: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      };
+
+      const entitySchema = new EntitySchema(schemaArray);
+
+      expect(() => entitySchema.validateData(['apple', 'banana'])).not.toThrow();
+      expect(() => entitySchema.validateData(['apple', 123])).toThrowError('Root [1]: Expected a string.');
+      expect(() => entitySchema.validateData('not an array')).toThrowError('Root: Expected an array.');
+      expect(() => entitySchema.validateData([])).not.toThrow();
+    });
+
+    it('should validate nested objects and arrays', () => {
+      const nestedSchema: SchemaDefinition = {
+        prefix: 'nested',
+        separator: ':',
+        data: {
+          type: 'object',
+          fields: {
+            user: {
+              type: 'object',
+              fields: {
+                name: { type: 'string' },
+                tags: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const entitySchema = new EntitySchema(nestedSchema);
+
+      const validData = {
+        user: {
+          name: 'Dave',
+          tags: ['admin', 'tester'],
+        },
+      };
+      expect(() => entitySchema.validateData(validData)).not.toThrow();
+
+      const missingFieldData = {
+        user: {
+          // name missing
+          tags: ['admin', 'tester'],
+        },
+      };
+      expect(() => entitySchema.validateData(missingFieldData)).toThrowError("Field 'user': Missing field 'name'.");
+
+      const incorrectTypeData = {
+        user: {
+          name: 'Eve',
+          tags: ['admin', 42],
+        },
+      };
+      expect(() => entitySchema.validateData(incorrectTypeData)).toThrowError("Field 'tags' [1]: Expected a string.");
+    });
+  });
+
   describe('Edge Cases and Complex Scenarios', () => {
     it('should handle schemas with only static paths for full keys', () => {
       const staticOnlySchema: SchemaDefinition = {

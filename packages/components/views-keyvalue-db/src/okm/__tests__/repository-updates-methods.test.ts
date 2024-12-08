@@ -1,13 +1,15 @@
 import { AbstractBatch } from 'abstract-leveldown';
-import { Repository } from '../repository';
+import { Repository, DataFactory } from '../repository';
 import { ConnectionManager } from '../connection-manager';
 import { EntitySchema } from '../schema';
 import { TransactionsRunner } from '../transactions-runner';
 
+// Type guard to check if the operation is a 'put' type
 function isPutBatch(op: AbstractBatch): op is { type: 'put'; key: string; value: string } {
   return op.type === 'put';
 }
 
+// Mock for ConnectionManager
 class ConnectionManagerMock implements Partial<ConnectionManager> {
   private db: any;
   constructor() {
@@ -20,12 +22,15 @@ class ConnectionManagerMock implements Partial<ConnectionManager> {
   async onModuleDestroy() {}
 }
 
+// Mock for EntitySchema
 class EntitySchemaMock implements Partial<EntitySchema> {
   toFullKeyString = jest.fn();
   toPartialKeyString = jest.fn();
   matchesSuffix = jest.fn();
+  validateData = jest.fn();
 }
 
+// Mock for TransactionsRunner
 class TransactionsRunnerMock implements Partial<TransactionsRunner> {
   private operations: AbstractBatch[] = [];
   private transactionActive: boolean = false;
@@ -65,183 +70,436 @@ describe('Repository update methods', () => {
       transactionsRunner as unknown as TransactionsRunner
     );
 
+    // Mock serialization/deserialization methods
     jest.spyOn(repository as any, 'serialize').mockImplementation((val: any) => JSON.stringify(val));
-    (repository as any).getByPartial = jest.fn();
-    (repository as any).get = jest.fn();
+    jest.spyOn(repository as any, 'deserialize').mockImplementation((val: any) => JSON.parse(val));
+
+    // Mock internal methods that are not the focus of these tests
     (repository as any).resolvePaths = jest.fn();
     (repository as any).generatePathCombinations = jest.fn();
+    (repository as any).get = jest.fn();
+    (repository as any).schema = entitySchema as unknown as EntitySchema;
   });
 
   afterEach(() => {
     jest.clearAllMocks();
   });
 
-  describe('updateDataByPartial', () => {
-    it('should throw if no active transaction', async () => {
-      await expect(repository.updateDataByPartial({ age: 30 }, 'prefix')).rejects.toThrow(
-        'updateDataByPartial must be called within an active transaction'
-      );
+  describe('update', () => {
+    it('should throw an error if no active transaction', async () => {
+      await expect(
+        repository.update({ id: '1' }, { pathToUpdate: { status: 'active' }, dataToUpdate: { name: 'John' } })
+      ).rejects.toThrow('update must be called within an active transaction');
     });
 
-    it('should do nothing if no records', async () => {
+    it('should update paths and data correctly', async () => {
       transactionsRunner.activateTransaction();
-      (repository as any).getByPartial.mockResolvedValue([]);
 
-      await repository.updateDataByPartial({ age: 30 }, 'prefix');
-      expect(transactionsRunner.addOperations).not.toHaveBeenCalled();
-    });
+      // Mock resolved paths and combinations
+      (repository as any).resolvePaths.mockResolvedValue({ id: '1' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ id: '1' }]);
 
-    it('should merge data for object records', async () => {
-      transactionsRunner.activateTransaction();
-      const records = [
-        { key: 'k1', data: { name: 'Alice', age: 25 } },
-        { key: 'k2', data: { name: 'Bob' } },
-      ];
-      (repository as any).getByPartial.mockResolvedValue(records);
+      // Mock get method to return existing record
+      (repository as any).get.mockResolvedValue({ key: 'fullKey1', data: { name: 'John', age: 25 } });
 
-      entitySchema.toFullKeyString.mockImplementation((k) => (typeof k === 'string' ? k : 'fullkey'));
-
-      await repository.updateDataByPartial({ age: 30 }, 'prefix');
-
-      const ops = transactionsRunner.getOperations();
-      expect(ops).toHaveLength(2);
-      if (isPutBatch(ops[0])) {
-        const data1 = JSON.parse(ops[0].value as string);
-        expect(data1).toEqual({ name: 'Alice', age: 30 });
-      }
-
-      if (isPutBatch(ops[1])) {
-        const data2 = JSON.parse(ops[1].value as string);
-        expect(data2).toEqual({ name: 'Bob', age: 30 });
-      }
-    });
-
-    it('should replace data if existing not object', async () => {
-      transactionsRunner.activateTransaction();
-      const records = [{ key: 'k3', data: 'stringData' }];
-      (repository as any).getByPartial.mockResolvedValue(records);
-      entitySchema.toFullKeyString.mockReturnValue('fullKey3');
-
-      await repository.updateDataByPartial({ status: 'updated' }, 'prefix');
-      const ops = transactionsRunner.getOperations();
-      expect(ops).toHaveLength(1);
-      if (isPutBatch(ops[0])) {
-        expect(JSON.parse(ops[0].value as string)).toEqual({ status: 'updated' });
-      }
-    });
-  });
-
-  describe('updateKey', () => {
-    it('should throw if no active transaction', async () => {
-      await expect(repository.updateKey({ id: 'x' }, { id: 'y' })).rejects.toThrow(
-        'updateKey must be called within an active transaction'
-      );
-    });
-
-    it('should resolve paths, generate combos, update keys', async () => {
-      transactionsRunner.activateTransaction();
-      (repository as any).resolvePaths.mockResolvedValue({ id: '123' });
-      (repository as any).generatePathCombinations.mockReturnValue([{ id: '123' }]);
-      (repository as any).get.mockResolvedValue({ key: { id: '123' }, data: { name: 'Test' } });
-      entitySchema.toFullKeyString.mockReturnValueOnce('oldKey').mockReturnValueOnce('newKey');
-
-      await repository.updateKey({ id: '123' }, { id: '999' });
-
-      const ops = transactionsRunner.getOperations();
-      expect(ops).toHaveLength(2);
-      expect(ops[0]).toEqual({ type: 'del', key: 'oldKey' });
-      expect(ops[1].type).toBe('put');
-      if (isPutBatch(ops[1])) {
-        expect(JSON.parse(ops[1].value as string)).toEqual({ name: 'Test' });
-      }
-    });
-
-    it('should put null if no existing record found', async () => {
-      transactionsRunner.activateTransaction();
-      (repository as any).resolvePaths.mockResolvedValue({ id: 'xyz' });
-      (repository as any).generatePathCombinations.mockReturnValue([{ id: 'xyz' }]);
-      (repository as any).get.mockResolvedValue(null); // no record found
-      entitySchema.toFullKeyString.mockReturnValueOnce('oldKeyN').mockReturnValueOnce('newKeyN');
-
-      await repository.updateKey({ id: 'xyz' }, { id: '000' });
-
-      const ops = transactionsRunner.getOperations();
-      expect(ops).toHaveLength(2);
-      expect(ops[0]).toEqual({ type: 'del', key: 'oldKeyN' });
-      // put null data
-      if (isPutBatch(ops[1])) {
-        expect(JSON.parse(ops[1].value as string)).toBeNull();
-      }
-    });
-  });
-
-  describe('updateKeyByPartial', () => {
-    it('should throw if no active transaction', async () => {
-      await expect(repository.updateKeyByPartial({ id: 'x' }, { id: 'y' })).rejects.toThrow(
-        'updateKeyByPartial must be called within an active transaction'
-      );
-    });
-
-    it('should resolve paths, generate combos, and update keys for partial scenario', async () => {
-      transactionsRunner.activateTransaction();
-      (repository as any).resolvePaths.mockResolvedValue({ userId: ['u1', 'u2'] });
-      (repository as any).generatePathCombinations.mockReturnValue([{ userId: 'u1' }, { userId: 'u2' }]);
-
-      (repository as any).get
-        .mockResolvedValueOnce({ key: { userId: 'u1' }, data: { name: 'Alice' } })
-        .mockResolvedValueOnce({ key: { userId: 'u2' }, data: { name: 'Bob' } });
+      // Mock schema methods
       entitySchema.toFullKeyString
-        .mockReturnValueOnce('oldK1')
-        .mockReturnValueOnce('newK1')
-        .mockReturnValueOnce('oldK2')
-        .mockReturnValueOnce('newK2');
+        .mockReturnValueOnce('fullKey1') // oldValidKey
+        .mockReturnValueOnce('fullKey2'); // newValidKey
 
-      await repository.updateKeyByPartial({ userId: 'u1' }, { userId: 'updated' });
+      await repository.update(
+        { id: '1' },
+        {
+          pathToUpdate: { status: 'active' },
+          dataToUpdate: { age: 26 },
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      // Check delete operation
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey1' });
+
+      // Check put operation with updated data
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey2');
+        expect(JSON.parse(ops[1].value)).toEqual({ name: 'John', age: 26 });
+      }
+    });
+
+    it('should replace data if existing data is not an object', async () => {
+      transactionsRunner.activateTransaction();
+
+      (repository as any).resolvePaths.mockResolvedValue({ id: '2' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ id: '2' }]);
+      (repository as any).get.mockResolvedValue({ key: 'fullKey2', data: 'nonObjectData' });
+
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey2') // oldValidKey
+        .mockReturnValueOnce('fullKey3'); // newValidKey
+
+      await repository.update(
+        { id: '2' },
+        {
+          pathToUpdate: { status: 'inactive' },
+          dataToUpdate: { status: 'inactive' },
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey2' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey3');
+        expect(JSON.parse(ops[1].value)).toEqual({ status: 'inactive' });
+      }
+    });
+
+    it('should handle dataToUpdate as full data object', async () => {
+      transactionsRunner.activateTransaction();
+
+      (repository as any).resolvePaths.mockResolvedValue({ id: '3' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ id: '3' }]);
+      (repository as any).get.mockResolvedValue({ key: 'fullKey3', data: { name: 'Alice' } });
+
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey3') // oldValidKey
+        .mockReturnValueOnce('fullKey4'); // newValidKey
+
+      await repository.update(
+        { id: '3' },
+        {
+          pathToUpdate: { role: 'admin' },
+          dataToUpdate: { name: 'Alice', role: 'admin' },
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey3' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey4');
+        expect(JSON.parse(ops[1].value)).toEqual({ name: 'Alice', role: 'admin' });
+      }
+    });
+
+    it('should handle dataToUpdate as null', async () => {
+      transactionsRunner.activateTransaction();
+
+      (repository as any).resolvePaths.mockResolvedValue({ id: '4' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ id: '4' }]);
+      (repository as any).get.mockResolvedValue({
+        key: 'fullKey4',
+        data: { email: 'user4@example.com', name: 'User Four' },
+      });
+
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey4') // oldValidKey
+        .mockReturnValueOnce('fullKey5'); // newValidKey
+
+      await repository.update(
+        { id: '4' },
+        {
+          pathToUpdate: { status: 'active' },
+          dataToUpdate: null,
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey4' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey5');
+        expect(JSON.parse(ops[1].value)).toBeNull(); // Expecting null
+      }
+    });
+  });
+
+  describe('updateByPartial', () => {
+    it('should throw an error if no active transaction', async () => {
+      await expect(
+        repository.updateByPartial(
+          { role: 'member' },
+          {
+            pathToUpdate: { role: 'admin' },
+            dataToUpdate: { email: 'admin@example.com' },
+          }
+        )
+      ).rejects.toThrow('updateByPartial must be called within an active transaction');
+    });
+
+    it('should update paths correctly without altering data when dataToUpdate is not provided', async () => {
+      transactionsRunner.activateTransaction();
+
+      // Mock resolved paths and combinations
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'member', id: '1' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ role: 'member', id: '1' }]);
+
+      // Mock get method to return existing record
+      (repository as any).get.mockResolvedValue({
+        key: 'fullKey1',
+        data: { email: 'user1@example.com', name: 'User One' },
+      });
+
+      // Mock schema methods
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey1') // oldValidKey
+        .mockReturnValueOnce('fullKey2'); // newValidKey
+
+      await repository.updateByPartial(
+        { role: 'member', id: '1' },
+        {
+          pathToUpdate: { role: 'admin' },
+          // dataToUpdate is not provided
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey1' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey2');
+        expect(JSON.parse(ops[1].value)).toEqual({ email: 'user1@example.com', name: 'User One' });
+      }
+    });
+
+    it('should update paths and data correctly with dataToUpdate as object', async () => {
+      transactionsRunner.activateTransaction();
+
+      // Mock resolved paths and combinations
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'member', id: '1' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ role: 'member', id: '1' }]);
+
+      // Mock get method to return existing record
+      (repository as any).get.mockResolvedValue({
+        key: 'fullKey1',
+        data: { email: 'user1@example.com', name: 'User One' },
+      });
+
+      // Mock schema methods
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey1') // oldValidKey
+        .mockReturnValueOnce('fullKey2'); // newValidKey
+
+      await repository.updateByPartial(
+        { role: 'member', id: '1' },
+        {
+          pathToUpdate: { role: 'admin' },
+          dataToUpdate: { email: 'admin1@example.com' },
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey1' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey2');
+        expect(JSON.parse(ops[1].value)).toEqual({ email: 'admin1@example.com', name: 'User One' });
+      }
+    });
+
+    it('should update data using DataFactory function with conditional logic', async () => {
+      transactionsRunner.activateTransaction();
+
+      // Mock for paths
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'member', id: ['2', '3'] });
+      (repository as any).generatePathCombinations.mockReturnValue([
+        { role: 'member', id: '2' },
+        { role: 'member', id: '3' },
+      ]);
+
+      // Mock get for different records
+      (repository as any).get.mockImplementation((combination: any) => {
+        if (combination.id === '2') {
+          return Promise.resolve({ key: 'fullKey2', data: { email: 'user2@example.com', name: 'User Two' } });
+        } else if (combination.id === '3') {
+          return Promise.resolve({ key: 'fullKey3', data: { email: 'user3@example.com', name: 'User Three' } });
+        }
+        return Promise.resolve(null);
+      });
+
+      // Mock schema methods
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey2') // oldValidKey for id '2'
+        .mockReturnValueOnce('fullKey4') // newValidKey for id '2'
+        .mockReturnValueOnce('fullKey3') // oldValidKey for id '3'
+        .mockReturnValueOnce('fullKey5'); // newValidKey for id '3'
+
+      // Directly mock serialize method
+      (repository as any).serialize = jest.fn((val: any) => {
+        const serialized = JSON.stringify(val);
+        console.log('Serialize called with:', val, '->', serialized);
+        return serialized;
+      });
+
+      // DataFactory with conditional logic
+      const dataFactory: DataFactory<any> = (currentData) => {
+        if (!currentData) {
+          throw new Error('No data to update');
+        }
+        // For 'user2@example.com' we update the email
+        if (currentData.email === 'user2@example.com') {
+          return { email: `updated_${currentData.email}` };
+        }
+        // For 'user3@example.com' we update the name
+        if (currentData.email === 'user3@example.com') {
+          return { name: 'Updated User Three' };
+        }
+        // If none of the above, return empty object
+        return {};
+      };
+
+      await repository.updateByPartial(
+        { role: 'member', id: ['2', '3'] },
+        {
+          pathToUpdate: { role: 'admin' },
+          dataToUpdate: dataFactory,
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      console.log('Batch Operations:', ops);
+
+      expect(ops).toHaveLength(4);
+
+      // For id '2'
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey2' });
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey4');
+        // After dataFactory, user2 data should have updated email but same name
+        // Just email updated, no 'role' in data
+        expect(JSON.parse(ops[1].value)).toEqual({ email: 'updated_user2@example.com', name: 'User Two' });
+      }
+
+      // For id '3'
+      expect(ops[2]).toEqual({ type: 'del', key: 'fullKey3' });
+      if (isPutBatch(ops[3])) {
+        expect(ops[3].key).toBe('fullKey5');
+        // After dataFactory, user3 data should have updated name but same email
+        expect(JSON.parse(ops[3].value)).toEqual({ email: 'user3@example.com', name: 'Updated User Three' });
+      }
+    });
+
+    it('should handle dataToUpdate as a complete data object', async () => {
+      transactionsRunner.activateTransaction();
+
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'guest', id: '3' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ role: 'guest', id: '3' }]);
+      (repository as any).get.mockResolvedValue({ key: 'fullKey3', data: { email: 'user3@example.com' } });
+
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey3') // oldValidKey
+        .mockReturnValueOnce('fullKey4'); // newValidKey
+
+      await repository.updateByPartial(
+        { role: 'guest', id: '3' },
+        {
+          pathToUpdate: { role: 'member' },
+          dataToUpdate: { email: 'member3@example.com', name: 'Member Three' },
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey3' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey4');
+        expect(JSON.parse(ops[1].value)).toEqual({ email: 'member3@example.com', name: 'Member Three' });
+      }
+    });
+
+    it('should handle dataToUpdate as null', async () => {
+      transactionsRunner.activateTransaction();
+
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'guest', id: '4' });
+      (repository as any).generatePathCombinations.mockReturnValue([{ role: 'guest', id: '4' }]);
+      (repository as any).get.mockResolvedValue({
+        key: 'fullKey4',
+        data: { email: 'user4@example.com', name: 'User Four' },
+      });
+
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey4') // oldValidKey
+        .mockReturnValueOnce('fullKey5'); // newValidKey
+
+      await repository.updateByPartial(
+        { role: 'guest', id: '4' },
+        {
+          pathToUpdate: { role: 'inactive' },
+          dataToUpdate: null,
+        }
+      );
+
+      const ops = transactionsRunner.getOperations();
+      expect(ops).toHaveLength(2);
+
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey4' });
+
+      if (isPutBatch(ops[1])) {
+        expect(ops[1].key).toBe('fullKey5');
+        expect(JSON.parse(ops[1].value)).toBeNull(); // Expecting null
+      }
+    });
+
+    it('should handle multiple path combinations', async () => {
+      transactionsRunner.activateTransaction();
+
+      // Mock resolved paths and combinations
+      (repository as any).resolvePaths.mockResolvedValue({ role: 'member', id: ['1', '2'] });
+      (repository as any).generatePathCombinations.mockReturnValue([
+        { role: 'member', id: '1' },
+        { role: 'member', id: '2' },
+      ]);
+
+      // Mock get method to return existing records
+      (repository as any).get
+        .mockResolvedValueOnce({ key: 'fullKey1', data: { email: 'user1@example.com', name: 'User One' } })
+        .mockResolvedValueOnce({ key: 'fullKey2', data: { email: 'user2@example.com', name: 'User Two' } });
+
+      // Mock schema methods
+      entitySchema.toFullKeyString
+        .mockReturnValueOnce('fullKey1') // oldValidKey1
+        .mockReturnValueOnce('fullKey3') // newValidKey1
+        .mockReturnValueOnce('fullKey2') // oldValidKey2
+        .mockReturnValueOnce('fullKey4'); // newValidKey2
+
+      await repository.updateByPartial(
+        { role: 'member', id: ['1', '2'] },
+        {
+          pathToUpdate: { role: 'admin' },
+          dataToUpdate: { email: 'updated@example.com' },
+        }
+      );
 
       const ops = transactionsRunner.getOperations();
       expect(ops).toHaveLength(4);
-      expect(ops[0]).toEqual({ type: 'del', key: 'oldK1' });
+
+      // First record operations
+      expect(ops[0]).toEqual({ type: 'del', key: 'fullKey1' });
       if (isPutBatch(ops[1])) {
-        expect(JSON.parse(ops[1].value as string)).toEqual({ name: 'Alice' });
+        expect(ops[1].key).toBe('fullKey3');
+        expect(JSON.parse(ops[1].value)).toEqual({ email: 'updated@example.com', name: 'User One' });
       }
 
-      if (isPutBatch(ops[2])) {
-        expect(ops[2]).toEqual({ type: 'del', key: 'oldK2' });
-      }
-
+      // Second record operations
+      expect(ops[2]).toEqual({ type: 'del', key: 'fullKey2' });
       if (isPutBatch(ops[3])) {
-        expect(JSON.parse(ops[3].value as string)).toEqual({ name: 'Bob' });
+        expect(ops[3].key).toBe('fullKey4');
+        expect(JSON.parse(ops[3].value)).toEqual({ email: 'updated@example.com', name: 'User Two' });
       }
-    });
-
-    it('should handle no existing record as null data in puts', async () => {
-      transactionsRunner.activateTransaction();
-      (repository as any).resolvePaths.mockResolvedValue({ userId: ['uX'] });
-      (repository as any).generatePathCombinations.mockReturnValue([{ userId: 'uX' }]);
-      (repository as any).get.mockResolvedValue(null); // no record
-      entitySchema.toFullKeyString.mockReturnValueOnce('oldKx').mockReturnValueOnce('newKx');
-
-      await repository.updateKeyByPartial({ userId: 'uX' }, { userId: 'changed' });
-      const ops = transactionsRunner.getOperations();
-      expect(ops).toHaveLength(2);
-      expect(ops[0]).toEqual({ type: 'del', key: 'oldKx' });
-
-      if (isPutBatch(ops[1])) {
-        expect(JSON.parse(ops[1].value as string)).toBeNull();
-      }
-    });
-
-    describe('updateData', () => {
-      it('should update data by calling put directly', async () => {
-        const keyObj = { id: '1' };
-        const data = { name: 'NewName' };
-
-        repository.put = jest.fn().mockResolvedValue(null);
-
-        await repository.updateData(keyObj, data);
-
-        expect(repository.put).toHaveBeenCalledWith(keyObj, data);
-      });
     });
   });
 });
