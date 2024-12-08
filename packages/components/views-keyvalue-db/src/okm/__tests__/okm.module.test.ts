@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { OKMModule, OKMModuleOptions } from '../okm.module';
 import { ConnectionManager } from '../connection-manager';
-import { SchemasManager } from '../schemas-manager';
+import { EntitiesManager } from '../entities-manager';
 import { TransactionsRunner } from '../transactions-runner';
 import { EntitySchema } from '../schema';
 
@@ -42,17 +42,17 @@ export const BalanceSchema = new EntitySchema({
 describe('OKMModule', () => {
   let module: TestingModule;
   let connectionManager: ConnectionManager;
-  let schemasManager: SchemasManager;
+  let entitiesManager: EntitiesManager;
   let transactionsRunner: TransactionsRunner;
 
-  // Mock schemas for testing
-  const mockSchemas: EntitySchema[] = [OutputSchema, BalanceSchema];
+  // Mock entities for testing
+  const mockEntities: EntitySchema[] = [OutputSchema, BalanceSchema];
 
   // Configuration for the module in tests
   const mockConfig: OKMModuleOptions = {
     database: 'test-db',
     type: 'rocksdb',
-    schemas: mockSchemas,
+    entities: mockEntities,
     options: {},
   };
 
@@ -64,7 +64,7 @@ describe('OKMModule', () => {
 
     // Retrieve instances of the providers from the module
     connectionManager = module.get<ConnectionManager>(ConnectionManager);
-    schemasManager = module.get<SchemasManager>(SchemasManager);
+    entitiesManager = module.get<EntitiesManager>(EntitiesManager);
     transactionsRunner = module.get<TransactionsRunner>(TransactionsRunner);
   });
 
@@ -77,10 +77,10 @@ describe('OKMModule', () => {
     expect(module).toBeDefined();
   });
 
-  describe('SchemasManager', () => {
-    it('should provide SchemasManager', () => {
-      expect(schemasManager).toBeDefined();
-      expect(schemasManager).toBeInstanceOf(SchemasManager);
+  describe('EntitiesManager', () => {
+    it('should provide EntitiesManager', () => {
+      expect(entitiesManager).toBeDefined();
+      expect(entitiesManager).toBeInstanceOf(EntitiesManager);
     });
   });
 
@@ -98,10 +98,10 @@ describe('OKMModule', () => {
       expect(exportedConnectionManager).toBe(connectionManager);
     });
 
-    it('should export SchemasManager', () => {
-      const exportedSchemasManager = module.get<SchemasManager>(SchemasManager);
-      expect(exportedSchemasManager).toBeDefined();
-      expect(exportedSchemasManager).toBe(schemasManager);
+    it('should export EntitiesManager', () => {
+      const exportedEntitiesManager = module.get<EntitiesManager>(EntitiesManager);
+      expect(exportedEntitiesManager).toBeDefined();
+      expect(exportedEntitiesManager).toBe(entitiesManager);
     });
 
     it('should export TransactionsRunner', () => {
@@ -112,20 +112,20 @@ describe('OKMModule', () => {
   });
 
   describe('Edge Cases', () => {
-    it('should handle an empty list of schemas correctly', async () => {
-      const configWithNoSchemas: OKMModuleOptions = {
+    it('should handle an empty list of entities correctly', async () => {
+      const configWithNoEntities: OKMModuleOptions = {
         database: 'test-db',
         type: 'rocksdb',
-        schemas: [],
+        entities: [],
         options: {},
       };
 
       const testModule = await Test.createTestingModule({
-        imports: [OKMModule.forRoot(configWithNoSchemas)],
+        imports: [OKMModule.forRoot(configWithNoEntities)],
       }).compile();
 
-      const testSchemasManager = testModule.get<SchemasManager>(SchemasManager);
-      expect(testSchemasManager.schemas).toEqual(new Map());
+      const testEntitiesManager = testModule.get<EntitiesManager>(EntitiesManager);
+      expect(testEntitiesManager.entities).toEqual(new Map());
 
       await testModule.close();
     });
