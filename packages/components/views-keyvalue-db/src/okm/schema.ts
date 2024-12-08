@@ -11,9 +11,9 @@ export interface ValueDefinition {
 
 export interface SchemaDefinition {
   prefix: string;
-  separator: string;
-  paths: Record<string, PathDefinition>;
-  data?: ValueDefinition | null;
+  separator?: string;
+  paths?: Record<string, PathDefinition>;
+  data?: ValueDefinition;
 }
 
 export class EntitySchema {
@@ -24,8 +24,8 @@ export class EntitySchema {
 
   constructor(definition: SchemaDefinition) {
     this.prefix = definition.prefix;
-    this.separator = definition.separator;
-    this.paths = definition.paths;
+    this.separator = definition.separator ?? ':';
+    this.paths = definition.paths ?? {};
     this.data = definition.data ?? null;
   }
 

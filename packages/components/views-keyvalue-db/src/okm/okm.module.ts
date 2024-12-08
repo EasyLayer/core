@@ -1,16 +1,15 @@
 import { Module, DynamicModule } from '@nestjs/common';
 import { ConnectionManager, ConnectionOptions } from './connection-manager';
-import { SchemasManager } from './schemas-manager';
-import { EntitySchema } from './schema';
+import { EntitiesManager, EntityClassOrSchema } from './entities-manager';
 import { TransactionsRunner } from './transactions-runner';
 
 export interface OKMModuleOptions extends ConnectionOptions {
-  schemas: EntitySchema[];
+  entities: EntityClassOrSchema[];
 }
 
 @Module({})
 export class OKMModule {
-  static forRoot({ schemas, ...restOptions }: OKMModuleOptions): DynamicModule {
+  static forRoot({ entities, ...restOptions }: OKMModuleOptions): DynamicModule {
     return {
       module: OKMModule,
       imports: [],
@@ -20,8 +19,8 @@ export class OKMModule {
           useFactory: () => new ConnectionManager(restOptions),
         },
         {
-          provide: SchemasManager,
-          useFactory: (connectionManager) => new SchemasManager(schemas, connectionManager),
+          provide: EntitiesManager,
+          useFactory: (connectionManager) => new EntitiesManager(entities, connectionManager),
           inject: [ConnectionManager],
         },
         {
@@ -30,7 +29,7 @@ export class OKMModule {
           inject: [ConnectionManager],
         },
       ],
-      exports: [ConnectionManager, SchemasManager, TransactionsRunner],
+      exports: [ConnectionManager, EntitiesManager, TransactionsRunner],
     };
   }
 }

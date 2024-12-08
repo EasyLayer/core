@@ -1,5 +1,5 @@
 export * from './okm.module';
-export * from './schemas-manager';
+export * from './entities-manager';
 export * from './transactions-runner';
 export * from './connection-manager';
 export * from './repository';
