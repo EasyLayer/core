@@ -69,13 +69,14 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         if (batch.length > 0) {
           await this.processBatch(batch);
           resetInterval();
-        } else {
-          this.log.debug(
-            'Queue is empty. Waiting...',
-            { queueLastHeight: this._queue.lastHeight },
-            this.constructor.name
-          );
         }
+        // else {
+        //   this.log.debug(
+        //     'Queue is empty. Waiting...',
+        //     { queueLastHeight: this._queue.lastHeight },
+        //     this.constructor.name
+        //   );
+        // }
       },
       {
         interval: 1,
@@ -88,6 +89,8 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   private async processBatch(batch: Block[]) {
     // Init the promise for the next wait
     this.initBatchProcessedPromise();
+
+    this.log.debug('Iterator process batch with length', { batchLength: batch.length }, this.constructor.name);
 
     try {
       await this.blocksCommandExecutor.handleBatch({ batch, requestId: uuidv4() });
@@ -107,8 +110,6 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     // Now we start processing blocks only in batches of the appropriate sizes.
     // If there are few blocks in the queue, we will not take them out for now in order to unload other places.
     const batch: Block[] = await this._queue.getBatchUpToSize(minBatchSize);
-
-    this.log.debug('Iterator peeked blocks batch with length', { batchLength: batch.length }, this.constructor.name);
 
     return batch;
   }
