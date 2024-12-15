@@ -49,7 +49,11 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           // IMPORTANT: every exponential tick we fetch current blockchain network height
           const currentNetworkHeight = await this.networkProviderService.getCurrentBlockHeight();
 
-          this.log.debug('Current blockchain network height', { height: currentNetworkHeight }, this.constructor.name);
+          this.log.debug(
+            'Current blockchain network height',
+            { queueLastHeight: queue.lastHeight, height: currentNetworkHeight },
+            this.constructor.name
+          );
 
           // IMPORTANT: We expect that strategy load all blocks to currentNetworkHeight for one method call
           await this._loadingStrategy?.load(currentNetworkHeight);
