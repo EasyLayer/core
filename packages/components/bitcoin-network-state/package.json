@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/bitcoin-network-state",
-  "version": "0.2.11",
+  "version": "0.3.0",
   "description": "",
   "private": true,
   "scripts": {
