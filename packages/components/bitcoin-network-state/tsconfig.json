@@ -23,6 +23,7 @@
     { "path": "../cqrs/tsconfig.json" },
     { "path": "../bitcoin-network-provider/tsconfig.json" },
     { "path": "../logger/tsconfig.json" },
+    { "path": "../views-rdbms-db/tsconfig.json" },
     { "path": "../../common/domain-cqrs-components/tsconfig.json" },
   ],
   "include": ["src"],
