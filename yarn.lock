@@ -678,7 +678,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/bitcoin-blocks-queue@workspace:packages/components/bitcoin-blocks-queue"
   dependencies:
-    "@easylayer/common": 0.3.1
+    "@easylayer/common": 0.3.2
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/swagger": 7.1.17
@@ -749,7 +749,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@easylayer/common@0.3.1, @easylayer/common@workspace:packages/common":
+"@easylayer/common@0.3.2, @easylayer/common@workspace:packages/common":
   version: 0.0.0-use.local
   resolution: "@easylayer/common@workspace:packages/common"
   dependencies:
@@ -784,11 +784,11 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@easylayer/components@0.3.1, @easylayer/components@workspace:packages/components":
+"@easylayer/components@0.3.2, @easylayer/components@workspace:packages/components":
   version: 0.0.0-use.local
   resolution: "@easylayer/components@workspace:packages/components"
   dependencies:
-    "@easylayer/common": 0.3.1
+    "@easylayer/common": 0.3.2
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/cqrs": 10.2.6
@@ -943,7 +943,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/network-transport@workspace:packages/components/network-transport"
   dependencies:
-    "@easylayer/components": 0.3.1
+    "@easylayer/components": 0.3.2
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/testing": 10.2.10
@@ -1041,7 +1041,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/websocket-messages@workspace:packages/components/websocket-messages"
   dependencies:
-    "@easylayer/common": 0.3.1
+    "@easylayer/common": 0.3.2
     "@nestjs/common": 10.2.10
     "@nestjs/core": 10.2.10
     "@nestjs/platform-socket.io": 10.2.10
