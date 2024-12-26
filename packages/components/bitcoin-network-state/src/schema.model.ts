@@ -1,4 +1,4 @@
-import { DataSource, getSQLFromEntitySchema } from '@easylayer/components/views-rdbms-db';
+import { DataSource, QueryRunner, getSQLFromEntitySchema } from '@easylayer/components/views-rdbms-db';
 import { AggregateRoot } from '@easylayer/components/cqrs';
 import { AppLogger } from '@easylayer/components/logger';
 import {
@@ -24,12 +24,12 @@ export class Schema extends AggregateRoot {
     requestId,
     dataSource,
     logger,
-    isUnlogged = false,
+    isUnlogged,
   }: {
     requestId: string;
     dataSource: DataSource;
     logger: AppLogger;
-    isUnlogged: boolean;
+    isUnlogged?: boolean;
   }) {
     if (this.status !== SchemaStatuses.SYNCHRONISED) {
       throw new Error(`We can only start checking if the previous synchronization is ${SchemaStatuses.SYNCHRONISED}`);
@@ -43,7 +43,7 @@ export class Schema extends AggregateRoot {
       // This means that there are no more changes and we publish an event that everything is synced
       // IMPORTANT: This event is only in this one place.
 
-      logger.info('Scheme is up to date', {}, this.constructor.name);
+      logger.info('Schema is synchronised', {}, this.constructor.name);
 
       return await this.apply(
         new BitcoinSchemaSynchronisedEvent({
@@ -55,7 +55,7 @@ export class Schema extends AggregateRoot {
     }
 
     logger.info(
-      'Scheme needs to be updated',
+      'Schema needs to be updated',
       { upQueriesLength: upQueries.length, downQueriesLength: downQueries.length },
       this.constructor.name
     );
@@ -84,9 +84,43 @@ export class Schema extends AggregateRoot {
     );
   }
 
-  public async up({ requestId }: { requestId: string }) {
+  public async up({
+    requestId,
+    upQueries,
+    dataSource,
+    logger,
+  }: {
+    requestId: string;
+    upQueries: any[];
+    dataSource: DataSource;
+    logger: AppLogger;
+  }) {
     if (this.status !== SchemaStatuses.SYNCHRONISING) {
       throw new Error(`We can complete the migration only if the schema status is ${SchemaStatuses.SYNCHRONISING}`);
+    }
+
+    // IMPORTANT: This command does not look at the database or migrations
+    // it only updates what it is told.
+
+    const viewsQueryRunner: QueryRunner = dataSource.createQueryRunner();
+
+    await viewsQueryRunner.connect();
+    await viewsQueryRunner.startTransaction();
+
+    try {
+      logger.debug('Views Shema updating...', { upQueries }, this.constructor.name);
+
+      // Executing modified SQL queries
+      for (const queryObj of upQueries) {
+        await viewsQueryRunner.query(queryObj.query);
+      }
+
+      await viewsQueryRunner.commitTransaction();
+    } catch (e) {
+      await viewsQueryRunner.rollbackTransaction();
+      throw e;
+    } finally {
+      await viewsQueryRunner.release();
     }
 
     await this.apply(
@@ -102,15 +136,15 @@ export class Schema extends AggregateRoot {
     throw new Error('method up is not implemented yes');
   }
 
+  private onBitcoinSchemaSynchronisedEvent({ payload }: BitcoinSchemaSynchronisedEvent) {
+    const { status } = payload;
+    this.status = status as SchemaStatuses;
+  }
+
   private onBitcoinSchemaUpMigrationStartedEvent({ payload }: BitcoinSchemaUpMigrationStartedEvent) {
     const { upQueries, downQueries, status } = payload;
     this.upQueries = [...upQueries];
     this.downQueries = [...downQueries];
-    this.status = status as SchemaStatuses;
-  }
-
-  private onBitcoinSchemaSynchronisedEvent({ payload }: BitcoinSchemaSynchronisedEvent) {
-    const { status } = payload;
     this.status = status as SchemaStatuses;
   }
 
