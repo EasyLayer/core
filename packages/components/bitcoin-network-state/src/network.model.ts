@@ -14,7 +14,7 @@ import {
   BitcoinNetworkReorganisationFinishedEvent,
 } from '@easylayer/common/domain-cqrs-components/bitcoin';
 
-enum NetworkStatuses {
+export enum NetworkStatuses {
   AWAITING = 'awaiting',
   REORGANISATION = 'reorganisation',
 }

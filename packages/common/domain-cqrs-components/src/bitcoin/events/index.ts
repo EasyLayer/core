@@ -6,3 +6,5 @@ export * from './network-reorganisation-processed.event';
 export * from './wallet-initialized.event';
 export * from './wallet-keys-pair-added.event';
 export * from './schema-up-migration-finished.event';
+export * from './schema-synchronised.event';
+export * from './schema-up-migration-started.event';
