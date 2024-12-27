@@ -21,6 +21,10 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
+
+    // IMPORTANT: This is here to avoid an error when we access _resolveNextBatch() method but it is not initialized
+    // (since it is accessible via a getter)
+    this.initBatchProcessedPromise();
   }
 
   get resolveNextBatch() {
@@ -55,8 +59,6 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
 
     // TODO: think where put this
     this._queue = queue;
-
-    this.initBatchProcessedPromise();
 
     this._timer = exponentialIntervalAsync(
       async (resetInterval) => {
@@ -118,7 +120,8 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     this.batchProcessedPromise = new Promise<void>((resolve) => {
       this._resolveNextBatch = resolve;
     });
-    if (this._queue.length === 0) {
+    // TODO: delete [?] when we figure out where to initialize the this._queue
+    if (this._queue?.length === 0) {
       this._resolveNextBatch();
     }
   }
