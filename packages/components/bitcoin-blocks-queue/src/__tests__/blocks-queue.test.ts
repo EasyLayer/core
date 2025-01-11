@@ -44,8 +44,6 @@ describe('BlocksQueue', () => {
   beforeEach(() => {
     // Initialize the queue with lastHeight = -1
     queue = new BlocksQueue<TestBlock>(-1);
-    // Set minTransferSize to 50 bytes for testing purposes
-    queue.minTransferSize = 50;
   });
 
   describe('Initialization', () => {
@@ -55,7 +53,6 @@ describe('BlocksQueue', () => {
       expect(queue.currentSize).toBe(0);
       expect(queue.isQueueFull).toBe(false);
       expect(queue.isMaxHeightReached).toBe(false);
-      expect(queue.minTransferSize).toBe(50); // Confirm minTransferSize is set correctly
     });
   });
 

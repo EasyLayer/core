@@ -12,9 +12,8 @@ export class BlocksQueue<T extends Block> {
   private inStack: T[] = [];
   private outStack: T[] = [];
   private _lastHeight: number;
-  private _maxQueueSize: number = 10 * 1024 * 1024; // Bytes
+  private _maxQueueSize: number = 1 * 1024 * 1024; // Bytes
   private _size: number = 0; // Bytes
-  private _minTransferSize: number = 1 * 1024 * 1024; // Bytes
   private _maxBlockHeight: number = Number.MAX_SAFE_INTEGER;
   private readonly mutex = new Mutex();
 
@@ -114,33 +113,13 @@ export class BlocksQueue<T extends Block> {
   }
 
   /**
-   * Gets the minimum transfer size in bytes.
-   * @returns The minimum transfer size in bytes as a number.
-   * @complexity O(1)
-   */
-  public get minTransferSize(): number {
-    return this._minTransferSize;
-  }
-
-  /**
-   * Sets the minimum transfer size in bytes.
-   * @param size - The new minimum transfer size in bytes.
-   * @complexity O(1)
-   */
-  public set minTransferSize(size: number) {
-    this._minTransferSize = size;
-  }
-
-  /**
    * Retrieves the first block in the queue without removing it.
    * @returns A promise that resolves to the first block in the queue or `undefined` if the queue is empty.
    * @complexity O(1)
    */
   public async firstBlock(): Promise<T | undefined> {
     return this.mutex.runExclusive(async () => {
-      if (this.outStack.length === 0) {
-        this.transferItems();
-      }
+      this.transferItems();
       return this.outStack[this.outStack.length - 1];
     });
   }
@@ -163,9 +142,7 @@ export class BlocksQueue<T extends Block> {
    */
   public fetchBlockFromOutStack(height: number): Promise<T | undefined> {
     return this.mutex.runExclusive(async () => {
-      if (this.outStack.length === 0) {
-        this.transferItems();
-      }
+      this.transferItems();
       return this.binarySearch(this.outStack, height, false);
     });
   }
@@ -232,9 +209,7 @@ export class BlocksQueue<T extends Block> {
 
   public async dequeue(hash: string) {
     return this.mutex.runExclusive(() => {
-      if (this.outStack.length === 0) {
-        this.transferItems();
-      }
+      this.transferItems();
 
       const block = this.outStack[this.outStack.length - 1];
       if (block && block.hash === hash) {
@@ -263,9 +238,8 @@ export class BlocksQueue<T extends Block> {
       if (this.length === 0) {
         return [];
       }
-      if (this.outStack.length === 0) {
-        this.transferItems();
-      }
+
+      this.transferItems();
 
       const batch = [];
       let accumulatedSize = 0;
@@ -316,9 +290,7 @@ export class BlocksQueue<T extends Block> {
   public findBlocks(hashSet: Set<string>): Promise<T[]> {
     return this.mutex.runExclusive(async () => {
       const blocks = [];
-      if (this.outStack.length === 0) {
-        this.transferItems();
-      }
+      this.transferItems();
       for (let i = this.outStack.length - 1; i >= 0; i--) {
         const block = this.outStack[i];
         if (hashSet.has(block.hash)) {
@@ -337,10 +309,7 @@ export class BlocksQueue<T extends Block> {
    * @complexity O(n)
    */
   private transferItems(): void {
-    // IMPORTANT: This is necessary to specify the lower limit of the batch size.
-    // This value must be less than the minimum size of 1 current network block.
-    // (current real-time blockchain block size at the time the queue was started)
-    if (this._size > this._minTransferSize) {
+    if (this.outStack.length === 0) {
       while (this.inStack.length > 0) {
         this.outStack.push(this.inStack.pop()!);
       }
