@@ -164,7 +164,7 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
         await this.updateSnapshot(aggregate);
       }
     } catch (error) {
-      this.handleDatabaseError(error);
+      this.handleDatabaseError(error, aggregate);
     }
   }
 
@@ -275,8 +275,7 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
     }
   }
 
-  // TODO: move to new file or class
-  private handleDatabaseError(error: any): void {
+  private handleDatabaseError(error: any, aggregate: T): void {
     if (error instanceof QueryFailedError) {
       const driverError = error.driverError;
 
@@ -284,7 +283,8 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
       if (driverError.code === 'SQLITE_CONSTRAINT') {
         const errorMessage = driverError.message;
         if (errorMessage.includes('UNIQUE constraint failed: events.requestId, events.aggregateId')) {
-          // Idempotency protection, just return
+          this.log.debug('SQLITE_CONSTRAINT: Idempotency protection', null, this.constructor.name);
+          aggregate.uncommit();
           return;
         }
         if (errorMessage.includes('UNIQUE constraint failed: events.version, events.aggregateId')) {
@@ -293,7 +293,8 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
 
         switch (driverError.message) {
           case 'UQ__request_id__aggregate_id':
-            console.log('Idempotency protection, just return\n');
+            this.log.debug('SQLITE_CONSTRAINT: Idempotency protection', null, this.constructor.name);
+            aggregate.uncommit();
             return;
           case 'UQ__version__aggregate_id':
             throw new Error('Version conflict error');
@@ -305,7 +306,8 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
       // PostgreSQL Error Handling
       if (driverError.code === PostgresError.UNIQUE_VIOLATION) {
         if (driverError.detail.includes('Key (request_id, aggregate_id)')) {
-          // Idempotency protection, just return
+          this.log.debug('POSTGRES_CONSTRAINT: Idempotency protection', null, this.constructor.name);
+          aggregate.uncommit();
           return;
         }
         if (driverError.detail.includes('Key (version, aggregate_id)')) {

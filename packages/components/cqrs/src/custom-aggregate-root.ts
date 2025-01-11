@@ -137,7 +137,9 @@ export abstract class CustomAggregateRoot<EventBase extends IEvent = IEvent> {
   // then this fromSnapshot method must be overridden in the aggregate itself,
   // since it has access to the classes of its structures.
   protected fromSnapshot(state: any): void {
-    Object.assign(this, state);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { version, ...rest } = state;
+    Object.assign(this, rest);
   }
 
   protected getEventHandler<T extends EventBase = EventBase>(event: T): Type<IEventHandler> | undefined {
