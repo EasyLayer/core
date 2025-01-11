@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AppLogger, RuntimeTracker } from '@easylayer/components/logger';
+import { AppLogger } from '@easylayer/components/logger';
 import { BlocksQueue } from './blocks-queue';
 import { Block } from './interfaces';
 import { BlocksQueueIteratorService } from './blocks-iterator';
@@ -38,43 +38,25 @@ export class BlocksQueueService {
     // NOTE: We clear the entire queue
     // because if a reorganization has occurred, this means that all the blocks in the queue
     // have already gone along the wrong chain
-    this._queue.reorganize(Number(newStartHeight));
+    await this._queue.reorganize(Number(newStartHeight));
 
     this.blocksQueueIterator.resolveNextBatch();
 
-    this.log.info('Queue was clear to height: ', { newStartHeight }, this.constructor.name);
+    this.log.debug('Queue was clear to height: ', { newStartHeight }, this.constructor.name);
   }
 
-  @RuntimeTracker({ showMemory: true, warningThresholdMs: 10, errorThresholdMs: 1000 })
-  public async confirmProcessedBatch(blockHashes: string[]): Promise<Block[]> {
-    const confirmedBlocks: Block[] = [];
-
+  async confirmProcessedBatch(blockHashes: string[]): Promise<Block[]> {
+    const confirmedBlocks = [];
     for (const hash of blockHashes) {
-      const block = await this._queue.firstBlock();
-
-      if (block && block.hash === hash) {
-        const dequeuedBlock = await this._queue.dequeue();
-
-        if (!dequeuedBlock) {
-          throw new Error(`Block not found in the queue after dequeue: ${hash}`);
-        }
-
-        confirmedBlocks.push(dequeuedBlock);
-      } else {
-        // If the block is not found or the hash does not match, throw an error
-        throw new Error(`Block not found or hash mismatch: ${hash}`);
-      }
+      const dequeuedBlock = await this._queue.dequeue(hash);
+      confirmedBlocks.push(dequeuedBlock);
     }
-
-    // Allow the next batch to be processed
     this.blocksQueueIterator.resolveNextBatch();
-
     return confirmedBlocks;
   }
 
-  public getBlocksByHashes(hashes: string[]): Block[] {
+  public async getBlocksByHashes(hashes: string[]): Promise<Block[]> {
     const hashSet = new Set(hashes);
-
-    return this._queue.findBlocks(hashSet);
+    return await this._queue.findBlocks(hashSet);
   }
 }

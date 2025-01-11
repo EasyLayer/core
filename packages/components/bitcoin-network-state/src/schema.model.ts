@@ -43,7 +43,7 @@ export class Schema extends AggregateRoot {
       // This means that there are no more changes and we publish an event that everything is synced
       // IMPORTANT: This event is only in this one place.
 
-      logger.info('Schema is synchronised', {}, this.constructor.name);
+      logger.debug('Schema is synchronised', {}, this.constructor.name);
 
       return await this.apply(
         new BitcoinSchemaSynchronisedEvent({
@@ -54,7 +54,7 @@ export class Schema extends AggregateRoot {
       );
     }
 
-    logger.info(
+    logger.debug(
       'Schema needs to be updated',
       { upQueriesLength: upQueries.length, downQueriesLength: downQueries.length },
       this.constructor.name

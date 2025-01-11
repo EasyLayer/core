@@ -31,7 +31,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   }
 
   public async startBlocksLoading(queue: BlocksQueue<Block>): Promise<void> {
-    this.log.info('Setup blocks loading from height', {}, this.constructor.name);
+    this.log.debug('Setup blocks loading from height', {}, this.constructor.name);
 
     // NOTE: We use this to make sure that
     // method startBlocksLoading() is executed only once in its entire life.
@@ -59,7 +59,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           await this._loadingStrategy?.load(currentNetworkHeight);
           resetInterval();
         } catch (error) {
-          this.log.error('Loading strategy error', error, this.constructor.name);
+          this.log.warn('Loading strategy error', error, this.constructor.name);
           await this._loadingStrategy?.stop();
         }
       },

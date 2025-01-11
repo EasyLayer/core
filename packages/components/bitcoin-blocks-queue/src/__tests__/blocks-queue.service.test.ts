@@ -93,7 +93,7 @@ describe('BlocksQueueService', () => {
 
       expect(mockBlockQueue.reorganize).toHaveBeenCalledWith(Number(newStartHeight));
       expect(mockBlocksIterator.resolveNextBatch).toHaveBeenCalled();
-      expect(mockLogger.info).toHaveBeenCalledWith(
+      expect(mockLogger.debug).toHaveBeenCalledWith(
         'Queue was clear to height: ',
         { newStartHeight },
         service.constructor.name

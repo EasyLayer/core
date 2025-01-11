@@ -95,7 +95,7 @@ export class Wallet extends AggregateRoot {
       })
     );
 
-    logger.info('Keys Pair successfull added', { publicKeyHash }, this.constructor.name);
+    logger.debug('Keys Pair successfull added', { publicKeyHash }, this.constructor.name);
   }
 
   private onBitcoinWalletInitializedEvent({ payload }: BitcoinWalletInitializedEvent) {

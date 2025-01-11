@@ -40,15 +40,15 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   onModuleDestroy() {
     this._timer?.destroy();
     this._timer = null;
-    this._isIterating = false;
     this._resolveNextBatch();
+    this._isIterating = false;
   }
 
   /**
    * Starts iterating over the block queue and processing blocks.
    */
   public async startQueueIterating(queue: BlocksQueue<Block>): Promise<void> {
-    this.log.info('Setup blocks iterating', {}, this.constructor.name);
+    this.log.debug('Setup blocks iterating', {}, this.constructor.name);
 
     // NOTE: We use this to make sure that
     // method startQueueIterating() is executed only once in its entire life.
@@ -74,16 +74,9 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
           await this.processBatch(batch);
           resetInterval();
         }
-        // else {
-        //   this.log.debug(
-        //     'Queue is empty. Waiting...',
-        //     { queueLastHeight: this._queue.lastHeight },
-        //     this.constructor.name
-        //   );
-        // }
       },
       {
-        interval: 1,
+        interval: 500,
         maxInterval: 3000,
         multiplier: 2,
       }
@@ -99,7 +92,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     try {
       await this.blocksCommandExecutor.handleBatch({ batch, requestId: uuidv4() });
     } catch (error) {
-      this.log.error('Failed to process the batch', error, this.constructor.name);
+      this.log.warn('Failed to process the batch', error, this.constructor.name);
 
       // IMPORTANT: We call this to resolve queue promise
       // that we can try same block one more time

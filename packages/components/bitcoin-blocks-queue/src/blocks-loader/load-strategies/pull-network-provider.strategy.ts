@@ -47,24 +47,27 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
    */
   public async load(currentNetworkHeight: number): Promise<void> {
     if (this.queue.isMaxHeightReached) {
-      this.log.debug('Reached max block height', { queueLastHeight: this.queue.lastHeight }, this.constructor.name);
-      return;
+      throw new Error('Reached max block height');
+      // this.log.debug('Reached max block height', { queueLastHeight: this.queue.lastHeight }, this.constructor.name);
+      // return;
     }
 
     // Check if we have reached the current network height
     if (this.queue.lastHeight >= currentNetworkHeight) {
-      this.log.debug(
-        'Reached current network height',
-        { queueLastHeight: this.queue.lastHeight },
-        this.constructor.name
-      );
-      return;
+      throw new Error('Reached current network height');
+      // this.log.debug(
+      //   'Reached current network height',
+      //   { queueLastHeight: this.queue.lastHeight },
+      //   this.constructor.name
+      // );
+      // return;
     }
 
     // Check if the queue is full
     if (this.queue.isQueueFull) {
-      this.log.debug('The queue is full', { queueLastHeight: this.queue.lastHeight }, this.constructor.name);
-      return;
+      throw new Error('The queue is full');
+      // this.log.debug('The queue is full', { queueLastHeight: this.queue.lastHeight }, this.constructor.name);
+      // return;
     }
 
     // We only upload new hashes if we've already used them all.
@@ -214,7 +217,7 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       if (block) {
         if (block.height <= this.queue.lastHeight) {
           // The situation is when somehow we still have old blocks, we just skip them
-          this.log.debug('Skipping block with height less than or equal to lastHeight', {
+          this.log.warn('Skipping block with height less than or equal to lastHeight', {
             blockHeight: block.height,
             lastHeight: this.queue.lastHeight,
           });
