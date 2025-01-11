@@ -81,7 +81,7 @@ export class Network extends AggregateRoot {
           : this.chain.lastBlockHeight
         : indexedHeight;
 
-    logger.info(
+    logger.debug(
       'Init Network Aggregate',
       { writeStateLastHeight: height, readStateLastHeight: indexedHeight },
       this.constructor.name
@@ -124,7 +124,7 @@ export class Network extends AggregateRoot {
       });
     }
 
-    logger.info('Add blocks', { blocksLength: blocks.length }, this.constructor.name);
+    logger.debug('Add blocks', { blocksLength: blocks.length }, this.constructor.name);
 
     return await this.apply(
       new BitcoinNetworkBlocksAddedEvent({
@@ -222,7 +222,7 @@ export class Network extends AggregateRoot {
     if (oldBlock.hash === localBlock.hash && oldBlock.previousblockhash === localBlock.previousblockhash) {
       // Match found
 
-      logger.info('Start reorganisation', { height }, this.constructor.name);
+      logger.debug('Start reorganisation', { height }, this.constructor.name);
 
       return await this.apply(
         new BitcoinNetworkReorganisationStartedEvent({

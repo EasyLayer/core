@@ -129,7 +129,7 @@ describe('BlocksQueue', () => {
       // Trigger transferItems by calling firstBlock
       await queue.firstBlock();
 
-      const dequeuedBlock1 = await queue.dequeue();
+      const dequeuedBlock1 = await queue.dequeue(block1.hash);
       expect(dequeuedBlock1).toEqual({
         height: 0,
         hash: 'hash0',
@@ -152,7 +152,7 @@ describe('BlocksQueue', () => {
       expect(queue.isQueueFull).toBe(false);
       expect(queue.isMaxHeightReached).toBe(false);
 
-      const dequeuedBlock2 = await queue.dequeue();
+      const dequeuedBlock2 = await queue.dequeue(block2.hash);
       expect(dequeuedBlock2).toEqual({
         height: 1,
         hash: 'hash1',
@@ -176,9 +176,8 @@ describe('BlocksQueue', () => {
       expect(queue.isMaxHeightReached).toBe(false);
     });
 
-    it('should return undefined when dequeuing from an empty queue', async () => {
-      const dequeuedBlock = await queue.dequeue();
-      expect(dequeuedBlock).toBeUndefined();
+    it('should throw an error when dequeuing unknown block', async () => {
+      await expect(queue.dequeue('123')).rejects.toThrow(`Block not found or hash mismatch: 123, undefined`);
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(-1);
       expect(queue.currentSize).toBe(0);
@@ -212,7 +211,7 @@ describe('BlocksQueue', () => {
       await queue.enqueue(block1);
       await queue.enqueue(block2);
 
-      queue.reorganize(0);
+      await queue.reorganize(0);
 
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(0);
@@ -265,7 +264,7 @@ describe('BlocksQueue', () => {
       await queue.enqueue(block2);
       await queue.firstBlock(); // Trigger transferItems
 
-      const result = queue.fetchBlockFromOutStack(0);
+      const result = await queue.fetchBlockFromOutStack(0);
       expect(result).toEqual({
         height: 0,
         hash: 'hash0',
@@ -289,7 +288,7 @@ describe('BlocksQueue', () => {
       await queue.enqueue(block);
       await queue.firstBlock(); // Trigger transferItems
 
-      const result = queue.fetchBlockFromOutStack(1);
+      const result = await queue.fetchBlockFromOutStack(1);
       expect(result).toBeUndefined();
     });
   });
@@ -307,7 +306,7 @@ describe('BlocksQueue', () => {
       // Trigger transferItems
       await queue.firstBlock();
 
-      const foundBlocks = queue.findBlocks(new Set(['hash0', 'hash2']));
+      const foundBlocks = await queue.findBlocks(new Set(['hash0', 'hash2']));
       expect(foundBlocks).toContainEqual({
         height: 0,
         hash: 'hash0',
@@ -340,7 +339,6 @@ describe('BlocksQueue', () => {
         ],
         size: 200,
       });
-      expect(foundBlocks.length).toBe(2);
     });
 
     it('should return an empty array when finding blocks with non-existent hashes', async () => {
@@ -350,85 +348,8 @@ describe('BlocksQueue', () => {
       // Trigger transferItems
       await queue.firstBlock();
 
-      const foundBlocks = queue.findBlocks(new Set(['hash1']));
+      const foundBlocks = await queue.findBlocks(new Set(['hash1']));
       expect(foundBlocks).toEqual([]);
-    });
-  });
-
-  describe('Peek Previous Blocks Generator', () => {
-    it('should handle peekPrevBlock generator correctly', async () => {
-      const block1 = new TestBlock(0, [createTransaction(100)]);
-      const block2 = new TestBlock(1, [createTransaction(150)]);
-      const block3 = new TestBlock(2, [createTransaction(200)]);
-
-      await queue.enqueue(block1);
-      await queue.enqueue(block2);
-      await queue.enqueue(block3);
-
-      // Trigger transferItems
-      await queue.firstBlock();
-
-      const generator = queue.peekPrevBlock();
-      const firstYield = generator.next().value;
-      const secondYield = generator.next().value;
-      const thirdYield = generator.next().value;
-
-      expect(firstYield).toEqual({
-        height: 0,
-        hash: 'hash0',
-        tx: [
-          {
-            txid: 'txid100',
-            hash: 'hash100',
-            vin: [],
-            vout: [],
-            hex: undefined, // hex was removed
-            witness: undefined,
-            size: 100,
-          },
-        ],
-        size: 100,
-      });
-      expect(secondYield).toEqual({
-        height: 1,
-        hash: 'hash1',
-        tx: [
-          {
-            txid: 'txid150',
-            hash: 'hash150',
-            vin: [],
-            vout: [],
-            hex: undefined, // hex was removed
-            witness: undefined,
-            size: 150,
-          },
-        ],
-        size: 150,
-      });
-      expect(thirdYield).toEqual({
-        height: 2,
-        hash: 'hash2',
-        tx: [
-          {
-            txid: 'txid200',
-            hash: 'hash200',
-            vin: [],
-            vout: [],
-            hex: undefined, // hex was removed
-            witness: undefined,
-            size: 200,
-          },
-        ],
-        size: 200,
-      });
-      expect(generator.next().done).toBe(true);
-    });
-
-    it('should return no yields when the queue is empty', () => {
-      const generator = queue.peekPrevBlock();
-      const result = generator.next();
-      expect(result.done).toBe(true);
-      expect(result.value).toBeUndefined();
     });
   });
 

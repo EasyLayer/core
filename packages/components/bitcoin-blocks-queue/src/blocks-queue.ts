@@ -161,11 +161,13 @@ export class BlocksQueue<T extends Block> {
    * @returns The block with the specified height or `undefined` if not found.
    * @complexity O(log n)
    */
-  public fetchBlockFromOutStack(height: number): T | undefined {
-    if (this.outStack.length === 0) {
-      this.transferItems();
-    }
-    return this.binarySearch(this.outStack, height, false);
+  public fetchBlockFromOutStack(height: number): Promise<T | undefined> {
+    return this.mutex.runExclusive(async () => {
+      if (this.outStack.length === 0) {
+        this.transferItems();
+      }
+      return this.binarySearch(this.outStack, height, false);
+    });
   }
 
   /**
@@ -228,38 +230,25 @@ export class BlocksQueue<T extends Block> {
     });
   }
 
-  /**
-   * Dequeues the first block from the queue.
-   * @returns A promise that resolves to the dequeued block or `undefined` if the queue is empty.
-   * @complexity O(1)
-   */
-  public async dequeue(): Promise<T | undefined> {
-    return this.mutex.runExclusive(async () => {
-      const block = this.outStack.pop();
-      if (block) {
-        this._size -= block.size;
+  public async dequeue(hash: string) {
+    return this.mutex.runExclusive(() => {
+      if (this.outStack.length === 0) {
+        this.transferItems();
       }
-      return block;
+
+      const block = this.outStack[this.outStack.length - 1];
+      if (block && block.hash === hash) {
+        const dequeuedBlock = this.outStack.pop();
+        if (dequeuedBlock) {
+          this._size -= dequeuedBlock.size;
+          return dequeuedBlock;
+        } else {
+          throw new Error(`Block not found in the queue after dequeue: ${hash}`);
+        }
+      } else {
+        throw new Error(`Block not found or hash mismatch: ${hash}, ${block}`);
+      }
     });
-  }
-
-  /**
-   * Iterates over blocks in reverse order without removing them from the queue.
-   * @yields The previous block in the queue.
-   * @generator
-   * @complexity O(n)
-   */
-  public *peekPrevBlock(): Generator<T, void, unknown> {
-    if (this.outStack.length === 0) {
-      this.transferItems();
-    }
-
-    for (let i = this.outStack.length - 1; i >= 0; i--) {
-      // TODO: think about whether shallow copy is enough for us?
-      // yield { ...this.outStack[i] };
-      // yield _.cloneDeep(this.outStack[i]);
-      yield this.outStack[i];
-    }
   }
 
   /**
@@ -269,30 +258,28 @@ export class BlocksQueue<T extends Block> {
    * @throws Will throw an error if the first block exceeds the maximum batch size.
    * @complexity O(n)
    */
-  public async getBatchUpToSize(maxSize: number): Promise<T[]> {
+  public async getBatchUpToSize(maxSize: number) {
     return this.mutex.runExclusive(async () => {
       if (this.length === 0) {
         return [];
       }
+      if (this.outStack.length === 0) {
+        this.transferItems();
+      }
 
-      const batch: T[] = [];
+      const batch = [];
       let accumulatedSize = 0;
-
-      const iterator = this.peekPrevBlock();
-
-      for (const block of iterator) {
+      for (let i = this.outStack.length - 1; i >= 0; i--) {
+        const block = this.outStack[i];
         if (accumulatedSize + block.size > maxSize) {
           if (batch.length === 0) {
-            // If the first block exceeds maxSize, we guarantee to add at least one block for processing
             batch.push(block);
           }
           break;
         }
-
         batch.push(block);
         accumulatedSize += block.size;
       }
-
       return batch;
     });
   }
@@ -313,9 +300,11 @@ export class BlocksQueue<T extends Block> {
    * @param reorganizeHeight - The new last height to set after reorganization.
    * @complexity O(1)
    */
-  public reorganize(reorganizeHeight: number): void {
-    this.clear();
-    this._lastHeight = reorganizeHeight;
+  public async reorganize(reorganizeHeight: number): Promise<void> {
+    await this.mutex.runExclusive(() => {
+      this.clear();
+      this._lastHeight = reorganizeHeight;
+    });
   }
 
   /**
@@ -324,25 +313,23 @@ export class BlocksQueue<T extends Block> {
    * @returns An array of blocks that match the provided hashes.
    * @complexity O(n)
    */
-  public findBlocks(hashSet: Set<string>): T[] {
-    const blocks: T[] = [];
-    if (this.outStack.length === 0) {
-      this.transferItems();
-    }
-
-    // Iterate through the outStack in reverse order, starting from the last element
-    for (let i = this.outStack.length - 1; i >= 0; i--) {
-      const block = this.outStack[i];
-      if (hashSet.has(block.hash)) {
-        blocks.push(block);
-        if (blocks.length === hashSet.size) {
-          // Break the loop if all blocks are found
-          break;
+  public findBlocks(hashSet: Set<string>): Promise<T[]> {
+    return this.mutex.runExclusive(async () => {
+      const blocks = [];
+      if (this.outStack.length === 0) {
+        this.transferItems();
+      }
+      for (let i = this.outStack.length - 1; i >= 0; i--) {
+        const block = this.outStack[i];
+        if (hashSet.has(block.hash)) {
+          blocks.push(block);
+          if (blocks.length === hashSet.size) {
+            break;
+          }
         }
       }
-    }
-
-    return blocks;
+      return blocks;
+    });
   }
 
   /**

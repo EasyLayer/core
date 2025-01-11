@@ -12,7 +12,6 @@ export interface NetworkProviderModuleOptions {
   isGlobal?: boolean;
   quickNodesUrls?: string[];
   selfNodesUrl?: string;
-  maxRequestContentLength?: number;
   responseTimeout?: number;
   network?: string;
 }

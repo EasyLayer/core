@@ -8,7 +8,6 @@ import { NodeProviderTypes, Hash } from './interfaces';
 
 export interface QuickNodeProviderOptions extends BaseNodeProviderOptions {
   baseUrl: string;
-  maxContentLength?: number;
   responseTimeout?: number;
 }
 
@@ -19,7 +18,6 @@ export const createQuickNodeProvider = (options: QuickNodeProviderOptions): Quic
 export class QuickNodeProvider extends BaseNodeProvider<QuickNodeProviderOptions> {
   readonly type: NodeProviderTypes = 'quicknode';
   private baseUrl: string;
-  private maxContentLength: number = 200 * 1024 * 1024;
   private responseTimeout: number = 5000;
   private agent: http.Agent | https.Agent;
 
@@ -30,10 +28,6 @@ export class QuickNodeProvider extends BaseNodeProvider<QuickNodeProviderOptions
     const url = new URL(options.baseUrl);
 
     this.baseUrl = url.toString();
-
-    if (options.maxContentLength) {
-      this.maxContentLength = options.maxContentLength;
-    }
 
     if (options.responseTimeout) {
       this.responseTimeout = options.responseTimeout;
@@ -49,7 +43,6 @@ export class QuickNodeProvider extends BaseNodeProvider<QuickNodeProviderOptions
       type: this.type,
       uniqName: this.uniqName,
       baseUrl: this.baseUrl,
-      maxRequestContentLength: this.maxContentLength,
       responseTimeout: this.responseTimeout,
     };
   }

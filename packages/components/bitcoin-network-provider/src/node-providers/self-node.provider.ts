@@ -5,7 +5,6 @@ import { NodeProviderTypes, Hash } from './interfaces';
 
 export interface SelfNodeProviderOptions extends BaseNodeProviderOptions {
   baseUrl: string;
-  maxRequestContentLength?: number;
   responseTimeout?: number;
 }
 
@@ -16,7 +15,6 @@ export const createSelfNodeProvider = (options: SelfNodeProviderOptions): SelfNo
 export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> {
   readonly type: NodeProviderTypes = 'selfnode';
   private baseUrl: string;
-  private maxRequestContentLength: number = 200 * 1024 * 1024;
   private responseTimeout: number = 5000;
   private agent: http.Agent | https.Agent;
   private username?: string;
@@ -35,9 +33,6 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     url.password = '';
     this.baseUrl = url.toString();
 
-    if (options.maxRequestContentLength) {
-      this.maxRequestContentLength = options.maxRequestContentLength;
-    }
     if (options.responseTimeout) {
       this.responseTimeout = options.responseTimeout;
     }
@@ -52,7 +47,6 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       type: this.type,
       uniqName: this.uniqName,
       baseUrl: this.baseUrl,
-      maxRequestContentLength: this.maxRequestContentLength,
       responseTimeout: this.responseTimeout,
     };
   }

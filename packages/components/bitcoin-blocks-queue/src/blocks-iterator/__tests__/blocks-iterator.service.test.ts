@@ -33,6 +33,7 @@ describe('BlocksQueueIteratorService', () => {
       debug: jest.fn(),
       error: jest.fn(),
       info: jest.fn(),
+      warn: jest.fn(),
     } as any;
 
     mockBlocksCommandExecutor = {
@@ -105,7 +106,7 @@ describe('BlocksQueueIteratorService', () => {
       service['initBatchProcessedPromise']();
       await service['processBatch']([blockMock]);
 
-      expect(mockLogger.error).toHaveBeenCalledWith(
+      expect(mockLogger.warn).toHaveBeenCalledWith(
         'Failed to process the batch',
         new Error('Test Error'),
         'BlocksQueueIteratorService'
