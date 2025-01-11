@@ -339,7 +339,6 @@ describe('Repository update methods', () => {
       // Directly mock serialize method
       (repository as any).serialize = jest.fn((val: any) => {
         const serialized = JSON.stringify(val);
-        console.log('Serialize called with:', val, '->', serialized);
         return serialized;
       });
 
@@ -369,7 +368,6 @@ describe('Repository update methods', () => {
       );
 
       const ops = transactionsRunner.getOperations();
-      console.log('Batch Operations:', ops);
 
       expect(ops).toHaveLength(4);
 

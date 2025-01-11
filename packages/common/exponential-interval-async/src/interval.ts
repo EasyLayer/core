@@ -23,6 +23,7 @@ export const exponentialIntervalAsync = (
   let currentInterval = interval;
   let stopped = false;
   let timeoutId: NodeJS.Timeout;
+  let isRunning = false;
 
   const resetInterval = () => {
     currentInterval = interval;
@@ -36,17 +37,18 @@ export const exponentialIntervalAsync = (
       return;
     }
 
-    await asyncFunction(resetInterval);
+    if (!isRunning) {
+      isRunning = true;
+      await asyncFunction(resetInterval);
+      isRunning = false;
 
-    if (attemptCount < maxAttempts) {
       attemptCount++;
+      currentInterval = Math.min(currentInterval * multiplier, maxInterval);
     }
 
-    // Increase the interval taking into account the maximum value
-    currentInterval = Math.min(currentInterval * multiplier, maxInterval);
-
-    // Schedule next call
-    timeoutId = setTimeout(scheduler, currentInterval);
+    if (!stopped && attemptCount < maxAttempts) {
+      timeoutId = setTimeout(scheduler, currentInterval);
+    }
   };
 
   // First call to the scheduler

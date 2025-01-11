@@ -3,7 +3,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 
 @Injectable()
 export class ScriptUtilService {
-  static getScriptHashFromScriptPubKey(scriptPubKey: any, networkName: string): string | null {
+  static getScriptHashFromScriptPubKey(scriptPubKey: any, networkName: string): string | undefined {
     const { hex, type } = scriptPubKey;
 
     let network: bitcoin.Network = bitcoin.networks.testnet;
@@ -12,7 +12,7 @@ export class ScriptUtilService {
       network = bitcoin.networks.bitcoin;
     }
 
-    let scriptHash: string | null = null;
+    let scriptHash: string | undefined;
 
     switch (type) {
       // Types that require 'hex' to process
@@ -24,17 +24,17 @@ export class ScriptUtilService {
       case 'witness_v1_taproot':
         if (!hex) {
           // Missing 'hex'
-          return null;
+          return undefined;
         }
         const scriptPubKeyBuffer = Buffer.from(hex, 'hex');
-        scriptHash = bitcoin.address.fromOutputScript(scriptPubKeyBuffer, network);
+        scriptHash = fromOutputScript(scriptPubKeyBuffer, network);
         break;
 
       // O(n + m), where n is the hex length, m is the number of elements in the script.
       case 'pubkey':
         if (!hex) {
           // Missing 'hex'
-          return null;
+          return undefined;
         }
         const scriptPubKeyBufferPubkey = Buffer.from(hex, 'hex');
         // Decompile script to get public key
@@ -106,4 +106,23 @@ export class ScriptUtilService {
       return true;
     }
   }
+}
+
+function fromOutputScript(output: any, network: any) {
+  try {
+    return bitcoin.payments.p2pkh({ output, network }, { validate: false }).address;
+  } catch (e) {}
+  try {
+    return bitcoin.payments.p2sh({ output, network }, { validate: false }).address;
+  } catch (e) {}
+  try {
+    return bitcoin.payments.p2wpkh({ output, network }, { validate: false }).address;
+  } catch (e) {}
+  try {
+    return bitcoin.payments.p2wsh({ output, network }, { validate: false }).address;
+  } catch (e) {}
+  try {
+    return bitcoin.payments.p2tr({ output, network }, { validate: false }).address;
+  } catch (e) {}
+  throw new Error(' has no matching Address');
 }

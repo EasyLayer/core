@@ -45,88 +45,57 @@ describe('PullNetworkProviderStrategy', () => {
   });
 
   describe('load', () => {
-    it('should log and return if the maximum block height is reached', async () => {
+    it('should throw an error if the maximum block height is reached', async () => {
       const currentNetworkHeight = 100;
 
-      // Mocking 'isMaxHeightReached' to return true
       Object.defineProperty(mockQueue, 'isMaxHeightReached', {
         get: () => true,
       });
 
-      // Mocking 'lastHeight' to return 100
       Object.defineProperty(mockQueue, 'lastHeight', {
         get: () => 100,
       });
 
-      await strategy.load(currentNetworkHeight);
+      await expect(strategy.load(currentNetworkHeight)).rejects.toThrow('Reached max block height');
 
-      // Expect a debug log indicating the max block height is reached
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Reached max block height',
-        { queueLastHeight: 100 },
-        'PullNetworkProviderStrategy'
-      );
-
-      // Ensure no further actions are taken
       expect(mockNetworkProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
       expect(mockQueue.enqueue).not.toHaveBeenCalled();
     });
 
-    it('should log and return if the current network height is reached', async () => {
+    it('should throw an error if the current network height is reached', async () => {
       const currentNetworkHeight = 100;
 
-      // Mocking 'isMaxHeightReached' to return false
       Object.defineProperty(mockQueue, 'isMaxHeightReached', {
         get: () => false,
       });
 
-      // Mocking 'lastHeight' to return 100
       Object.defineProperty(mockQueue, 'lastHeight', {
         get: () => 100,
       });
 
-      await strategy.load(currentNetworkHeight);
+      await expect(strategy.load(currentNetworkHeight)).rejects.toThrow('Reached current network height');
 
-      // Expect a debug log indicating the current network height is reached
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Reached current network height',
-        { queueLastHeight: 100 },
-        'PullNetworkProviderStrategy'
-      );
-
-      // Ensure no further actions are taken
       expect(mockNetworkProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
       expect(mockQueue.enqueue).not.toHaveBeenCalled();
     });
 
-    it('should log and return if the queue is full', async () => {
+    it('should throw an error if the queue is full', async () => {
       const currentNetworkHeight = 150;
 
-      // Mocking 'isMaxHeightReached' to return false
       Object.defineProperty(mockQueue, 'isMaxHeightReached', {
         get: () => false,
       });
 
-      // Mocking 'lastHeight' to return 50
       Object.defineProperty(mockQueue, 'lastHeight', {
         get: () => 50,
       });
 
-      // Mocking 'isQueueFull' to return true
       Object.defineProperty(mockQueue, 'isQueueFull', {
         get: () => true,
       });
 
-      await strategy.load(currentNetworkHeight);
+      await expect(strategy.load(currentNetworkHeight)).rejects.toThrow('The queue is full');
 
-      // Expect a debug log indicating the queue is full
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'The queue is full',
-        { queueLastHeight: 50 },
-        'PullNetworkProviderStrategy'
-      );
-
-      // Ensure no further actions are taken
       expect(mockNetworkProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
       expect(mockQueue.enqueue).not.toHaveBeenCalled();
     });
