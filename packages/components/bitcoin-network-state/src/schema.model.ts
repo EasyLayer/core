@@ -2,7 +2,7 @@ import { DataSource, QueryRunner, getSQLFromEntitySchema } from '@easylayer/comp
 import { AggregateRoot } from '@easylayer/components/cqrs';
 import { AppLogger } from '@easylayer/components/logger';
 import {
-  BitcoinSchemaUpMigrationFinishedEvent,
+  BitcoinSchemaUpdatedEvent,
   BitcoinSchemaSynchronisedEvent,
 } from '@easylayer/common/domain-cqrs-components/bitcoin';
 
@@ -28,7 +28,7 @@ export class Schema extends AggregateRoot {
   }) {
     const sqlQueries = await getSQLFromEntitySchema(dataSource);
 
-    const { upQueries } = sqlQueries;
+    const { upQueries, downQueries } = sqlQueries;
 
     if (upQueries.length === 0) {
       // This means that there are no more changes and we publish an event that everything is synced
@@ -57,9 +57,10 @@ export class Schema extends AggregateRoot {
       });
     }
 
-    return await this.up({
+    return await this.update({
       requestId,
       upQueries: modifiedUpQueries,
+      downQueries,
       queryRunner,
       logger,
     });
@@ -67,14 +68,16 @@ export class Schema extends AggregateRoot {
 
   // IMPORTANT: This command does not look at the database or migrations
   // it only updates what it is told.
-  public async up({
+  public async update({
     requestId,
     upQueries,
+    downQueries,
     queryRunner,
     logger,
   }: {
     requestId: string;
     upQueries: any[];
+    downQueries: any[];
     queryRunner: QueryRunner;
     logger: AppLogger;
   }) {
@@ -91,10 +94,11 @@ export class Schema extends AggregateRoot {
     await queryRunner.commitTransaction();
 
     await this.apply(
-      new BitcoinSchemaUpMigrationFinishedEvent({
+      new BitcoinSchemaUpdatedEvent({
         aggregateId: this.aggregateId,
         requestId,
         upQueries,
+        downQueries,
       })
     );
   }
@@ -104,9 +108,10 @@ export class Schema extends AggregateRoot {
     this.aggregateId = aggregateId;
   }
 
-  private onBitcoinSchemaUpMigrationFinishedEvent({ payload }: BitcoinSchemaUpMigrationFinishedEvent) {
-    const { aggregateId, upQueries } = payload;
+  private onBitcoinSchemaUpdatedEvent({ payload }: BitcoinSchemaUpdatedEvent) {
+    const { aggregateId, upQueries, downQueries } = payload;
     this.aggregateId = aggregateId;
     this.upQueries = upQueries;
+    this.downQueries = downQueries;
   }
 }
