@@ -10,7 +10,6 @@ import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
   BitcoinNetworkReorganisationStartedEvent,
-  BitcoinNetworkReorganisationProcessedEvent,
   BitcoinNetworkReorganisationFinishedEvent,
 } from '@easylayer/common/domain-cqrs-components/bitcoin';
 
@@ -139,58 +138,6 @@ export class Network extends AggregateRoot {
     );
   }
 
-  public async processReorganisation({
-    blocks,
-    height,
-    requestId,
-    logger,
-  }: {
-    blocks: LightBlock[];
-    height: string | number;
-    requestId: string;
-    logger: AppLogger;
-  }): Promise<void> {
-    if (this.status !== NetworkStatuses.REORGANISATION) {
-      throw new Error("processReorganisation() Reorganisation hasn't started yet");
-    }
-
-    if (Number(height) > this.chain.lastBlockHeight!) {
-      // IMPORTANT: In this case we just skip + we can log this error
-      logger.warn(
-        "Reorganization height is higher than Loader's blockchain height",
-        { reorganisationHeight: height, lastBlockchainHeight: this.chain.lastBlockHeight },
-        this.constructor.name
-      );
-      return;
-    }
-
-    // TODO: Task SH-15
-    // if (blocks.length > 100) {
-    //   const blocksToProcessed = blocks;
-
-    //   return await this.apply(
-    //     new BitcoinNetworkReorganisationProcessedEvent({
-    //       aggregateId: this.aggregateId,
-    //       requestId,
-    //       // IMPORTANT: height - height of reorganization (last correct block)
-    //       height: height.toString(),
-    //       blocks: blocksToProcessed,
-    //     })
-    //   );
-    // }
-
-    return await this.apply(
-      new BitcoinNetworkReorganisationFinishedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        status: NetworkStatuses.AWAITING,
-        // IMPORTANT: height - height of reorganization (last correct block)
-        height: height.toString(),
-        blocks,
-      })
-    );
-  }
-
   public async startReorganisation({
     height,
     requestId,
@@ -245,6 +192,43 @@ export class Network extends AggregateRoot {
     return this.startReorganisation({ height: prevHeight, requestId, service, blocks: newBlocks, logger });
   }
 
+  public async finishReorganisation({
+    blocks,
+    height,
+    requestId,
+    logger,
+  }: {
+    blocks: LightBlock[];
+    height: string | number;
+    requestId: string;
+    logger: AppLogger;
+  }): Promise<void> {
+    if (this.status !== NetworkStatuses.REORGANISATION) {
+      throw new Error("processReorganisation() Reorganisation hasn't started yet");
+    }
+
+    if (Number(height) > this.chain.lastBlockHeight!) {
+      // IMPORTANT: In this case we just skip + we can log this error
+      logger.warn(
+        "Reorganization height is higher than Loader's blockchain height",
+        { reorganisationHeight: height, lastBlockchainHeight: this.chain.lastBlockHeight },
+        this.constructor.name
+      );
+      return;
+    }
+
+    return await this.apply(
+      new BitcoinNetworkReorganisationFinishedEvent({
+        aggregateId: this.aggregateId,
+        requestId,
+        status: NetworkStatuses.AWAITING,
+        // IMPORTANT: height - height of reorganization (last correct block)
+        height: height.toString(),
+        blocks,
+      })
+    );
+  }
+
   private onBitcoinNetworkInitializedEvent({ payload }: BitcoinNetworkInitializedEvent) {
     const { aggregateId, status, indexedHeight } = payload;
     this.aggregateId = aggregateId;
@@ -280,12 +264,5 @@ export class Network extends AggregateRoot {
     const { height, status } = payload;
     this.status = status as NetworkStatuses;
     this.chain.truncateToBlock(Number(height));
-  }
-
-  // Here we will only cut a few blocks
-  // This method is idempotent
-  private onBitcoinNetworkReorganisationProcessedEvent({ payload }: BitcoinNetworkReorganisationProcessedEvent) {
-    const { blocks } = payload;
-    this.chain.truncateToBlock(Number(blocks[0].height));
   }
 }

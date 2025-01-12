@@ -1,24 +1,55 @@
 import { Readable } from 'stream';
 import { PostgresError } from 'pg-error-enum';
-import { Injectable, Inject } from '@nestjs/common';
-import { Repository, QueryFailedError, In, MoreThan } from 'typeorm';
+import { Injectable } from '@nestjs/common';
+import { Repository, QueryFailedError, MoreThan } from 'typeorm';
+import { runInTransaction, Propagation, IsolationLevel } from 'typeorm-transactional';
 import { AggregateRoot, IEvent } from '@easylayer/components/cqrs';
 import { AppLogger } from '@easylayer/components/logger';
-import { EventDataModel, BasicEvent } from './event-data.model';
+import { EventDataModel } from './event-data.model';
 import { SnapshotsModel } from './snapshots.model';
 
 type AggregateWithId = AggregateRoot & { aggregateId: string };
 
+class MemoryCache<T> {
+  private cache = new Map<string, { value: T; expiresAt: number }>();
+  private defaultTTL: number;
+
+  constructor(defaultTTL: number) {
+    this.defaultTTL = defaultTTL;
+  }
+
+  get(key: string): T | null {
+    const cached = this.cache.get(key);
+    if (!cached) return null;
+
+    if (Date.now() > cached.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return cached.value;
+  }
+
+  set(key: string, value: T, ttl?: number): void {
+    const expiresAt = Date.now() + (ttl || this.defaultTTL);
+    this.cache.set(key, { value, expiresAt });
+  }
+
+  clear(key: string): void {
+    this.cache.delete(key);
+  }
+}
+
 @Injectable()
 export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
+  private cache = new MemoryCache<T>(60000); // TTL 60 seconds
   private isStreamSupport: boolean;
 
   constructor(
     private readonly log: AppLogger,
-    @Inject('EVENT_DATA_MODEL_REPOSITORY')
     private readonly eventsRepository: Repository<EventDataModel>,
-    @Inject('SNAPSHOTS_MODEL_REPOSITORY')
-    private readonly snapshotsRepository: Repository<SnapshotsModel>
+    private readonly snapshotsRepository: Repository<SnapshotsModel>,
+    private readonly dataSourceName: string
   ) {
     this.isStreamSupport = this.eventsRepository.manager.connection?.options?.type === 'postgres';
   }
@@ -26,7 +57,48 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
   public async save(models: T | T[]): Promise<void> {
     const aggregates: T[] = Array.isArray(models) ? models : [models];
 
-    await Promise.all(aggregates.map((aggregate: T) => this.storeEvent(aggregate)));
+    await runInTransaction(
+      async () => {
+        await Promise.all(aggregates.map((aggregate: T) => this.storeEvent(aggregate)));
+      },
+      {
+        connectionName: this.dataSourceName,
+        propagation: Propagation.REQUIRED,
+        isolationLevel: IsolationLevel.SERIALIZABLE,
+      }
+    );
+
+    // IMPORTANT: This is an events publish transaction
+    // This transaction's error should not be thrown (if there is an error, these events will be published next time).
+    // This logic is defined in the save() method
+    // because it allows us to immediately use commit() of the aggregates, without an additional visit to the database.
+    // The publication logic implies publishing events immediately and then updating the event status in the database.
+    // In case of an update error in the database, these events will be published next time.
+    await this.commit(aggregates);
+  }
+
+  private async commit(aggregates: T[]): Promise<void> {
+    await runInTransaction(
+      async () => {
+        await Promise.all(aggregates.map((aggregate: T) => aggregate.commit()));
+        await Promise.all(aggregates.map((aggregate: T) => this.setPublishStatuses(aggregate)));
+
+        // Update cache
+        aggregates.forEach((aggregate: T) => this.cache.set(aggregate.aggregateId, aggregate));
+      },
+      {
+        connectionName: this.dataSourceName,
+        propagation: Propagation.REQUIRED,
+        isolationLevel: IsolationLevel.SERIALIZABLE,
+      }
+    ).catch((error) => {
+      this.log.debug('commit() transaction', { error }, this.constructor.name);
+      // Clear cache if error
+      aggregates.forEach((aggregate: T) => this.cache.clear(aggregate.aggregateId));
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    await Promise.all(aggregates.map((aggregate: T) => this.updateSnapshot(aggregate))).catch((error) => {});
   }
 
   public async getOne(model: T): Promise<T> {
@@ -35,6 +107,12 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
 
     if (!aggregateId) {
       return model;
+    }
+
+    const cachedModel = this.cache.get(aggregateId);
+
+    if (cachedModel) {
+      return cachedModel;
     }
 
     const snapshot = await this.snapshotsRepository.findOneBy({ aggregateId });
@@ -63,83 +141,37 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
     return model;
   }
 
-  // IMPORTANT: This method does not currently support snapshots.
-  public async getMany(models: T[]): Promise<T[]> {
-    // Extract all aggregateIds from the models
-    const aggregateIds = models.map((model) => model.aggregateId);
+  private async setPublishStatuses(aggregate: T) {
+    try {
+      const { aggregateId } = aggregate;
 
-    // Query all events for the given aggregateIds
-    const eventRaws = await this.eventsRepository.find({
-      where: { aggregateId: In(aggregateIds) },
-      order: { version: 'ASC' },
-    });
+      await this.eventsRepository
+        .createQueryBuilder()
+        .update(EventDataModel)
+        .set({ isPublished: true })
+        .where('aggregateId = :aggregateId', { aggregateId })
+        .andWhere('isPublished = :isPublished', { isPublished: false })
+        .execute();
+    } catch (error) {
+      if (error instanceof QueryFailedError) {
+        const driverError = error.driverError;
 
-    // Group events by aggregateId
-    const eventsByAggregateId = eventRaws.reduce((acc: { [key: string]: any[] }, eventRaw: any) => {
-      const aggregateId = eventRaw.aggregateId;
-      if (!acc[aggregateId]) {
-        acc[aggregateId] = [];
+        if (driverError.code === 'SQLITE_CONSTRAINT') {
+          this.log.error('updateStatuses()', { error: driverError.message }, this.constructor.name);
+          return;
+        }
+
+        if (driverError.code === PostgresError.UNIQUE_VIOLATION) {
+          this.log.error('updateStatuses()', { error: driverError.detail }, this.constructor.name);
+          return;
+        }
+
+        throw error;
       }
-      acc[aggregateId].push(EventDataModel.deserialize(eventRaw));
-      return acc;
-    }, {});
 
-    // Ensure each group of events is sorted by version
-    // TODO: think
-    // Object.keys(eventsByAggregateId).forEach(aggregateId => {
-    //   eventsByAggregateId[aggregateId].sort((a, b) => a.version - b.version);
-    // });
-
-    // Load history for each model and return the updated models
-    await Promise.all(
-      models.map(async (model) => {
-        const events = eventsByAggregateId[model.aggregateId] || [];
-        await model.loadFromHistory(events);
-      })
-    );
-
-    return models;
-  }
-
-  public async fetchLastEvent(model: T): Promise<BasicEvent<IEvent> | undefined> {
-    const { aggregateId } = model;
-
-    if (!aggregateId) {
-      return undefined;
+      this.log.error('updateStatuses()', { error }, this.constructor.name);
+      throw error;
     }
-
-    // Find last event raw
-    const eventRaw = await this.eventsRepository.findOne({
-      where: { aggregateId },
-      order: { version: 'DESC' },
-    });
-
-    if (!eventRaw) {
-      return undefined;
-    }
-
-    const event = EventDataModel.deserialize(eventRaw);
-    return event;
-  }
-
-  // IMPORTANT: This method does not currently support snapshots.
-  public async getOneByExtra(model: T & { extra: string }): Promise<T> {
-    const { extra } = model;
-
-    if (!extra) {
-      throw new Error(`Method getOneByExtra() is not supported by this aggregate`);
-    }
-
-    //We do NOT need aggregateId here, because we get events by extra
-
-    const eventRaws = await this.eventsRepository.find({
-      where: { extra },
-      order: { version: 'ASC' },
-    });
-
-    await model.loadFromHistory(eventRaws.map(EventDataModel.deserialize));
-
-    return model;
   }
 
   private async storeEvent(aggregate: T) {
@@ -159,17 +191,23 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
       // https://github.com/typeorm/typeorm/issues/4651
       await this.eventsRepository.createQueryBuilder().insert().values(events).updateEntity(false).execute();
 
-      // Update snapshot only when version is a multiple of 50
-      if (aggregate.version % 50 === 0) {
-        await this.updateSnapshot(aggregate);
-      }
+      this.cache.set(aggregate.aggregateId, aggregate);
     } catch (error) {
-      this.handleDatabaseError(error, aggregate);
+      try {
+        this.handleDatabaseError(error, aggregate);
+      } catch (e) {
+        this.cache.clear(aggregate.aggregateId);
+      }
     }
   }
 
   private async updateSnapshot(aggregate: T) {
     try {
+      // Update snapshot only when version is a multiple of 50
+      if (aggregate.version % 50 !== 0) {
+        return;
+      }
+
       // Serialize the cloned aggregate
       const snapshot = SnapshotsModel.toSnapshot(aggregate);
 
@@ -179,7 +217,7 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
         .into(SnapshotsModel)
         .values(snapshot)
         .orUpdate(
-          ['payload'], // Columns that we update
+          ['payload', 'isPublished'], // Columns that we update
           ['aggregateId']
         )
         .updateEntity(false)
