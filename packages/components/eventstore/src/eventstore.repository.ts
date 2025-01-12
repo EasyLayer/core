@@ -1,8 +1,8 @@
 import { Readable } from 'stream';
 import { PostgresError } from 'pg-error-enum';
-import { Injectable } from '@nestjs/common';
-import { Repository, QueryFailedError, MoreThan } from 'typeorm';
-import { runInTransaction, Propagation, IsolationLevel } from 'typeorm-transactional';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Repository, QueryFailedError, MoreThan, DataSource } from 'typeorm';
+import { runInTransaction, Propagation, IsolationLevel, deleteDataSourceByName } from 'typeorm-transactional';
 import { AggregateRoot, IEvent } from '@easylayer/components/cqrs';
 import { AppLogger } from '@easylayer/components/logger';
 import { EventDataModel } from './event-data.model';
@@ -41,7 +41,7 @@ class MemoryCache<T> {
 }
 
 @Injectable()
-export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
+export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> implements OnModuleDestroy {
   private cache = new MemoryCache<T>(60000); // TTL 60 seconds
   private isStreamSupport: boolean;
 
@@ -49,9 +49,27 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
     private readonly log: AppLogger,
     private readonly eventsRepository: Repository<EventDataModel>,
     private readonly snapshotsRepository: Repository<SnapshotsModel>,
+    private readonly dataSource: DataSource,
     private readonly dataSourceName: string
   ) {
     this.isStreamSupport = this.eventsRepository.manager.connection?.options?.type === 'postgres';
+  }
+
+  async onModuleDestroy() {
+    if (this.dataSource.isInitialized) {
+      try {
+        // TODO: temporary solution
+        // Transactional Context is launched within the process, not the application.
+        // So if we want it to be available only within the application, we must take care of its destruction.
+        // Now we do it here, but it is better to move all this to a module.
+        if (this.dataSource.options?.name) {
+          deleteDataSourceByName(this.dataSource.options.name);
+        }
+
+        await this.dataSource.destroy();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      } catch (error) {}
+    }
   }
 
   public async save(models: T | T[]): Promise<void> {
@@ -217,7 +235,7 @@ export class EventStoreRepository<T extends AggregateWithId = AggregateWithId> {
         .into(SnapshotsModel)
         .values(snapshot)
         .orUpdate(
-          ['payload', 'isPublished'], // Columns that we update
+          ['payload'], // Columns that we update
           ['aggregateId']
         )
         .updateEntity(false)

@@ -104,10 +104,10 @@ export class EventStoreModule {
       providers: [
         {
           provide: EventStoreRepository,
-          useFactory: async (logger, eventsRepository, snapshotsRepository) => {
-            return new EventStoreRepository(logger, eventsRepository, snapshotsRepository, name);
+          useFactory: async (logger, eventsRepository, snapshotsRepository, dataSource) => {
+            return new EventStoreRepository(logger, eventsRepository, snapshotsRepository, dataSource, name);
           },
-          inject: [AppLogger, 'EVENT_DATA_MODEL_REPOSITORY', 'SNAPSHOTS_MODEL_REPOSITORY'],
+          inject: [AppLogger, 'EVENT_DATA_MODEL_REPOSITORY', 'SNAPSHOTS_MODEL_REPOSITORY', getDataSourceToken(name)],
         },
         {
           provide: EventStoreService,
