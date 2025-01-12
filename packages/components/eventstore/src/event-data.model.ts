@@ -1,5 +1,5 @@
 import { Entity, Column, Unique, Index, PrimaryGeneratedColumn } from 'typeorm';
-import { IEvent } from '@easylayer/components/cqrs';
+import { IEvent, HistoryEvent } from '@easylayer/components/cqrs';
 
 export interface BasicEvent<T> {
   payload: BasicEventPayload & T;
@@ -13,6 +13,7 @@ interface BasicEventPayload {
 export interface EventDataParameters {
   aggregateId: string;
   type: string;
+  isPublished: boolean;
   payload: Record<string, any>;
   version: number;
   requestId: string;
@@ -33,6 +34,9 @@ export class EventDataModel {
   @Column({ type: 'varchar', default: null })
   public extra!: string;
 
+  @Column({ type: 'boolean', default: false })
+  public isPublished!: boolean;
+
   @Column({ type: 'int', default: 0 })
   public version!: number;
 
@@ -45,7 +49,7 @@ export class EventDataModel {
   @Column({ type: 'json' })
   public payload!: Record<string, any>;
 
-  static deserialize({ aggregateId, type, requestId, payload }: EventDataModel): BasicEvent<IEvent> {
+  static deserialize({ aggregateId, isPublished, type, requestId, payload }: EventDataModel): HistoryEvent<IEvent> {
     const aggregateEvent: BasicEvent<IEvent> = {
       payload: {
         aggregateId,
@@ -56,7 +60,12 @@ export class EventDataModel {
 
     aggregateEvent.constructor = { name: type } as typeof Object.constructor;
 
-    return Object.assign(Object.create(aggregateEvent), aggregateEvent);
+    const event = Object.assign(Object.create(aggregateEvent), aggregateEvent);
+
+    return {
+      event,
+      isPublished,
+    };
   }
 
   static serialize(event: Record<string, any>, version: number): EventDataModel {
@@ -78,6 +87,7 @@ export class EventDataModel {
     return new EventDataModel({
       aggregateId,
       version,
+      isPublished: false,
       requestId,
       extra,
       payload: rest,
@@ -96,5 +106,6 @@ export class EventDataModel {
     this.version = parameters.version;
     this.requestId = parameters.requestId;
     this.extra = parameters.extra;
+    this.isPublished = parameters.isPublished;
   }
 }

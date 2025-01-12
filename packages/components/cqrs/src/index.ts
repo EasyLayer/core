@@ -1,6 +1,6 @@
 export { CustomCqrsModule as CqrsModule } from './custom-cqrs.module';
 export { CustomEventBus } from './custom-event-bus';
-export { CustomAggregateRoot as AggregateRoot } from './custom-aggregate-root';
+export { CustomAggregateRoot as AggregateRoot, HistoryEvent } from './custom-aggregate-root';
 export { EventPublisher } from './event-publisher';
 export * from './operators';
 

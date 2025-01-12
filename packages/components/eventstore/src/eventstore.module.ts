@@ -102,7 +102,13 @@ export class EventStoreModule {
         }),
       ],
       providers: [
-        EventStoreRepository,
+        {
+          provide: EventStoreRepository,
+          useFactory: async (logger, eventsRepository, snapshotsRepository) => {
+            return new EventStoreRepository(logger, eventsRepository, snapshotsRepository, name);
+          },
+          inject: [AppLogger, 'EVENT_DATA_MODEL_REPOSITORY', 'SNAPSHOTS_MODEL_REPOSITORY'],
+        },
         {
           provide: EventStoreService,
           useFactory: async (dataSource: DataSource) => {
