@@ -5,6 +5,11 @@ import { EVENT_METADATA } from '@nestjs/cqrs/dist/decorators/constants';
 const INTERNAL_EVENTS = Symbol();
 const IS_AUTO_COMMIT_ENABLED = Symbol();
 
+export type HistoryEvent<T extends IEvent> = {
+  event: T;
+  isPublished: boolean;
+};
+
 export abstract class CustomAggregateRoot<EventBase extends IEvent = IEvent> {
   public [IS_AUTO_COMMIT_ENABLED] = false;
   private readonly [INTERNAL_EVENTS]: EventBase[] = [];
@@ -45,9 +50,14 @@ export abstract class CustomAggregateRoot<EventBase extends IEvent = IEvent> {
     this.uncommit();
   }
 
-  public async loadFromHistory(history: EventBase[]): Promise<void> {
-    for (const event of history) {
-      await this.apply(event, true);
+  public async loadFromHistory(history: HistoryEvent<EventBase>[]): Promise<void> {
+    for (const historyEvent of history) {
+      const { event, isPublished } = historyEvent;
+      await this.apply(event, {
+        fromHistory: true,
+        skipHandler: false,
+        isPublished,
+      });
     }
   }
 
@@ -58,20 +68,22 @@ export abstract class CustomAggregateRoot<EventBase extends IEvent = IEvent> {
       | {
           fromHistory?: boolean;
           skipHandler?: boolean;
+          isPublished?: boolean;
         }
   ): Promise<void> {
     let isFromHistory = false;
     let skipHandler = false;
+    let isPublished = true;
 
     if (typeof optionsOrIsFromHistory === 'boolean') {
       isFromHistory = optionsOrIsFromHistory;
     } else if (typeof optionsOrIsFromHistory === 'object') {
       isFromHistory = optionsOrIsFromHistory.fromHistory ?? false;
       skipHandler = optionsOrIsFromHistory.skipHandler ?? false;
+      isPublished = optionsOrIsFromHistory.isPublished ?? true;
     }
 
-    if (!isFromHistory && !this.autoCommit) {
-      // Because of this we had to rewrite the entire aggregate class
+    if ((!isFromHistory && !this.autoCommit) || (isFromHistory && !isPublished)) {
       this[INTERNAL_EVENTS].push(event);
     }
 
