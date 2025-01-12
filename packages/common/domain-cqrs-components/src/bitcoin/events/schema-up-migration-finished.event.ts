@@ -3,7 +3,7 @@ import { BasicEvent } from '../../base.event';
 interface BitcoinSchemaUpMigrationFinishedEventPayload {
   aggregateId: string;
   requestId: string;
-  status: string;
+  upQueries: any[];
 }
 
 export class BitcoinSchemaUpMigrationFinishedEvent implements BasicEvent<BitcoinSchemaUpMigrationFinishedEventPayload> {
