@@ -20,7 +20,7 @@ export enum NetworkStatuses {
 
 export class Network extends AggregateRoot {
   private __maxSize!: number;
-  // IMPORTANT: There must be only one Loader Aggregate in the module,
+  // IMPORTANT: There must be only one Network Aggregate in the module,
   // so we immediately give it aggregateId by which we can find it.
   public aggregateId: string = 'network';
   public status: NetworkStatuses = NetworkStatuses.AWAITING;
@@ -58,7 +58,7 @@ export class Network extends AggregateRoot {
   }
 
   // IMPORTANT: this method doing two things:
-  // 1 - create Loader if it's first creation
+  // 1 - create Network if it's first creation
   // 2 - truncate chain if chain last height bigger then startHeight
   public async init({
     requestId,
@@ -69,7 +69,7 @@ export class Network extends AggregateRoot {
     indexedHeight: number;
     logger: AppLogger;
   }) {
-    // IMPORTANT: We always initialize the Loader with the awaiting status,
+    // IMPORTANT: We always initialize the Network with the awaiting status,
     // if there was a reorganization status, then it will be processed at the next iteration.
     const status = NetworkStatuses.AWAITING;
 
@@ -210,7 +210,7 @@ export class Network extends AggregateRoot {
     if (Number(height) > this.chain.lastBlockHeight!) {
       // IMPORTANT: In this case we just skip + we can log this error
       logger.warn(
-        "Reorganization height is higher than Loader's blockchain height",
+        "Reorganization height is higher than Network's blockchain height",
         { reorganisationHeight: height, lastBlockchainHeight: this.chain.lastBlockHeight },
         this.constructor.name
       );

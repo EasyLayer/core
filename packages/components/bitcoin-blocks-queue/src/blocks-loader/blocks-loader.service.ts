@@ -59,7 +59,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           await this._loadingStrategy?.load(currentNetworkHeight);
           resetInterval();
         } catch (error) {
-          this.log.warn('Loading strategy error', error, this.constructor.name);
+          this.log.info('Loading blocks on pause...', error, this.constructor.name);
           await this._loadingStrategy?.stop();
         }
       },

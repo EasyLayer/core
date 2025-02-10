@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "",
   "exports": {
     "./arithmetic": {
@@ -15,13 +15,9 @@
       "default": "./domain-cqrs-components/dist/websocket-messages/index.js",
       "types": "./domain-cqrs-components/dist/websocket-messages/index.d.ts"
     },
-    "./domain-cqrs-components/ethereum": {
-      "default": "./domain-cqrs-components/dist/evm/ethereum/index.js",
-      "types": "./domain-cqrs-components/dist/evm/ethereum/index.d.ts"
-    },
-    "./domain-cqrs-components/bsc": {
-      "default": "./domain-cqrs-components/dist/evm/bsc/index.js",
-      "types": "./domain-cqrs-components/dist/evm/bsc/index.d.ts"
+    "./domain-cqrs-components/evm": {
+      "default": "./domain-cqrs-components/dist/evm/index.js",
+      "types": "./domain-cqrs-components/dist/evm/index.d.ts"
     },
     "./domain-cqrs-components/bitcoin": {
       "default": "./domain-cqrs-components/dist/bitcoin/index.js",
