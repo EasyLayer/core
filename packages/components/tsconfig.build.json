@@ -12,7 +12,10 @@
     {"path": "./bitcoin-network-state/tsconfig.build.json"},
     {"path": "./views-keyvalue-db/tsconfig.build.json"},
     {"path": "./secure-storage/tsconfig.build.json"},
-    {"path": "./websocket-messages/tsconfig.build.json"}
+    {"path": "./websocket-messages/tsconfig.build.json"},
+    {"path": "./evm-blocks-queue/tsconfig.build.json"},
+    {"path": "./evm-network-provider/tsconfig.build.json"},
+    {"path": "./evm-network-state/tsconfig.build.json"}
   ],
   "include": ["."],
   "exclude": [

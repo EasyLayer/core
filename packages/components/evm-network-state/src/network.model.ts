@@ -5,13 +5,13 @@ import {
   LightBlock,
   Blockchain,
   restoreChainLinks,
-} from '@easylayer/components/bitcoin-network-provider';
+} from '@easylayer/components/evm-network-provider';
 import {
-  BitcoinNetworkInitializedEvent,
-  BitcoinNetworkBlocksAddedEvent,
-  BitcoinNetworkReorganisationStartedEvent,
-  BitcoinNetworkReorganisationFinishedEvent,
-} from '@easylayer/common/domain-cqrs-components/bitcoin';
+  EvmNetworkInitializedEvent,
+  EvmNetworkBlocksAddedEvent,
+  EvmNetworkReorganisationStartedEvent,
+  EvmNetworkReorganisationFinishedEvent,
+} from '@easylayer/common/domain-cqrs-components/evm';
 
 export enum NetworkStatuses {
   AWAITING = 'awaiting',
@@ -87,7 +87,7 @@ export class Network extends AggregateRoot {
     );
 
     await this.apply(
-      new BitcoinNetworkInitializedEvent({
+      new EvmNetworkInitializedEvent({
         aggregateId: this.aggregateId,
         requestId,
         status,
@@ -126,13 +126,13 @@ export class Network extends AggregateRoot {
     logger.debug('Add blocks', { blocksLength: blocks.length }, this.constructor.name);
 
     return await this.apply(
-      new BitcoinNetworkBlocksAddedEvent({
+      new EvmNetworkBlocksAddedEvent({
         aggregateId: this.aggregateId,
         requestId,
         status: NetworkStatuses.AWAITING,
         blocks: blocks.map((block: any) => ({
           ...block,
-          tx: block.tx.map((t: any) => t.txid),
+          transactions: block.transactions.map((t: any) => t.txid),
         })),
       })
     );
@@ -166,13 +166,13 @@ export class Network extends AggregateRoot {
       throw new Error("Can't fetch old block");
     }
 
-    if (oldBlock.hash === localBlock.hash && oldBlock.previousblockhash === localBlock.previousblockhash) {
+    if (oldBlock.hash === localBlock.hash && oldBlock.parentHash === localBlock.parentHash) {
       // Match found
 
       logger.debug('Start reorganisation', { height }, this.constructor.name);
 
       return await this.apply(
-        new BitcoinNetworkReorganisationStartedEvent({
+        new EvmNetworkReorganisationStartedEvent({
           aggregateId: this.aggregateId,
           requestId,
           status: NetworkStatuses.REORGANISATION,
@@ -218,7 +218,7 @@ export class Network extends AggregateRoot {
     }
 
     return await this.apply(
-      new BitcoinNetworkReorganisationFinishedEvent({
+      new EvmNetworkReorganisationFinishedEvent({
         aggregateId: this.aggregateId,
         requestId,
         status: NetworkStatuses.AWAITING,
@@ -229,7 +229,7 @@ export class Network extends AggregateRoot {
     );
   }
 
-  private onBitcoinNetworkInitializedEvent({ payload }: BitcoinNetworkInitializedEvent) {
+  private onEvmNetworkInitializedEvent({ payload }: EvmNetworkInitializedEvent) {
     const { aggregateId, status, indexedHeight } = payload;
     this.aggregateId = aggregateId;
     this.status = status as NetworkStatuses;
@@ -239,28 +239,28 @@ export class Network extends AggregateRoot {
     this.chain.truncateToBlock(Number(indexedHeight));
   }
 
-  private onBitcoinNetworkBlocksAddedEvent({ payload }: BitcoinNetworkBlocksAddedEvent) {
+  private onEvmNetworkBlocksAddedEvent({ payload }: EvmNetworkBlocksAddedEvent) {
     const { blocks, status } = payload;
 
     this.status = status as NetworkStatuses;
     this.chain.addBlocks(
       blocks.map((block: any) => ({
-        height: Number(block.height),
+        number: Number(block.number),
         hash: block.hash,
-        previousblockhash: block?.previousblockhash || '',
-        tx: block.tx.map((txid: any) => txid),
+        parentHash: block?.parentHash || '',
+        transactions: block.transactions.map((txid: any) => txid),
       }))
     );
   }
 
-  private onBitcoinNetworkReorganisationStartedEvent({ payload }: BitcoinNetworkReorganisationStartedEvent) {
+  private onEvmNetworkReorganisationStartedEvent({ payload }: EvmNetworkReorganisationStartedEvent) {
     const { status } = payload;
     this.status = status as NetworkStatuses;
   }
 
   // Here we cut full at once in height
   // This method is idempotent
-  private onBitcoinNetworkReorganisationFinishedEvent({ payload }: BitcoinNetworkReorganisationFinishedEvent) {
+  private onEvmNetworkReorganisationFinishedEvent({ payload }: EvmNetworkReorganisationFinishedEvent) {
     const { height, status } = payload;
     this.status = status as NetworkStatuses;
     this.chain.truncateToBlock(Number(height));
