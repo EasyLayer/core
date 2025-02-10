@@ -50,6 +50,18 @@
     "./websocket-messages": {
       "default": "./websocket-messages/dist/index.js",
       "types": "./websocket-messages/dist/index.d.ts"
+    },
+    "./evm-blocks-queue": {
+      "default": "./evm-blocks-queue/dist/index.js",
+      "types": "./evm-blocks-queue/dist/index.d.ts"
+    },
+    "./evm-network-provider": {
+      "default": "./evm-network-provider/dist/index.js",
+      "types": "./evm-network-provider/dist/index.d.ts"
+    },
+    "./evm-network-state": {
+      "default": "./evm-network-state/dist/index.js",
+      "types": "./evm-network-state/dist/index.d.ts"
     }
   },
   "files": [
@@ -64,7 +76,10 @@
     "views-rdbms-db/dist",
     "views-keyvalue-db/dist",
     "secure-storage/dist",
-    "websocket-messages/dist"
+    "websocket-messages/dist",
+    "evm-blocks-queue/dist",
+    "evm-network-provider/dist",
+    "evm-network-state/dist"
   ],
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
@@ -94,6 +109,7 @@
     "bitcoin-core": "4.1.0",
     "bitcoinjs-lib": "6.1.6",
     "ecpair": "2.1.0",
+    "ethers": "6.13.5",
     "lodash": "4.17.21",
     "p-queue": "6.6.2",
     "pg": "8.12.0",
@@ -107,7 +123,8 @@
     "tiny-secp256k1": "2.2.3",
     "typeorm": "0.3.20",
     "typeorm-transactional": "0.5.0",
-    "uuid": "9.0.1"
+    "uuid": "9.0.1",
+    "web3": "4.16.0"
   },
   "devDependencies": {
     "@types/node": "20.10.4",
