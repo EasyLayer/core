@@ -3,8 +3,9 @@ import { BaseNodeProvider, BaseNodeProviderOptions } from './base-node-provider'
 import { NodeProviderTypes, Hash } from './interfaces';
 
 export interface EtherJSProviderOptions extends BaseNodeProviderOptions {
-  baseUrl: string;
+  httpUrl: string;
   wsUrl?: string;
+  network?: string;
 }
 
 export const createEtherJSProvider = (options: EtherJSProviderOptions): EtherJSProvider => {
@@ -12,28 +13,32 @@ export const createEtherJSProvider = (options: EtherJSProviderOptions): EtherJSP
 };
 
 export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
-  readonly type: NodeProviderTypes = 'etherjs';
-  private baseUrl: string;
+  readonly type: NodeProviderTypes = NodeProviderTypes.ETHERJS;
+  private httpUrl: string;
   private wsUrl?: string;
+  private network?: string;
 
   constructor(options: EtherJSProviderOptions) {
     super(options);
-    const url = new URL(options.baseUrl);
-    this.baseUrl = url.toString();
-    this._httpClient = new ethers.JsonRpcProvider(this.baseUrl);
+    const url = new URL(options.httpUrl);
+    this.httpUrl = url.toString();
+    this._httpClient = new ethers.JsonRpcProvider(this.httpUrl);
 
     if (options.wsUrl) {
       this.wsUrl = options.wsUrl;
       this._wsClient = new ethers.WebSocketProvider(options.wsUrl);
     }
+
+    this.network = options.network;
   }
 
   get connectionOptions() {
     return {
       type: this.type,
       uniqName: this.uniqName,
-      baseUrl: this.baseUrl,
+      httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
+      network: this.network,
     };
   }
 

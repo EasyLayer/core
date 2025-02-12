@@ -16,7 +16,7 @@ export const createQuickNodeProvider = (options: QuickNodeProviderOptions): Quic
 };
 
 export class QuickNodeProvider extends BaseNodeProvider<QuickNodeProviderOptions> {
-  readonly type: NodeProviderTypes = 'quicknode';
+  readonly type: NodeProviderTypes = NodeProviderTypes.QUICKNODE;
   private baseUrl: string;
   private responseTimeout: number = 5000;
   private agent: http.Agent | https.Agent;

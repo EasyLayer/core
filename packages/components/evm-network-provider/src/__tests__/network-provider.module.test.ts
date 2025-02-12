@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { NetworkProviderModule, NetworkProviderModuleOptions } from '../network-provider.module';
 import { NetworkProviderService } from '../network-provider.service';
 import { ConnectionManager } from '../connection-manager';
+import { NodeProviderTypes } from '../node-providers';
 
 describe('NetworkProviderModule', () => {
   let module: TestingModule;
@@ -9,7 +10,14 @@ describe('NetworkProviderModule', () => {
 
   const moduleOptions: NetworkProviderModuleOptions = {
     isGlobal: false,
-    etherJsHttpUrls: ['http://localhost'],
+    providers: [
+      {
+        connection: {
+          type: NodeProviderTypes.ETHERJS,
+          httpUrl: 'http://localhost',
+        },
+      },
+    ],
   };
 
   beforeEach(async () => {

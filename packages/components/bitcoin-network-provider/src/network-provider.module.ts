@@ -23,7 +23,7 @@ export class NetworkProviderModule {
 
     // Create QuickNode providers
     const quickNodeProviders: ProviderOptions[] = [];
-    if (quickNodesUrls) {
+    if (Array.isArray(quickNodesUrls)) {
       for (const quickNodeProviderOption of quickNodesUrls) {
         quickNodeProviders.push({
           useFactory: () =>
@@ -56,7 +56,10 @@ export class NetworkProviderModule {
         return await providerOptions.useFactory();
       } else if (providerOptions.connection) {
         const { connection } = providerOptions;
-        return createProvider(connection);
+        return createProvider({
+          ...connection,
+          uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
+        });
       } else {
         throw new Error('Provider configuration is invalid.');
       }

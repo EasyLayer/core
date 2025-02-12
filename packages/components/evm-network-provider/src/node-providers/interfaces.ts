@@ -3,7 +3,10 @@ import { EtherJSProviderOptions } from './etherjs.provider';
 
 export type Hash = `0x${string}`;
 
-export type NodeProviderTypes = 'etherjs' | 'web3js';
+export const enum NodeProviderTypes {
+  ETHERJS = 'ethersjs',
+  WEB3JS = 'web3js',
+}
 
 export interface NodeProviderTypeInterface {
   type: NodeProviderTypes;

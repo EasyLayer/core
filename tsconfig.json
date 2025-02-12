@@ -24,10 +24,8 @@
       "@easylayer/common/domain-cqrs-components/websocket-messages/*": ["packages/common/domain-cqrs-components/dist/websocket-messages/*"],
       "@easylayer/common/domain-cqrs-components/bitcoin": ["packages/common/domain-cqrs-components/dist/bitcoin/index"],
       "@easylayer/common/domain-cqrs-components/bitcoin/*": ["packages/common/domain-cqrs-components/dist/bitcoin/*"],
-      "@easylayer/common/domain-cqrs-components/ethereum": ["packages/common/domain-cqrs-components/dist/evm/ethereum/index"],
-      "@easylayer/common/domain-cqrs-components/ethereum/*": ["packages/common/domain-cqrs-components/dist/evm/ethereum/*"],
-      "@easylayer/common/domain-cqrs-components/bsc": ["packages/common/domain-cqrs-components/dist/evm/bsc/index"],
-      "@easylayer/common/domain-cqrs-components/bsc/*": ["packages/common/domain-cqrs-components/dist/evm/bsc/*"]
+      "@easylayer/common/domain-cqrs-components/evm": ["packages/common/domain-cqrs-components/dist/evm/index"],
+      "@easylayer/common/domain-cqrs-components/evm/*": ["packages/common/domain-cqrs-components/dist/evm/*"]
     }
   }
 }
