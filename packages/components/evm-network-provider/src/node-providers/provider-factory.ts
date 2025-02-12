@@ -4,7 +4,7 @@ import { Web3jsProviderOptions, createWeb3jsProvider } from './web3js.provider';
 import { EtherJSProviderOptions, createEtherJSProvider } from './etherjs.provider';
 
 export interface ProviderOptions<T extends ProviderNodeOptions = ProviderNodeOptions> {
-  connection?: ProviderNodeOptions;
+  connection?: Omit<ProviderNodeOptions, 'uniqName'>; // TODO: think about uniqName
   useFactory?: (options?: T) => Promise<BaseNodeProvider<T>> | BaseNodeProvider<T>;
 }
 
