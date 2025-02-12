@@ -13,7 +13,7 @@ export const createSelfNodeProvider = (options: SelfNodeProviderOptions): SelfNo
 };
 
 export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> {
-  readonly type: NodeProviderTypes = 'selfnode';
+  readonly type: NodeProviderTypes = NodeProviderTypes.SELFNODE;
   private baseUrl: string;
   private responseTimeout: number = 5000;
   private agent: http.Agent | https.Agent;

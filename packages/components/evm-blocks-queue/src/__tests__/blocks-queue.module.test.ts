@@ -30,7 +30,7 @@ describe('BlocksQueueModule', () => {
     module = await Test.createTestingModule({
       imports: [
         // IMPORTANT: We are explicitly importing the BitcoinNetworkProviderModule for testing
-        NetworkProviderModule.forRootAsync({ isGlobal: true, etherJsHttpUrls: ['http://localhost'] }),
+        NetworkProviderModule.forRootAsync({ isGlobal: true, providers: [] }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],
     }).compile();

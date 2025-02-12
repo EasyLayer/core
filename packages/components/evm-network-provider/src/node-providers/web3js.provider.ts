@@ -3,8 +3,9 @@ import { BaseNodeProvider, BaseNodeProviderOptions } from './base-node-provider'
 import { NodeProviderTypes, Hash } from './interfaces';
 
 export interface Web3jsProviderOptions extends BaseNodeProviderOptions {
-  baseUrl: string;
+  httpUrl: string;
   wsUrl?: string;
+  network?: string;
 }
 
 export const createWeb3jsProvider = (options: Web3jsProviderOptions): Web3jsProvider => {
@@ -12,14 +13,15 @@ export const createWeb3jsProvider = (options: Web3jsProviderOptions): Web3jsProv
 };
 
 export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
-  readonly type: NodeProviderTypes = 'web3js';
-  private baseUrl: string;
+  readonly type: NodeProviderTypes = NodeProviderTypes.WEB3JS;
+  private httpUrl: string;
   private wsUrl?: string;
+  private network?: string;
 
   constructor(options: Web3jsProviderOptions) {
     super(options);
-    this.baseUrl = options.baseUrl;
-    this._httpClient = new Web3(new Web3.providers.HttpProvider(this.baseUrl));
+    this.httpUrl = options.httpUrl;
+    this._httpClient = new Web3(new Web3.providers.HttpProvider(this.httpUrl));
 
     if (options.wsUrl) {
       this.wsUrl = options.wsUrl;
@@ -34,14 +36,17 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl, wsProviderOptions);
       this._wsClient = new Web3(wsProvider);
     }
+
+    this.network = options.network;
   }
 
   get connectionOptions() {
     return {
       type: this.type,
       uniqName: this.uniqName,
-      baseUrl: this.baseUrl,
+      httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
+      network: this.network,
     };
   }
 
