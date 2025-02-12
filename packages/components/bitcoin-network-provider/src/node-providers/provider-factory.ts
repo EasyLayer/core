@@ -1,4 +1,4 @@
-import { ProviderNodeOptions } from './interfaces';
+import { ProviderNodeOptions, NodeProviderTypes } from './interfaces';
 import { BaseNodeProvider, BaseNodeProviderOptions } from './base-node-provider';
 import { QuickNodeProviderOptions, createQuickNodeProvider } from './quick-node.provider';
 import { SelfNodeProviderOptions, createSelfNodeProvider } from './self-node.provider';
@@ -14,9 +14,9 @@ export function createProvider(options: ProviderNodeOptions): BaseNodeProvider<B
 
   const { type, ...restOptions } = options;
   switch (type) {
-    case 'selfnode':
+    case NodeProviderTypes.SELFNODE:
       return createSelfNodeProvider(restOptions as SelfNodeProviderOptions);
-    case 'quicknode':
+    case NodeProviderTypes.QUICKNODE:
       return createQuickNodeProvider(restOptions as QuickNodeProviderOptions);
     default:
       throw new Error(`Unsupported provider type: ${type}`);

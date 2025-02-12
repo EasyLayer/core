@@ -3,7 +3,10 @@ import { SelfNodeProviderOptions } from './self-node.provider';
 
 export type Hash = `0x${string}`;
 
-export type NodeProviderTypes = 'selfnode' | 'quicknode';
+export const enum NodeProviderTypes {
+  SELFNODE = 'selfnode',
+  QUICKNODE = 'quicknode',
+}
 
 export interface NodeProviderTypeInterface {
   type: NodeProviderTypes;
