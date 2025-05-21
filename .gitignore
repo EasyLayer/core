@@ -162,6 +162,13 @@ $RECYCLE.BIN/
 # Docs
 ############################
 
-docs
-api-docs
-config-docs
+typedoc
+
+############################
+# Cursor
+############################
+
+.cursor
+
+.rollup.cache
+.rollup

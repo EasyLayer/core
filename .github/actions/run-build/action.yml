@@ -14,4 +14,4 @@ runs:
     - if: ${{ steps.yarn-build-cache.outputs.cache-hit != 'true' }}
       name: 📥 Run build
       shell: bash
-      run: yarn build:prod
+      run: yarn build

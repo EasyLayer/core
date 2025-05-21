@@ -1,21 +1,25 @@
 {
   "name": "@easylayer/shared-interfaces",
-  "version": "0.5.1",
+  "version": "0.6.1",
   "description": "",
   "private": true,
+  "type": "commonjs",
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
-    "clear:dist": "rimraf dist",
-    "lint": "eslint -c .eslintrc.js \"{src,apps,libs,test}/**/*.ts\"",
-    "lint:fix": "eslint -c .eslintrc.js \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "format": "prettier -с .prettierrc.js --write \"src/**/*.ts\""
+    "clear:dist": "rimraf dist && rimraf .rollup.cache",
+    "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
+    "lint:fix": "eslint -c eslint.config.mjs \"src/**/*.ts\" --fix",
+    "format": "prettier -с prettier.config.mjs --write \"src/**/*.ts\"",
+    "build:esm": "rollup --config"
   },
   "author": "Yaroslav Pavliuk",
   "license": "",
-  "packageManager": "yarn@3.6.0",
+  "packageManager": "yarn@4.5.0",
   "devDependencies": {
+    "@rollup/plugin-typescript": "11.1.6",
     "@types/node": "20.10.4",
+    "rollup": "4.17.2",
     "typescript": "5.3.3"
   }
 }

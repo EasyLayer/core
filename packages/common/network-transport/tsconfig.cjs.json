@@ -1,0 +1,34 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "incremental": true,
+    "composite": true,
+    "sourceMap": false,
+    "declarationMap": false,
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
+  },
+  "references": [
+    { "path": "../logger/tsconfig.cjs.json" },
+    { "path": "../cqrs/tsconfig.cjs.json" },
+    { "path": "../exponential-interval-async/tsconfig.cjs.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

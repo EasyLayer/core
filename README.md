@@ -1,41 +1,100 @@
-EasyLayer provides a suite of ready-to-use self-hosted solutions for blockchain indexing and real-time crypto processing. Our tools are designed to empower developers and businesses to efficiently interact with the blockchains network through robust and scalable applications.
+<p align="center">
+  <b>Core</b> is a tools provide reusable components, utilities, and infrastructure for building EasyLayer apps.
+</p>
+<br>
 
-## 📚 Documentation & Website
+<p align="center">
+  <a href="https://www.npmjs.com/package/@easylayer/common"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/common.svg?style=flat-square"></a>
+  <a href="https://www.npmjs.com/package/@easylayer/common"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/common.svg?style=flat-square"></a>
+  <a href="https://www.npmjs.com/package/@easylayer/bitcoin"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/bitcoin.svg?style=flat-square"></a>
+  <a href="https://www.npmjs.com/package/@easylayer/bitcoin"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/bitcoin.svg?style=flat-square"></a>
+  <a href="https://www.npmjs.com/package/@easylayer/evm"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/evm.svg?style=flat-square"></a>
+  <a href="https://www.npmjs.com/package/@easylayer/evm"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/evm.svg?style=flat-square"></a>
+  <a href="./LICENSE"><img alt="license" src="https://img.shields.io/github/license/easylayer/core?style=flat-square"></a>
+</p>
 
-- **Documentation:** [https://docs.easylayer.io/](https://docs.easylayer.io/)
-- **Website:** [https://easylayer.io/](https://easylayer.io/)
+---
 
-## 🛠️ Available Solutions
+<p align="center">
+  <a href="https://easylayer.io">Website</a> | <a href="https://easylayer.io/docs">Docs</a> | <a href="https://github.com/easylayer/core/discussions">Discussions</a>
+</p>
 
-EasyLayer currently offers four core application concepts for the Bitcoin network:
+---
 
-1. **[Bitcoin Loader (Experimental)](https://github.com/EasyLayer/bitcoin-loader)**
-   - *Stage:* Beta Testing Version
+# EasyLayer Core Packages
 
-2. **[Bitcoin Indexer (Proof of Concept)](https://github.com/EasyLayer/bitcoin-indexer)**
-   - *Stage:* Proof of Concept
+This repository contains the core packages for EasyLayer applications. It includes common modules and blockchain components:
 
-3. **[Bitcoin Listener (Proof of Concept)](https://github.com/EasyLayer/bitcoin-listener)**
-   - *Stage:* Proof of Concept
+- <b>@easylayer/common</b>: Shared utilities, CQRS, event sourcing and more.
+- <b>@easylayer/bitcoin</b>: Bitcoin blockchain integration and utilities.
+- <b>@easylayer/evm</b>: EVM-compatible blockchain integration and utilities.
 
-4. **[Bitcoin Wallet (Proof of Concept)](https://github.com/EasyLayer/bitcoin-wallet)**
-   - *Stage:* Proof of Concept
+> EasyLayer provides a suite of ready-to-use, self-hosted solutions for blockchain indexing and real-time crypto processing. Our tools help developers and businesses easily integrate cryptocurrencies into their projects and operations.
 
-Click on each link to access detailed descriptions and documentation for each solution. We are continuously developing beta versions for these applications to enhance their capabilities and stability.
+## Table of Contents
+- [Developer Setup](#developer-setup)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Issue Reporting](#issue-reporting)
+- [License](#license)
 
-## Prerequisites
+## Developer Setup
 
-- **Node.js:** Version 18 or higher
-- **TypeScript:** As the primary programming language
+> <b>Node.js version:</b> 17 or higher is required. We recommend using the latest LTS (currently 22+).<br>
+> <b>Yarn version:</b> 4.5+ is required (Yarn Berry).  
+> Yarn is included in the repository under <code>.yarn/releases/</code>, so you do not need to install it globally.  
+> You can run all commands using <code>yarn</code> if you have Yarn 4+ or Corepack enabled, or use <code>node .yarn/releases/yarn-4.5.0.cjs &lt;command&gt;</code> directly.
 
-## 🧩 Our Concept
+1. **Clone the repository:**
+```bash
+git clone https://github.com/easylayer/core.git
+cd core
+```
 
-Our solutions are built on the following **principles and technologies**:
+2. **Install dependencies:**
+```bash
+yarn install
+```
 
-- **Node.js & TypeScript:** Ensuring modern, efficient, and type-safe development.
-- **NestJS:** Leveraging NestJS for a modern, robust, and scalable software architecture.
-- **Event Sourcing:** Capturing all changes to an application state as a sequence of events.
-- **Command Query Responsibility Segregation (CQRS):** Separating read and write operations for better scalability and maintainability.
-- **Domain-Driven Design (DDD):** Structuring the software around the business domain for clarity and flexibility.
+3. **Build all packages:**
+```bash
+yarn build
+```
 
-Developers define **database schemas** and **data storage mechanisms**, then run the applications on their own machines. Our applications communicate via **RPC** to request blocks from their own node or a provider, process the data, and store it in the appropriate database according to the defined schema. This approach ensures that our solutions are **universal** and **adaptable** to any data scheme.
+4. **Run unit tests:**
+```bash
+yarn test:unit
+```
+
+5. **Lint and format code:**
+```bash
+yarn lint
+# or
+yarn lint:fix
+```
+
+## Documentation
+
+Developer documentation is generated using [TypeDoc](https://typedoc.org/):
+```bash
+yarn docs:development:generate
+```
+The generated docs will be available in the `typedoc/` directory.
+
+## Contributing
+
+We welcome contributions! To get started:
+- Fork this repository and create a new branch for your feature or bugfix.
+- Make your changes and ensure all tests and lints pass locally.
+- Submit a pull request (PR) to the `development` branch.
+- - All PRs must use the provided pull request template.
+- - Branch names and commit messages must follow the [Conventional Changelog](https://www.conventionalcommits.org/) style. Allowed types: `feat`, `fix`, `infra`, `refactor`, `chore`, `BREAKING` (see `.czrc` for details). Please use descriptive messages for each commit.
+- - All PRs are automatically checked by our GitHub Actions workflow (build, lint, unit tests).
+
+## Issue Reporting
+
+If you encounter a bug or have a feature request related to the `core` repository, please [open an issue](https://github.com/easylayer/core/issues/new/choose) and provide as much detail as possible. For issues related to other EasyLayer projects, please use the appropriate repository.
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE).

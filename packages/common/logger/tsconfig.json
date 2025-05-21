@@ -1,0 +1,12 @@
+{
+  "extends": "../../../tsconfig.json",
+  "references": [
+    { "path": "../context/tsconfig.cjs.json" },
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__"
+  ]
+}

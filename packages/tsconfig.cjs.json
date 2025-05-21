@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./common/tsconfig.cjs.json"
+    },
+    {
+      "path": "./components/bitcoin/tsconfig.cjs.json"
+    },
+    {
+      "path": "./components/evm/tsconfig.cjs.json"
+    }
+  ]
+}

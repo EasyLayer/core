@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "references": [
+    { "path": "../logger/tsconfig.cjs.json" },
+    { "path": "../cqrs/tsconfig.cjs.json" },
+    { "path": "../exponential-interval-async/tsconfig.cjs.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__"
+  ]
+}

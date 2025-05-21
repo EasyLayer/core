@@ -1,1 +1,2 @@
-export { exponentialIntervalAsync, ExponentialTimer } from './interval';
+export { exponentialIntervalAsync } from './interval';
+export type { ExponentialTimer } from './interval';
