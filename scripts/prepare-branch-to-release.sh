@@ -53,7 +53,7 @@ generate_changelog
 # Commit all changes in a single commit (version bump, CHANGELOG, docs)
 echo "🚀  Committing all changes"
 git add \
-  $(find . -maxdepth 2 -type f \( -name 'package.json' -o -name 'lerna.json' \)) \
+  $(find . -maxdepth 3 -type f \( -name 'package.json' -o -name 'lerna.json' \)) \
   yarn.lock \
   CHANGELOG.md
 
