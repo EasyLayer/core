@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "references": [
+    {"path": "./arithmetic/tsconfig.cjs.json"},
+    {"path": "./shared-interfaces/tsconfig.cjs.json"},
+    {"path": "./exponential-interval-async/tsconfig.cjs.json"},
+    {"path": "./cqrs/tsconfig.cjs.json"},
+    {"path": "./logger/tsconfig.cjs.json"},
+    {"path": "./cqrs-transport/tsconfig.cjs.json"},
+    {"path": "./network-transport/tsconfig.cjs.json"},
+    {"path": "./eventstore/tsconfig.cjs.json"},
+    {"path": "./secure-storage/tsconfig.cjs.json"}
+  ],
+  "include": ["."],
+  "exclude": [
+    "build-esm-all.sh",
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

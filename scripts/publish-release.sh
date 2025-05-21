@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Stop the script on errors
+# Exit immediately if a command exits with a non-zero status
 set -e
 
 # Publish packages with default "latest" tag
@@ -11,4 +11,4 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "Packages published successfully."
+echo "✅  Release has published successfully."

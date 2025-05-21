@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "sourceMap": false,
+    "declarationMap": false
+  },
+  "references": [
+    { "path": "../../common/cqrs/tsconfig.cjs.json" },
+    { "path": "../../common/logger/tsconfig.cjs.json" },
+    { "path": "../../common/exponential-interval-async/tsconfig.cjs.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}
