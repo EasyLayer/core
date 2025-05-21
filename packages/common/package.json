@@ -1,63 +1,115 @@
 {
   "name": "@easylayer/common",
-  "version": "0.5.1",
+  "version": "0.6.1",
   "description": "",
+  "type": "commonjs",
+  "main": "./index.js",
+  "module": "./index.mjs",
   "exports": {
+    ".": {
+      "module": "./index.mjs",
+      "default": "./index.js"
+    },
+    "./dist/*": {
+      "types": "./*.d.ts"
+    },
     "./arithmetic": {
-      "default": "./arithmetic/dist/index.js",
-      "types": "./arithmetic/dist/index.d.ts"
-    },
-    "./domain-cqrs-components": {
-      "default": "./domain-cqrs-components/dist/index.js",
-      "types": "./domain-cqrs-components/dist/index.d.ts"
-    },
-    "./domain-cqrs-components/websocket-messages": {
-      "default": "./domain-cqrs-components/dist/websocket-messages/index.js",
-      "types": "./domain-cqrs-components/dist/websocket-messages/index.d.ts"
-    },
-    "./domain-cqrs-components/evm": {
-      "default": "./domain-cqrs-components/dist/evm/index.js",
-      "types": "./domain-cqrs-components/dist/evm/index.d.ts"
-    },
-    "./domain-cqrs-components/bitcoin": {
-      "default": "./domain-cqrs-components/dist/bitcoin/index.js",
-      "types": "./domain-cqrs-components/dist/bitcoin/index.d.ts"
-    },
-    "./exponential-interval-async": {
-      "default": "./exponential-interval-async/dist/index.js",
-      "types": "./exponential-interval-async/dist/index.d.ts"
+      "module": "./arithmetic/dist/esm/index.mjs",
+      "default": "./arithmetic/dist/index.js"
     },
     "./shared-interfaces": {
-      "default": "./shared-interfaces/dist/index.js",
-      "types": "./shared-interfaces/dist/index.d.ts"
+      "module": "./shared-interfaces/dist/esm/index.mjs",
+      "default": "./shared-interfaces/dist/index.js"
+    },
+    "./exponential-interval-async": {
+      "module": "./exponential-interval-async/dist/esm/index.mjs",
+      "default": "./exponential-interval-async/dist/index.js"
+    },
+    "./cqrs": {
+      "module": "./cqrs/dist/esm/index.mjs",
+      "default": "./cqrs/dist/index.js"
+    },
+    "./logger": {
+      "module": "./logger/dist/esm/index.mjs",
+      "default": "./logger/dist/index.js"
+    },
+    "./cqrs-transport": {
+      "module": "./cqrs-transport/dist/esm/index.mjs",
+      "default": "./cqrs-transport/dist/index.js"
+    },
+    "./eventstore": {
+      "module": "./eventstore/dist/esm/index.mjs",
+      "default": "./eventstore/dist/index.js"
+    },
+    "./secure-storage": {
+      "module": "./secure-storage/dist/esm/index.mjs",
+      "default": "./secure-storage/dist/index.js"
+    },
+    "./network-transport": {
+      "module": "./network-transport/dist/esm/index.mjs",
+      "default": "./network-transport/dist/index.js"
+    },
+    "./context": {
+      "module": "./context/dist/esm/index.mjs",
+      "default": "./context/dist/index.js"
     }
   },
   "files": [
+    "index.js",
+    "index.mjs",
+    "index.d.td",
     "arithmetic/dist",
-    "domain-cqrs-components/dist",
     "exponential-interval-async/dist",
-    "shared-interfaces/dist"
+    "shared-interfaces/dist",
+    "cqrs/dist",
+    "logger/dist",
+    "cqrs-transport/dist",
+    "eventstore/dist",
+    "network-transport/dist",
+    "secure-storage/dist",
+    "context/dist"
   ],
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
     "clear:dist": "rimraf dist",
-    "prepublishOnly": "yarn clear:dist && yarn build:prod",
-    "build:dev": "tsc -b tsconfig.json",
-    "build:prod": "tsc -b tsconfig.build.json"
+    "build:cjs": "tsc -b tsconfig.cjs.json",
+    "build:esm:all": "./build-esm-all.sh",
+    "build": "yarn build:cjs && yarn build:esm:all",
+    "prepublishOnly": "yarn clear:dist && yarn build"
   },
   "author": "Yaroslav Pavliuk",
   "license": "",
-  "packageManager": "yarn@3.6.0",
+  "packageManager": "yarn@4.5.0",
   "dependencies": {
     "@nestjs/common": "10.2.10",
     "@nestjs/core": "10.2.10",
+    "@nestjs/cqrs": "10.2.6",
+    "@nestjs/microservices": "10.2.10",
+    "@nestjs/swagger": "7.1.17",
+    "@nestjs/typeorm": "10.0.2",
+    "@nestjs/websockets": "10.2.10",
+    "better-sqlite3": "11.2.1",
+    "better-sqlite3-multiple-ciphers": "11.1.2",
     "bignumber.js": "9.1.2",
     "bn.js": "5.2.1",
     "bunyan": "1.8.15",
     "chalk": "4.1.2",
+    "lodash": "4.17.21",
+    "p-queue": "6.6.2",
+    "pg": "8.12.0",
+    "pg-copy-streams": "6.0.6",
+    "pg-error-enum": "0.7.1",
+    "pg-query-stream": "4.9.6",
+    "piscina": "4.1.0",
     "reflect-metadata": "0.1.14",
-    "rxjs": "7.8.1"
+    "rxjs": "7.8.1",
+    "socket.io": "4.8.1",
+    "sqlite3": "5.1.7",
+    "stream-json": "1.8.0",
+    "typeorm": "0.3.20",
+    "typeorm-transactional": "0.5.0",
+    "uuid": "9.0.1"
   },
   "devDependencies": {
     "@types/node": "20.10.4",

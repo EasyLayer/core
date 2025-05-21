@@ -2,7 +2,7 @@ name: Analyze Lockfile Workflow
 
 on:
   pull_request:
-    branches: [master]
+    branches: [master, development]
     paths-ignore:
       - 'docs/**'
       - '**.mdx?'
@@ -15,7 +15,7 @@ jobs:
   analyze-lockfile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Analyze Lockfile Dependencies
         uses: ./.github/actions/security/lockfile

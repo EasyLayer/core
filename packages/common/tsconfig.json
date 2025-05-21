@@ -1,16 +1,8 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": ".",
-    "outDir": "dist",
-    "noEmit": true
+    "rootDir": "."
   },
-  "references": [
-    {"path": "./arithmetic/tsconfig.json"},
-    {"path": "./domain-cqrs-components/tsconfig.json"},
-    {"path": "./shared-interfaces/tsconfig.json"},
-    {"path": "./exponential-interval-async/tsconfig.json"}
-  ],
   "include": ["."],
   "exclude": [
     "dist",

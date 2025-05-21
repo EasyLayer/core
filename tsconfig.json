@@ -1,31 +1,23 @@
 {
   "compilerOptions": {
-    "lib": ["es2023"],
-    "module": "NodeNext",
-    "target": "es2022",
-    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "module": "Node16",
+    "target": "ES2022",
+    "moduleResolution": "Node16",
+    "verbatimModuleSyntax": false,
     "strict": true,
     "skipLibCheck": true,
-    "declaration": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "noImplicitThis": true,
+    "resolveJsonModule": false,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
-    "forceConsistentCasingInFileNames": true,
+    "moduleDetection": "force",
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "baseUrl": ".",
     "paths": {
-      "@easylayer/common/*": ["packages/common/*/src"],
-      "@easylayer/components/*": ["packages/components/*/src"],
-      "@easylayer/*": ["packages/*/src"],
-      "@easylayer/common/domain-cqrs-components": ["packages/common/domain-cqrs-components/dist/index"],
-      "@easylayer/common/domain-cqrs-components/*": ["packages/common/domain-cqrs-components/dist/*"],
-      "@easylayer/common/domain-cqrs-components/websocket-messages": ["packages/common/domain-cqrs-components/dist/websocket-messages/index"],
-      "@easylayer/common/domain-cqrs-components/websocket-messages/*": ["packages/common/domain-cqrs-components/dist/websocket-messages/*"],
-      "@easylayer/common/domain-cqrs-components/bitcoin": ["packages/common/domain-cqrs-components/dist/bitcoin/index"],
-      "@easylayer/common/domain-cqrs-components/bitcoin/*": ["packages/common/domain-cqrs-components/dist/bitcoin/*"],
-      "@easylayer/common/domain-cqrs-components/evm": ["packages/common/domain-cqrs-components/dist/evm/index"],
-      "@easylayer/common/domain-cqrs-components/evm/*": ["packages/common/domain-cqrs-components/dist/evm/*"]
+      "@easylayer/common/*": ["packages/common/*/src"]
     }
   }
 }
