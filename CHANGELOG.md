@@ -1,3 +1,9 @@
+## <small>0.6.10 (2025-05-22)</small>
+
+* chore: added public settings to the components packages; ([4b7af65](https://github.com/EasyLayer/core/commit/4b7af65))
+
+
+
 ## <small>0.6.9 (2025-05-22)</small>
 
 * chore: fixed preapre script; ([3063214](https://github.com/EasyLayer/core/commit/3063214))
