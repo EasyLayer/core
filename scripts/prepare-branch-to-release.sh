@@ -53,9 +53,10 @@ generate_changelog
 # Commit all changes in a single commit (version bump, CHANGELOG, docs)
 echo "🚀  Committing all changes"
 git add \
-  $(find . -maxdepth 2 -type f \( -name 'package.json' -o -name 'lerna.json' \)) \
+  lerna.json \
   yarn.lock \
-  CHANGELOG.md
+  CHANGELOG.md \
+  $(find . -name 'package.json' -not -path '*/node_modules/*')
 
 # Only commit if there are staged changes
 if ! git diff --cached --quiet; then
