@@ -46,6 +46,10 @@ echo "Setting package versions to: $version"
 version_num=$(jq -r '.version' lerna.json)
 echo "✨  New version is v$version_num"
 
+# Update all internal dependencies to the new version
+echo "🔄  Updating internal dependencies..."
+find . -name "package.json" -type f -not -path "*/node_modules/*" -exec sed -i '' "s/\"@easylayer\/[^\"]*\": \"[0-9]*\.[0-9]*\.[0-9]*\"/\"@easylayer\/\1\": \"$version_num\"/g" {} +
+
 # Generate or update CHANGELOG.md in one call
 echo "📝  Generating CHANGELOG.md"
 generate_changelog
@@ -54,10 +58,9 @@ generate_changelog
 echo "🚀  Committing all changes"
 git add \
   lerna.json \
-  package.json \
   yarn.lock \
   CHANGELOG.md \
-  packages/*/package.json
+  $(find . -name 'package.json' -not -path '*/node_modules/*')
 
 # Only commit if there are staged changes
 if ! git diff --cached --quiet; then
