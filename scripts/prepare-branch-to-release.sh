@@ -28,10 +28,10 @@ generate_changelog() {
 
   if [ -z "$latest_tag" ]; then
     echo "📝  No tags found. Generating full CHANGELOG…"
-    node_modules/.bin/conventional-changelog -p angular -i CHANGELOG.md -s -r 0
+    node_modules/.bin/conventional-changelog -p angular -i CHANGELOG.md -s -r 0 -k lerna.json
   else
     echo "📝  Latest tag is $latest_tag — generating only the next release…"
-    node_modules/.bin/conventional-changelog -p angular -i CHANGELOG.md -s -r 1
+    node_modules/.bin/conventional-changelog -p angular -i CHANGELOG.md -s -r 1 -k lerna.json
   fi
 }
 
