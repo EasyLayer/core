@@ -1,3 +1,10 @@
+## <small>0.6.11 (2025-05-22)</small>
+
+* chore: added licenses files into each package; ([db277ed](https://github.com/EasyLayer/core/commit/db277ed))
+* chore: removed postinstall script; ([5f8b20e](https://github.com/EasyLayer/core/commit/5f8b20e))
+
+
+
 ## <small>0.6.10 (2025-05-22)</small>
 
 * chore: added public settings to the components packages; ([4b7af65](https://github.com/EasyLayer/core/commit/4b7af65))
