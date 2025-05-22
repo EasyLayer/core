@@ -1,3 +1,9 @@
+## 0.0.0 (2025-05-22)
+
+* chore: fixed changelog script; ([1a20018](https://github.com/easylayer/core/commit/1a20018))
+
+
+
 ## <small>0.6.6 (2025-05-22)</small>
 
 * chore: fixed changelog file; ([15922ec](https://github.com/EasyLayer/core/commit/15922ec))
