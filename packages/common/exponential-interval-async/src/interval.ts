@@ -104,7 +104,8 @@ export const exponentialIntervalAsync = (
     }
   };
 
-  // Schedule the first invocation
+  // Run immediately, then schedule subsequent invocations
+  scheduler();
   timeoutId = setTimeout(scheduler, currentInterval);
 
   // Return the control object

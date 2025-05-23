@@ -6,10 +6,6 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/@easylayer/common"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/common.svg?style=flat-square"></a>
   <a href="https://www.npmjs.com/package/@easylayer/common"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/common.svg?style=flat-square"></a>
-  <a href="https://www.npmjs.com/package/@easylayer/bitcoin"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/bitcoin.svg?style=flat-square"></a>
-  <a href="https://www.npmjs.com/package/@easylayer/bitcoin"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/bitcoin.svg?style=flat-square"></a>
-  <a href="https://www.npmjs.com/package/@easylayer/evm"><img alt="npm version" src="https://img.shields.io/npm/v/@easylayer/evm.svg?style=flat-square"></a>
-  <a href="https://www.npmjs.com/package/@easylayer/evm"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@easylayer/evm.svg?style=flat-square"></a>
   <a href="./LICENSE"><img alt="license" src="https://img.shields.io/github/license/easylayer/core?style=flat-square"></a>
 </p>
 
