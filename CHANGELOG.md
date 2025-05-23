@@ -1,3 +1,9 @@
+## <small>0.6.12 (2025-05-23)</small>
+
+* fix: added retry logic to commit flow to prevent hangs after unpublished events; ([d3569a8](https://github.com/EasyLayer/core/commit/d3569a8))
+
+
+
 ## <small>0.6.11 (2025-05-22)</small>
 
 * chore: added licenses files into each package; ([db277ed](https://github.com/EasyLayer/core/commit/db277ed))

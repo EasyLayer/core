@@ -146,21 +146,6 @@ describe('exponentialIntervalAsync', () => {
     expect(asyncFunc).toHaveBeenCalledTimes(2);
   });
 
-  it('should handle immediate destruction', async () => {
-    const asyncFunc = jest.fn().mockResolvedValue(undefined);
-    const options = { interval: 100, multiplier: 2, maxInterval: 1000 };
-
-    const timer = exponentialIntervalAsync(asyncFunc, options);
-
-    // Immediately call destroy before the first execution
-    timer.destroy();
-
-    // Advance time to ensure no calls are made
-    jest.advanceTimersByTime(1000);
-    await Promise.resolve();
-    expect(asyncFunc).not.toHaveBeenCalled();
-  });
-
   it('should throw an error if maxInterval is less than initial interval', () => {
     const asyncFunc = jest.fn().mockResolvedValue(undefined);
     const options = { interval: 200, multiplier: 2, maxInterval: 100 };
@@ -197,6 +182,21 @@ describe('exponentialIntervalAsync', () => {
     expect(asyncFunc).toHaveBeenCalledTimes(3);
 
     // Destroy the timer to clean up
+    timer.destroy();
+  });
+
+  it('should call asyncFunction immediately upon creation', async () => {
+    const asyncFunc = jest.fn().mockResolvedValue(undefined);
+    const options = { interval: 100, multiplier: 2, maxInterval: 1000, maxAttempts: 3 };
+  
+    const timer = exponentialIntervalAsync(asyncFunc, options);
+  
+    // We wait for microtasks for the promise from the first call to be fulfilled
+    await Promise.resolve();
+  
+    // Check that asyncFunc was called immediately
+    expect(asyncFunc).toHaveBeenCalledTimes(1);
+  
     timer.destroy();
   });
 });

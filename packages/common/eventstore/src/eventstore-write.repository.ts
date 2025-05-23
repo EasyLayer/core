@@ -6,6 +6,7 @@ import { Injectable } from '@nestjs/common';
 import { QueryFailedError, DataSource } from 'typeorm';
 import type { QueryRunner, Repository, ObjectLiteral } from 'typeorm';
 import { runInTransaction, Propagation, IsolationLevel } from 'typeorm-transactional';
+import { ExponentialTimer, exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import { AggregateRoot, EventStatus } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { ContextService } from '@easylayer/common/context';
@@ -18,6 +19,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
   private isSqlite: boolean;
   private snapshotInterval: number = 50;
   private sqliteBatchSize: number = 999;
+  private commitTimer?: ExponentialTimer;
 
   constructor(
     private readonly log: AppLogger,
@@ -73,7 +75,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     // because it allows us to immediately use commit() of the aggregates, without an additional visit to the database.
     // The publication logic implies publishing events immediately and then updating the event status in the database.
     // In case of an update error in the database, these events will be published next time.
-    await this.commit(aggregates);
+    await this.retryCommit(aggregates);
 
     this.log.debug('Updating snapshots after save');
     await Promise.all(aggregates.map((aggregate: T) => this.onSaveUpdateSnapshot(aggregate)));
@@ -138,7 +140,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
     if (isExistModelsToSave) {
       this.log.debug('Invoking commit for modelsToSave after rollback', { args: { toSaveCount: modelsToSave.length } });
-      await this.commit(modelsToSave!);
+      await this.retryCommit(modelsToSave!);
       this.log.debug('Commit returned for modelsToSave');
 
       // TODO: think, do we really need this in the rollback in save case?
@@ -197,33 +199,59 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     // and in other modules, loggers understand which events are currently being processed
     await this.ctxService.run({ type: 'batch', batchRequestIds }, async () => {
       this.log.debug('Starting batch commit', { batchRequestIds });
-      try {
-        await runInTransaction(
-          async () => {
-            this.log.debug('Committing aggregates', { args: { count: aggregates.length } });
-            await Promise.all(aggregates.map((a) => a.commit()));
 
-            this.log.debug('Updating publish statuses');
-            await Promise.all(aggregates.map((a) => this.setPublishStatuses(a)));
+      await runInTransaction(
+        async () => {
+          this.log.debug('Committing aggregates', { args: { count: aggregates.length } });
+          await Promise.all(aggregates.map((a) => a.commit()));
 
-            // Refreshing the cache after a successful commit
-            aggregates.forEach((a) => this.readRepository.cache.set(a.aggregateId, a));
-          },
-          {
-            connectionName: this.dataSourceName,
-            propagation: Propagation.REQUIRED,
-            isolationLevel: IsolationLevel.SERIALIZABLE,
-          }
-        );
+          this.log.debug('Updating publish statuses');
+          await Promise.all(aggregates.map((a) => this.setPublishStatuses(a)));
 
-        this.log.debug('Batch commit complete');
-      } catch (error) {
-        this.log.debug('Batch commit transaction failed', {
-          methodName: 'commit',
-          args: { error },
-        });
-      }
+          // Refreshing the cache after a successful commit
+          aggregates.forEach((a) => this.readRepository.cache.set(a.aggregateId, a));
+        },
+        {
+          connectionName: this.dataSourceName,
+          propagation: Propagation.REQUIRED,
+          isolationLevel: IsolationLevel.SERIALIZABLE,
+        }
+      );
+
+      this.log.debug('Batch commit complete');
     });
+  }
+
+  // IMPORTANT: Retry logic was added as a fix for the issue when commit fails due to unpublihsed
+  // events for the client and gets stuck because other systems remain blocked until successful publishing
+  private async retryCommit(aggregates: T[]): Promise<void> {
+    if (this.commitTimer) {
+      this.commitTimer.destroy();
+      this.commitTimer = undefined;
+    }
+
+    // IMPORTANT: Retry logic works only under specific conditions:
+    // 1 - Next blocks won't start parsing until successful commit (to avoid cache update race conditions)
+    // 2 - We don't track which aggregates are being committed, so we stop timer for all previous ones
+    this.commitTimer = exponentialIntervalAsync(
+      async (resetInterval) => {
+        try {
+          await this.commit(aggregates);
+          this.commitTimer?.destroy();
+          this.commitTimer = undefined;
+        } catch (error) {
+          this.log.debug('Batch commit transaction failed', {
+            methodName: 'commit',
+            args: { error },
+          });
+        }
+      },
+      {
+        interval: 1000,
+        multiplier: 2,
+        maxInterval: 4000,
+      }
+    );
   }
 
   private async setPublishStatuses(aggregate: T) {

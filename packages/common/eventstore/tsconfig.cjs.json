@@ -23,7 +23,8 @@
   "references": [
     { "path": "../cqrs/tsconfig.cjs.json" },
     { "path": "../logger/tsconfig.cjs.json" },
-    { "path": "../context/tsconfig.cjs.json" }
+    { "path": "../context/tsconfig.cjs.json" },
+    { "path": "../exponential-interval-async/tsconfig.cjs.json" }
   ],
   "include": ["src"],
   "exclude": [
