@@ -12,19 +12,36 @@ export class BlocksQueue<T extends Block = Block> {
   private inStack: T[] = [];
   private outStack: T[] = [];
   private _lastHeight: number;
-  private _maxQueueSize: number = 1 * 1024 * 1024; // Bytes
-  private _blockSize: number = 1048576;
+  private _maxQueueSize: number;
+  private _blockSize: number;
   private _size: number = 0; // Bytes
-  private _maxBlockHeight: number = Number.MAX_SAFE_INTEGER;
+  private _maxBlockHeight: number;
   private readonly mutex = new Mutex();
 
   /**
    * Creates an instance of {@link BlocksQueue}.
    *
-   * @param lastHeight - The height of the last block in the queue.
+   * @param options - Configuration options for the blocks queue
+   * @param options.lastHeight - The height of the last block in the queue. This represents the most recent block number that has been processed.
+   * @param options.maxQueueSize - The maximum size of the queue in bytes. This limits the total memory usage of the queue.
+   * @param options.blockSize - The expected size of each block in bytes. Used for memory management and batch processing calculations.
+   * @param options.maxBlockHeight - The maximum block height that the queue can process. This prevents processing blocks beyond a certain point in the blockchain.
    */
-  constructor(lastHeight: number) {
+  constructor({
+    lastHeight,
+    maxQueueSize,
+    blockSize,
+    maxBlockHeight,
+  }: {
+    lastHeight: number;
+    maxQueueSize: number;
+    blockSize: number;
+    maxBlockHeight: number;
+  }) {
     this._lastHeight = lastHeight;
+    this._maxQueueSize = maxQueueSize;
+    this._blockSize = blockSize;
+    this._maxBlockHeight = maxBlockHeight;
   }
 
   /**
@@ -170,26 +187,12 @@ export class BlocksQueue<T extends Block = Block> {
       // Calculate the total block size based on tx.hex without modifying the original block
       let totalBlockSize = 0;
 
-      if (block.size !== null) {
+      if (block.size !== null && block.size !== undefined) {
+        // Use the provided block size (most accurate)
         totalBlockSize = Number(block.size);
       } else {
-        totalBlockSize = 0;
-        if (!Array.isArray(block.tx)) {
-          for (const transaction of block.tx!) {
-            if (transaction.size) {
-              totalBlockSize += Number(transaction.size);
-            } else if (transaction.hex) {
-              const transactionSize = transaction.hex.length / 2;
-              totalBlockSize += transactionSize;
-            } else {
-              throw new Error(
-                `Invalid transaction data. Either size or hex must be present. Transaction: ${JSON.stringify(
-                  transaction
-                )}`
-              );
-            }
-          }
-        }
+        // Calculate block size manually
+        totalBlockSize = this.calculateBlockSize(block);
       }
 
       // Check if adding this block would exceed the maximum queue size
@@ -251,6 +254,119 @@ export class BlocksQueue<T extends Block = Block> {
 
       return Array.isArray(hashOrHashes) ? results : results[0];
     });
+  }
+
+  /**
+   * Calculates the total block size including SegWit considerations
+   */
+  private calculateBlockSize(block: T): number {
+    let totalSize = 0;
+
+    // Block header size (always 80 bytes)
+    totalSize += 80;
+
+    if (!Array.isArray(block.tx)) {
+      // No transactions or invalid format
+      return totalSize + this.getVarIntSize(0);
+    }
+
+    // Add varint size for transaction count
+    totalSize += this.getVarIntSize(block.tx.length);
+
+    // Calculate size for each transaction
+    for (const transaction of block.tx) {
+      if (transaction.size) {
+        // Use provided transaction size (includes witness data if present)
+        totalSize += Number(transaction.size);
+      } else if (transaction.hex) {
+        // Calculate from hex data
+        totalSize += this.calculateTransactionSizeFromHex(transaction);
+      } else {
+        throw new Error(
+          `Invalid transaction data. Either size or hex must be present. Transaction: ${JSON.stringify(transaction)}`
+        );
+      }
+    }
+
+    return totalSize;
+  }
+
+  /**
+   * Calculates transaction size from hex, accounting for SegWit
+   */
+  private calculateTransactionSizeFromHex(transaction: any): number {
+    const hexData = transaction.hex;
+    let baseSize = hexData.length / 2; // Base transaction size in bytes
+
+    // Check if this is a SegWit transaction
+    // SegWit transactions have a specific marker and flag after version
+    if (this.isSegWitTransaction(hexData)) {
+      // For SegWit transactions, we need to calculate:
+      // - Base size (without witness data)
+      // - Witness size (witness data)
+      // - Total size = base + witness
+
+      const segwitSizes = this.parseSegWitTransaction(hexData);
+      return segwitSizes.totalSize;
+    }
+
+    // Non-SegWit transaction - hex length / 2 gives actual size
+    return baseSize;
+  }
+
+  /**
+   * Checks if transaction is SegWit by looking for marker and flag
+   */
+  private isSegWitTransaction(hex: string): boolean {
+    // SegWit transactions have marker (0x00) and flag (0x01) after version
+    // Version is first 4 bytes (8 hex chars)
+    // Next 2 bytes should be 0x0001 for SegWit
+    if (hex.length < 12) return false;
+
+    const markerAndFlag = hex.substring(8, 12);
+    return markerAndFlag === '0001';
+  }
+
+  /**
+   * Parses SegWit transaction to get accurate size
+   */
+  private parseSegWitTransaction(hex: string): { baseSize: number; witnessSize: number; totalSize: number } {
+    // This is a simplified parser - in production, use a proper Bitcoin library
+    // like bitcoinjs-lib or similar
+
+    const totalHexSize = hex.length / 2;
+
+    // Approximate witness data size calculation
+    // In a real implementation, you'd need to properly parse:
+    // - Version (4 bytes)
+    // - Marker + Flag (2 bytes)
+    // - Input count (varint)
+    // - Inputs (without witness)
+    // - Output count (varint)
+    // - Outputs
+    // - Witness data for each input
+    // - Locktime (4 bytes)
+
+    // For now, estimate that witness data is about 25-30% of total transaction
+    // This is very approximate - real parsing would be more accurate
+    const estimatedWitnessSize = Math.floor(totalHexSize * 0.27);
+    const baseSize = totalHexSize - estimatedWitnessSize;
+
+    return {
+      baseSize,
+      witnessSize: estimatedWitnessSize,
+      totalSize: totalHexSize,
+    };
+  }
+
+  /**
+   * Gets the size of a varint encoding for a given value
+   */
+  private getVarIntSize(value: number): number {
+    if (value < 0xfd) return 1; // 1 byte
+    if (value <= 0xffff) return 3; // 0xfd + 2 bytes
+    if (value <= 0xffffffff) return 5; // 0xfe + 4 bytes
+    return 9; // 0xff + 8 bytes
   }
 
   /**

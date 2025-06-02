@@ -21,7 +21,7 @@ describe('BlocksQueueModule', () => {
     queueLoaderRequestBlocksBatchSize: 10 * 1024 * 1024,
     maxQueueSize: 1024,
     minTransferSize: 1024,
-    queueLoaderStrategyName: 'pull-network-provider',
+    queueLoaderStrategyName: 'pull',
     queueIteratorBlocksBatchSize: 2,
     queueLoaderConcurrency: 1,
     basePreloadCount: 1 * 1024 * 1024,

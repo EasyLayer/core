@@ -3,6 +3,10 @@ import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
 import { Hash } from './node-providers';
 
+/**
+ * A Subscription is a Promise that resolves once unsubscribed, and also provides
+ * an `unsubscribe()` method to cancel the underlying WebSocket listener.
+ */
 export type Subscription = Promise<void> & { unsubscribe: () => void };
 
 @Injectable()
@@ -16,50 +20,79 @@ export class BlockchainProviderService {
     return this._connectionManager;
   }
 
-  public async subscribeToNewBlocks(callback: (block: any) => void): Promise<Subscription> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      if (!provider.wsClient) {
-        throw new Error('Active provider does not support WebSocket connections');
-      }
+  /**
+   * Subscribes to new block events via WebSocket. Returns a Subscription object,
+   * which is a Promise that will not resolve until `unsubscribe()` is called,
+   * or will reject if an error occurs while fetching or processing a block.
+   *
+   * @param callback - A function to be invoked whenever a new block is received.
+   *                   The block data is fetched (with full transactions) before calling this callback.
+   * @returns A Subscription (Promise<void> & { unsubscribe(): void }). Calling unsubscribe()
+   *          removes the WebSocket listener and resolves the promise, allowing callers to clean up.
+   *
+   * @example
+   * ```ts
+   * const subscription = blockchainProviderService.subscribeToNewBlocks((block) => {
+   *   console.log('Received new block:', block);
+   * });
+   *
+   * // Later, to stop listening:
+   * subscription.unsubscribe();
+   * await subscription; // resolves once the listener is removed
+   * ```
+   */
+  public subscribeToNewBlocks(callback: (block: any) => void): Subscription {
+    let resolveSubscription!: () => void;
+    let rejectSubscription!: (error: Error) => void;
 
-      let resolveSubscription: () => void;
-      let rejectSubscription: (error: Error) => void;
+    // Create the underlying promise, then cast it to Subscription so we can attach unsubscribe().
+    const subscriptionPromise = new Promise<void>((resolve, reject) => {
+      resolveSubscription = resolve;
+      rejectSubscription = reject;
+    }) as Subscription;
 
-      // Create a promise that will not be resolved until resolveSubscription or rejectSubscription is called
-      const subscriptionPromise = new Promise<void>((resolve, reject) => {
-        resolveSubscription = resolve;
-        rejectSubscription = reject;
+    // Asynchronously retrieve the active provider
+    this._connectionManager
+      .getActiveProvider()
+      .then((provider) => {
+        if (!provider.wsClient) {
+          // If WebSocket client is not available, immediately reject the subscription promise
+          const err = new Error('Active provider does not support WebSocket connections');
+          rejectSubscription(err);
+          return;
+        }
+
+        // Define a listener that fires on each "block" event
+        const listener = async (blockNumber: number) => {
+          try {
+            // Fetch the full block (including transactions) by height
+            const block = await provider.getOneBlockByHeight(blockNumber, true);
+            // Invoke the user-provided callback with the block data
+            callback(block);
+          } catch (error) {
+            this.log.error('Error fetching block', { args: error });
+            // If fetching or processing the block fails, reject the subscription promise
+            rejectSubscription(error as Error);
+          }
+        };
+
+        // Register the listener for new block events
+        provider.wsClient.on('block', listener);
+
+        // Attach unsubscribe() to our subscriptionPromise to remove the listener and resolve the promise
+        subscriptionPromise.unsubscribe = () => {
+          provider.wsClient.off('block', listener);
+          resolveSubscription();
+        };
+      })
+      .catch((error) => {
+        // If retrieving the active provider fails, reject the subscription promise
+        this.log.error('subscribeToNewBlocks(): failed to get provider', { args: error });
+        rejectSubscription(error as Error);
       });
 
-      const listener = async (blockNumber: number) => {
-        try {
-          const block = await provider.getOneBlockByHeight(blockNumber, true);
-          callback(block);
-        } catch (error) {
-          this.log.error('Error fetching block', { args: error });
-          // If an error occurs while processing the block, we reject the promise
-          rejectSubscription(error as Error);
-        }
-      };
-
-      // Register a listener for the "block" event
-      provider.wsClient.on('block', listener);
-
-      // "Hook" the unsubscribe function to the promise:
-      // When someone calls unsubscribe, we remove the listener and resolve the promise,
-      // allowing the await to complete.
-      (subscriptionPromise as any).unsubscribe = () => {
-        provider.wsClient.off('block', listener);
-        resolveSubscription();
-      };
-
-      // Return a promise that will never resolve unless unsubscribe is called or an error occurs.
-      return subscriptionPromise as Subscription;
-    } catch (error) {
-      this.log.error('subscribeToNewBlocks()', { args: error });
-      throw error;
-    }
+    // Return the Subscription (Promise<void> & { unsubscribe(): void })
+    return subscriptionPromise;
   }
 
   public async getCurrentBlockHeight(): Promise<number> {
