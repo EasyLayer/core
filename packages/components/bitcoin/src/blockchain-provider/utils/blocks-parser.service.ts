@@ -4,6 +4,16 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { Block, Transaction, Vin, Vout } from '../components';
 import { ScriptUtilService } from './script-util.service';
 
+// Bitcoin block structure:
+// [4 bytes] version
+// [32 bytes] previous block hash
+// [32 bytes] merkle root
+// [4 bytes] timestamp
+// [4 bytes] bits (difficulty)
+// [4 bytes] nonce
+// [varint] transaction count
+// [transactions...] all transactions in raw form
+
 @Injectable()
 export class BlockParserService {
   static safeToASM(script?: Buffer): string {

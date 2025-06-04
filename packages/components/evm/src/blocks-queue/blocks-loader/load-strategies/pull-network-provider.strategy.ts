@@ -11,7 +11,7 @@ interface BlockInfo {
 }
 
 export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.PULL_NETWORK_PROVIDER;
+  readonly name: StrategyNames = StrategyNames.PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
   private _concurrency: number = 1;
   private _preloadedItemsQueue: BlockInfo[] = [];

@@ -53,7 +53,12 @@ describe('BlocksQueueIteratorService', () => {
       handleBatch: jest.fn().mockResolvedValue(undefined),
     } as any;
 
-    mockQueue = new BlocksQueue<TestBlock>(-1);
+    mockQueue = new BlocksQueue<TestBlock>({
+      lastHeight: -1,
+      maxBlockHeight: Number.MAX_SAFE_INTEGER,
+      blockSize: 1048576,
+      maxQueueSize: 1 * 1024 * 1024
+    });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [

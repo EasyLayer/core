@@ -34,7 +34,12 @@ describe('PullNetworkProviderStrategy', () => {
 
   beforeEach(() => {
     // Instantiate real queue with initial lastHeight = 0
-    queue = new BlocksQueue<Block>(0);
+    queue = new BlocksQueue<Block>({
+      lastHeight: -1,
+      maxBlockHeight: Number.MAX_SAFE_INTEGER,
+      blockSize: 1048576,
+      maxQueueSize: 1 * 1024 * 1024
+    });
     // Override queue internals (blockSize) and methods
     (queue as any)._blockSize = defaultBlockSize;
     queue.isQueueOverloaded = jest.fn().mockReturnValue(false);

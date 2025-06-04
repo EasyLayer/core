@@ -5,5 +5,5 @@ export interface BlocksLoadingStrategy {
 }
 
 export enum StrategyNames {
-  PULL_NETWORK_PROVIDER = 'pull-network-provider',
+  PULL = 'pull',
 }
