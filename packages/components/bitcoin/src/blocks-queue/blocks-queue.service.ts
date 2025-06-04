@@ -29,11 +29,12 @@ export class BlocksQueueService {
   }
 
   private initQueue(indexedHeight: string | number) {
-    this._queue = new BlocksQueue<Block>(Number(indexedHeight));
-
-    this._queue.maxQueueSize = this.config.maxQueueSize;
-    this._queue.maxBlockHeight = this.config.maxBlockHeight;
-    this._queue.blockSize = this.config.blockSize;
+    this._queue = new BlocksQueue<Block>({
+      lastHeight: Number(indexedHeight),
+      maxQueueSize: this.config.maxQueueSize,
+      maxBlockHeight: this.config.maxBlockHeight,
+      blockSize: this.config.blockSize,
+    });
 
     this.log.info('Queue initialized', {
       args: {

@@ -1,6 +1,7 @@
 // import _ from 'lodash';
 import { Mutex } from 'async-mutex';
-import type { Block } from '../blockchain-provider';
+// import { encode } from 'rlp';
+import type { Block, Transaction } from '../blockchain-provider';
 
 /**
  * Represents a queue specifically designed for managing blocks in a blockchain context.
@@ -12,19 +13,36 @@ export class BlocksQueue<T extends Block> {
   private inStack: T[] = [];
   private outStack: T[] = [];
   private _lastHeight: number;
-  private _maxQueueSize: number = 8 * 1024 * 1024; // Bytes
-  private _blockSize: number = 8388608;
-  private _size: number = 0; // Bytes
-  private _maxBlockHeight: number = Number.MAX_SAFE_INTEGER;
+  private _maxQueueSize: number;
+  private _blockSize: number;
+  private _size: number = 0;
+  private _maxBlockHeight: number;
   private readonly mutex = new Mutex();
 
   /**
    * Creates an instance of {@link BlocksQueue}.
    *
-   * @param lastHeight - The height of the last block in the queue.
+   * @param options - Configuration options for the blocks queue
+   * @param options.lastHeight - The height of the last block in the queue. This represents the most recent block number that has been processed.
+   * @param options.maxQueueSize - The maximum size of the queue in bytes. This limits the total memory usage of the queue.
+   * @param options.blockSize - The expected size of each block in bytes. Used for memory management and batch processing calculations.
+   * @param options.maxBlockHeight - The maximum block height that the queue can process. This prevents processing blocks beyond a certain point in the blockchain.
    */
-  constructor(lastHeight: number) {
+  constructor({
+    lastHeight,
+    maxQueueSize,
+    blockSize,
+    maxBlockHeight,
+  }: {
+    lastHeight: number;
+    maxQueueSize: number;
+    blockSize: number;
+    maxBlockHeight: number;
+  }) {
     this._lastHeight = lastHeight;
+    this._maxQueueSize = maxQueueSize;
+    this._blockSize = blockSize;
+    this._maxBlockHeight = maxBlockHeight;
   }
 
   /**
@@ -170,11 +188,11 @@ export class BlocksQueue<T extends Block> {
       // Calculate the total block size based on tx.hex without modifying the original block
       let totalBlockSize = 0;
 
-      if (block.size) {
+      if (block.size !== null && block.size !== undefined) {
         totalBlockSize = Number(block.size);
-      } else if (block.gasUsed) {
-        const GAS_TO_BYTES = 0.00233; // TODO
-        totalBlockSize = Number(block.gasUsed) * GAS_TO_BYTES;
+      } else {
+        // Calculate size using RLP encoding without copying objects
+        totalBlockSize = this.calculateBlockSizeRLP(block);
       }
 
       // Check if adding this block would exceed the maximum queue size
@@ -238,6 +256,228 @@ export class BlocksQueue<T extends Block> {
 
       return Array.isArray(hashOrHashes) ? results : results[0];
     });
+  }
+
+  /**
+   * Prepares block data for RLP encoding without copying the original
+   * @param block - Original block
+   * @returns Array suitable for RLP encoding
+   */
+  // private prepareBlockForRLP(block: Block): any[] {
+  //   const txData = [];
+
+  //   if (Array.isArray(block.transactions)) {
+  //     for (const tx of block.transactions) {
+  //       if (typeof tx === 'string') {
+  //         // If transaction is just a hash, skip detailed encoding
+  //         txData.push(tx);
+  //       } else {
+  //         // Full transaction object - ensure proper order for RLP
+  //         const txArray = [
+  //           this.toHex(tx.nonce || 0),
+  //           this.toHex(tx.gasPrice || 0),
+  //           this.toHex(tx.gas || 0),
+  //           tx.to || '0x',
+  //           this.toHex(tx.value || 0),
+  //           tx.input || '0x',
+  //           this.toHex(tx.v || 0),
+  //           tx.r || '0x',
+  //           tx.s || '0x'
+  //         ];
+
+  //         // Add EIP-1559 fields if present
+  //         if (tx.maxFeePerGas !== undefined) {
+  //           txArray.push(this.toHex(tx.maxFeePerGas));
+  //         }
+  //         if (tx.maxPriorityFeePerGas !== undefined) {
+  //           txArray.push(this.toHex(tx.maxPriorityFeePerGas));
+  //         }
+
+  //         txData.push(txArray);
+  //       }
+  //     }
+  //   }
+
+  //   // Ensure nonce is properly formatted
+  //   const blockNonce = typeof block.nonce === 'string' && block.nonce.startsWith('0x')
+  //     ? block.nonce
+  //     : '0x' + (block.nonce || '0');
+
+  //   // Standard Ethereum block header structure
+  //   return [
+  //     block.parentHash,
+  //     block.sha3Uncles,
+  //     block.miner,
+  //     block.stateRoot,
+  //     block.transactionsRoot,
+  //     block.receiptsRoot,
+  //     block.logsBloom,
+  //     this.toHex(block.difficulty),
+  //     this.toHex(block.blockNumber),
+  //     this.toHex(block.gasLimit),
+  //     this.toHex(block.gasUsed),
+  //     this.toHex(block.timestamp),
+  //     block.extraData,
+  //     blockNonce,
+  //     // block.mixHash, Important: This field is often forgotten.
+  //     // baseFeePerGas только для блоков после EIP-1559
+  //     ...(block.baseFeePerGas !== undefined ? [this.toHex(block.baseFeePerGas)] : []),
+  //     txData
+  //   ];
+  // }
+
+  /**
+   * Helper method to ensure proper hex formatting
+   */
+  // private toHex(value: string | number): string {
+  //   if (typeof value === 'string' && value.startsWith('0x')) {
+  //     return value;
+  //   }
+  //   return '0x' + (typeof value === 'number' ? value.toString(16) : value);
+  // }
+
+  /**
+   * Calculates block size using RLP encoding without creating copies
+   * @param block - The block to calculate size for
+   * @returns Size in bytes
+   */
+  private calculateBlockSizeRLP(block: T): number {
+    // Fallback to hex-based calculation if RLP fails
+    return this.calculateBlockSizeTransactionsHex(block);
+
+    // try {
+    //   // Prepare block data for RLP encoding
+    //   const blockData = this.prepareBlockForRLP(block);
+
+    //   // RLP encode and get size
+    //   const encoded = encode(blockData);
+    //   return encoded.length;
+    // } catch (error) {
+    //   // Fallback to hex-based calculation if RLP fails
+    //   return this.calculateBlockSizeTransactionsHex(block);
+    // }
+  }
+
+  /**
+   * Fallback method for size calculation using hex transactions data
+   * @param block - The block to calculate size for
+   * @returns Size in bytes
+   */
+  private calculateBlockSizeTransactionsHex(block: T): number {
+    let totalBlockSize = 0;
+
+    // More accurate base block header size (excluding transactions)
+    totalBlockSize += this.estimateBlockHeaderSize(block);
+
+    if (Array.isArray(block.transactions)) {
+      for (const transaction of block.transactions) {
+        if (typeof transaction === 'string') {
+          // Just a hash, estimate minimal size
+          totalBlockSize += 32; // hash size
+        } else if (transaction.hex) {
+          // Calculate size from hex data (most accurate)
+          const transactionSize = (transaction.hex.length - 2) / 2; // Remove '0x' prefix
+          totalBlockSize += transactionSize;
+        } else {
+          // Estimate transaction size based on available fields
+          totalBlockSize += this.estimateTransactionSize(transaction);
+        }
+      }
+    }
+
+    return totalBlockSize;
+  }
+
+  /**
+   * Estimates block header size
+   */
+  private estimateBlockHeaderSize(block: T): number {
+    let headerSize = 0;
+
+    headerSize += 32; // parentHash
+    headerSize += 32; // sha3Uncles
+    headerSize += 20; // miner
+    headerSize += 32; // stateRoot
+    headerSize += 32; // transactionsRoot
+    headerSize += 32; // receiptsRoot
+    headerSize += 256; // logsBloom
+    headerSize += 32; // difficulty
+    headerSize += 8; // blockNumber
+    headerSize += 8; // gasLimit
+    headerSize += 8; // gasUsed
+    headerSize += 8; // timestamp
+    headerSize += (block.extraData?.length - 2) / 2 || 0; // extraData
+    headerSize += 8; // nonce
+    headerSize += 32; // mixHash
+
+    // EIP-1559 baseFeePerGas
+    if (block.baseFeePerGas !== undefined) {
+      headerSize += 32;
+    }
+
+    // Add RLP encoding overhead (approximately 5-10% of raw data)
+    return Math.ceil(headerSize * 1.1);
+  }
+
+  /**
+   * Estimates transaction size based on its fields when hex is not available
+   * @param transaction - Transaction object
+   * @returns Estimated size in bytes
+   */
+  private estimateTransactionSize(transaction: Transaction): number {
+    let size = 0;
+
+    // Basic transaction fields
+    size += 32; // hash
+    size += 8; // nonce (usually small, but can be up to 32 bytes)
+    size += 32; // blockHash
+    size += 8; // blockNumber
+    size += 8; // transactionIndex
+    size += 20; // from address
+    size += 20; // to address (if present)
+    size += 32; // value
+    size += 8; // gas
+    size += 32; // gasPrice
+
+    // Signatures (v, r, s) - исправлено
+    size += 1; // v (1 byte)
+    size += 32; // r (32 bytes)
+    size += 32; // s (32 bytes)
+
+    // Input data size (variable)
+    if (transaction.input && transaction.input !== '0x') {
+      size += (transaction.input.length - 2) / 2; // Convert hex to bytes
+    }
+
+    // EIP-1559 fields (if present)
+    if (transaction.maxFeePerGas !== undefined) {
+      size += 32; // maxFeePerGas
+    }
+    if (transaction.maxPriorityFeePerGas !== undefined) {
+      size += 32; // maxPriorityFeePerGas
+    }
+
+    // EIP-2930 access list (if present)
+    if (transaction.accessList && transaction.accessList.length > 0) {
+      for (const entry of transaction.accessList) {
+        size += 20; // address
+        size += entry.storageKeys.length * 32; // storage keys
+      }
+    }
+
+    // EIP-4844 blob fields (if present)
+    if (transaction.blobVersionedHashes) {
+      size += transaction.blobVersionedHashes.length * 32; // blob hashes
+    }
+    if (transaction.maxFeePerBlobGas !== undefined) {
+      size += 32; // maxFeePerBlobGas
+    }
+
+    // Add RLP encoding overhead
+    size = Math.ceil(size * 1.05);
+
+    // Minimum transaction size if calculation seems too small
+    return Math.max(size, 108); // Минимальный размер простой транзакции
   }
 
   /**

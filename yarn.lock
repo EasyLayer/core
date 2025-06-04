@@ -712,7 +712,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/bitcoin@workspace:packages/components/bitcoin"
   dependencies:
-    "@easylayer/common": "npm:0.6.12"
+    "@easylayer/common": "npm:0.6.13"
     "@nestjs/common": "npm:10.2.10"
     "@nestjs/core": "npm:10.2.10"
     "@nestjs/swagger": "npm:7.1.17"
@@ -750,7 +750,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@easylayer/common@npm:0.6.12, @easylayer/common@workspace:packages/common":
+"@easylayer/common@npm:0.6.13, @easylayer/common@workspace:packages/common":
   version: 0.0.0-use.local
   resolution: "@easylayer/common@workspace:packages/common"
   dependencies:
@@ -892,7 +892,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/evm@workspace:packages/components/evm"
   dependencies:
-    "@easylayer/common": "npm:0.6.12"
+    "@easylayer/common": "npm:0.6.13"
     "@nestjs/common": "npm:10.2.10"
     "@nestjs/core": "npm:10.2.10"
     "@nestjs/swagger": "npm:7.1.17"
@@ -909,6 +909,7 @@ __metadata:
     lodash: "npm:4.17.21"
     piscina: "npm:4.1.0"
     reflect-metadata: "npm:0.1.14"
+    rlp: "npm:3.0.0"
     rollup: "npm:4.17.2"
     rxjs: "npm:7.8.1"
     ts-jest: "npm:29.1.1"
@@ -11574,6 +11575,15 @@ __metadata:
     hash-base: "npm:^3.0.0"
     inherits: "npm:^2.0.1"
   checksum: 10/006accc40578ee2beae382757c4ce2908a826b27e2b079efdcd2959ee544ddf210b7b5d7d5e80467807604244e7388427330f5c6d4cd61e6edaddc5773ccc393
+  languageName: node
+  linkType: hard
+
+"rlp@npm:3.0.0":
+  version: 3.0.0
+  resolution: "rlp@npm:3.0.0"
+  bin:
+    rlp: bin/rlp
+  checksum: 10/c85549fa5368ef029707d02f0937c0c503b69fb330c5941508c9eef537a4f179fbeecd17149aeb795d430ed5249b68d7c66383a9863068712a191d388786cfc1
   languageName: node
   linkType: hard
 

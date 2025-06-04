@@ -1,3 +1,9 @@
+## <small>0.6.13 (2025-06-04)</small>
+
+* refactor: refactored blocks queue and load strategies; ([397e648](https://github.com/EasyLayer/core/commit/397e648))
+
+
+
 ## <small>0.6.12 (2025-05-23)</small>
 
 * fix: added retry logic to commit flow to prevent hangs after unpublished events; ([d3569a8](https://github.com/EasyLayer/core/commit/d3569a8))

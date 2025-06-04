@@ -57,7 +57,12 @@ describe('BlocksQueue', () => {
 
   beforeEach(() => {
     // Initialize the queue with lastHeight = -1
-    queue = new BlocksQueue<TestBlock>(-1);
+    queue = new BlocksQueue<TestBlock>({
+      lastHeight: -1,
+      maxBlockHeight: Number.MAX_SAFE_INTEGER,
+      blockSize: 1048576,
+      maxQueueSize: 1 * 1024 * 1024
+    });
   });
 
   describe('Initialization', () => {
