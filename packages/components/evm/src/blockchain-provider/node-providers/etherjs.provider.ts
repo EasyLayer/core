@@ -19,6 +19,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   private httpUrl: string;
   private wsUrl?: string;
   private network?: string;
+  private isWebSocketConnected = false;
 
   constructor(options: EtherJSProviderOptions) {
     super(options);
@@ -39,11 +40,39 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     };
   }
 
+  get wsClient() {
+    return this._wsClient;
+  }
+
   public async healthcheck(): Promise<boolean> {
     try {
       await this._httpClient.getBlockNumber();
       return true;
     } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Checks if WebSocket connection is healthy
+   */
+  public async healthcheckWebSocket(): Promise<boolean> {
+    if (!this._wsClient || !this.isWebSocketConnected) {
+      return false;
+    }
+
+    try {
+      // Check if WebSocket is still connected
+      if (this._wsClient.websocket?.readyState !== this._wsClient.websocket?.OPEN) {
+        this.isWebSocketConnected = false;
+        return false;
+      }
+
+      // Try a simple operation to verify connection
+      await this._wsClient.getBlockNumber();
+      return true;
+    } catch (error) {
+      this.isWebSocketConnected = false;
       return false;
     }
   }
@@ -55,47 +84,117 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     }
 
     if (this.wsUrl) {
-      this._wsClient = new ethers.WebSocketProvider(this.wsUrl, this.network);
-
-      // if (this._wsClient?.websocket?.readyState === this._wsClient?.websocket?.OPEN) {
-      //   return;
-      // }
-
-      // await new Promise<void>((resolve, reject) => {
-      //   const timeout = setTimeout(() => {
-      //     cleanup();
-      //     reject(new Error('WebSocket connection timeout'));
-      //   }, 10000);
-
-      //   const handleOpen = () => {
-      //     clearTimeout(timeout);
-      //     cleanup();
-      //     resolve();
-      //   };
-
-      //   const handleError = (err: any) => {
-      //     clearTimeout(timeout);
-      //     cleanup();
-      //     reject(err);
-      //   };
-
-      //   const cleanup = () => {
-      //     if (this._wsClient && this._wsClient.websocket) {
-      //       this._wsClient.websocket.removeListener('open', handleOpen);
-      //       this._wsClient.websocket.removeListener('error', handleError);
-      //     }
-      //   };
-
-      //   this._wsClient.websocket.on('open', handleOpen);
-      //   this._wsClient.websocket.on('error', handleError);
-      // });
+      await this.connectWebSocket();
     }
   }
 
   public async disconnect(): Promise<void> {
+    this.isWebSocketConnected = false;
+
     if (this._wsClient) {
-      this._wsClient.destroy();
+      try {
+        this._wsClient.destroy();
+      } catch (error) {
+        // Ignore destruction errors
+      }
+      this._wsClient = undefined;
     }
+  }
+
+  /**
+   * Reconnects WebSocket connection
+   * This method is called by ConnectionManager when WebSocket health check fails
+   */
+  public async reconnectWebSocket(): Promise<void> {
+    // Disconnect existing WebSocket first
+    if (this._wsClient) {
+      try {
+        this._wsClient.destroy();
+      } catch (error) {
+        // Ignore destruction errors
+      }
+      this._wsClient = undefined;
+      this.isWebSocketConnected = false;
+    }
+
+    // Establish new WebSocket connection
+    if (this.wsUrl) {
+      await this.connectWebSocket();
+    }
+  }
+
+  private async connectWebSocket(): Promise<void> {
+    if (!this.wsUrl) {
+      throw new Error('WebSocket URL not provided');
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this._wsClient = new ethers.WebSocketProvider(this.wsUrl!, this.network);
+
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('WebSocket connection timeout'));
+        }, 10000);
+
+        const handleOpen = () => {
+          this.isWebSocketConnected = true;
+          clearTimeout(timeout);
+          cleanup();
+          resolve();
+        };
+
+        const handleError = (error: any) => {
+          this.isWebSocketConnected = false;
+          clearTimeout(timeout);
+          cleanup();
+          reject(new Error(`WebSocket connection error: ${error.message || error}`));
+        };
+
+        const handleClose = () => {
+          this.isWebSocketConnected = false;
+          // Don't reject here - ConnectionManager will handle reconnection
+        };
+
+        const cleanup = () => {
+          if (this._wsClient?.websocket) {
+            this._wsClient.websocket.removeListener('open', handleOpen);
+            this._wsClient.websocket.removeListener('error', handleError);
+            this._wsClient.websocket.removeListener('close', handleClose);
+          }
+        };
+
+        // Check if websocket is already open
+        if (this._wsClient.websocket?.readyState === this._wsClient.websocket?.OPEN) {
+          this.isWebSocketConnected = true;
+          clearTimeout(timeout);
+          resolve();
+          return;
+        }
+
+        // Set up event listeners
+        if (this._wsClient.websocket) {
+          this._wsClient.websocket.on('open', handleOpen);
+          this._wsClient.websocket.on('error', handleError);
+          this._wsClient.websocket.on('close', handleClose);
+        } else {
+          // If websocket is not immediately available, wait a bit and check again
+          setTimeout(() => {
+            if (this._wsClient?.websocket) {
+              this._wsClient.websocket.on('open', handleOpen);
+              this._wsClient.websocket.on('error', handleError);
+              this._wsClient.websocket.on('close', handleClose);
+            } else {
+              clearTimeout(timeout);
+              reject(new Error('WebSocket not available'));
+            }
+          }, 100);
+        }
+      } catch (error) {
+        this.isWebSocketConnected = false;
+        reject(error);
+      }
+    });
   }
 
   public async getBlockHeight(): Promise<number> {

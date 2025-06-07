@@ -4,6 +4,29 @@ import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from '../load-strategies';
 import type { BlocksQueue } from '../../blocks-queue';
 
+/**
+ * Subscription-based blocks loading strategy that sets up WebSocket subscription to new blocks.
+ *
+ * This strategy performs initial catch-up to sync with the current network height before
+ * establishing the subscription to ensure no blocks are missed during the setup phase.
+ *
+ * The strategy:
+ * 1. Performs initial catch-up from queue.lastHeight to currentNetworkHeight
+ * 2. Sets up WebSocket subscription for new incoming blocks
+ * 3. Filters and enqueues blocks based on queue state and termination conditions
+ *
+ * @example
+ * ```typescript
+ * const strategy = new SubscribeBlocksProviderStrategy(
+ *   logger,
+ *   blockchainProvider,
+ *   queue,
+ *   config
+ * );
+ *
+ * await strategy.load(12345); // Catch up to height 12345 then subscribe
+ * ```
+ */
 export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.SUBSCRIBE;
 
@@ -20,17 +43,16 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   }
 
   /**
-   * Sets up a WebSocket-based subscription to new blocks and waits for completion.
-   * If already subscribed, it simply returns.
+   * Starts the blocks loading process with initial catch-up and subscription setup.
    *
-   * For every incoming block:
-   * 1. If block.blockNumber ≤ queue.lastHeight, skip it
-   * 2. Otherwise, enqueue it
-   * 3. Check termination conditions (target height, queue full, etc.)
-   * 4. Throw errors to terminate the load() method when needed
+   * This method:
+   * 1. Performs initial catch-up to sync with current network height
+   * 2. Sets up WebSocket subscription to new blocks
+   * 3. Handles incoming blocks with termination condition checks
+   * 4. Automatically cleans up resources on completion or error
    *
-   * @param currentNetworkHeight - The current network block height to compare against
-   * @throws {Error} When subscription fails, queue is full, or other error conditions are met
+   * @param currentNetworkHeight - The current network block height to catch up to
+   * @throws {Error} When subscription fails, queue is full, max height reached, or current network height reached
    * @returns {Promise<void>} Resolves when subscription completes normally or meets completion conditions
    */
   async load(currentNetworkHeight: number): Promise<void> {
@@ -40,6 +62,9 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
     }
 
     try {
+      // First perform catch-up to current network height
+      await this.performInitialCatchup(currentNetworkHeight);
+
       // Call subscribeToNewBlocks(…) and store its return-value (the promise object, which has `unsubscribe()`)
       this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
         if (this.queue.isMaxHeightReached) {
@@ -57,7 +82,7 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
         }
 
         // Enqueue the new block
-        await this.queue.enqueue(block);
+        await this.enqueueBlock(block);
       });
 
       this.log.debug(`Subscription created, waiting for new blocks`);
@@ -77,7 +102,7 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
           }
         } catch (unsubscribeError) {
           // Log but don't throw - we don't want cleanup errors to mask original errors
-          this.log.error(`Failed to unsubscribe from block subscription`, {
+          this.log.debug(`Failed to unsubscribe from block subscription`, {
             args: { error: unsubscribeError },
             methodName: 'load',
           });
@@ -92,8 +117,12 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   }
 
   /**
-   * Cancels the existing subscription (if any). Calls `unsubscribe()` on the stored promise,
-   * which removes the WebSocket listener and resolves that promise.
+   * Cancels the existing subscription and stops the loading process.
+   *
+   * This method safely unsubscribes from the WebSocket connection and cleans up
+   * internal state. It can be called multiple times safely.
+   *
+   * @returns {Promise<void>} Resolves when cleanup is complete
    */
   public async stop(): Promise<void> {
     if (!this._subscription) {
@@ -111,6 +140,77 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
       });
     } finally {
       this._subscription = undefined;
+    }
+  }
+
+  /**
+   * Performs initial catch-up to synchronize queue with current network height.
+   *
+   * This method fetches and enqueues all blocks from (queue.lastHeight + 1) to targetHeight
+   * to ensure no blocks are missed between getting network height and setting up subscription.
+   *
+   * @param targetHeight - The target height to catch up to (usually current network height)
+   * @returns {Promise<void>} Resolves when all missing blocks are fetched and enqueued
+   *
+   */
+  private async performInitialCatchup(targetHeight: number): Promise<void> {
+    const queueHeight = this.queue.lastHeight;
+
+    if (queueHeight >= targetHeight) {
+      this.log.debug('No initial catch-up needed', {
+        args: { queueHeight, targetHeight },
+      });
+      return;
+    }
+
+    this.log.info('Performing initial catch-up', {
+      args: { from: queueHeight + 1, to: targetHeight },
+    });
+
+    const heights: number[] = [];
+
+    // Load blocks from queueHeight + 1 to targetHeight inclusively
+    for (let height = queueHeight + 1; height <= targetHeight; height++) {
+      heights.push(height);
+    }
+
+    const blocks = await this.blockchainProvider.getManyBlocksByHeights(heights, true); // fullTransactions=true
+    await this.enqueueBlocks(blocks);
+
+    this.log.debug('Initial catch-up completed');
+  }
+
+  private async enqueueBlock(block: Block): Promise<void> {
+    if (block.blockNumber <= this.queue.lastHeight) {
+      // The situation is when somehow we still have old blocks, we just skip them
+      this.log.debug('Skipping block with height less than or equal to lastHeight', {
+        args: {
+          blockHeight: block.blockNumber,
+          lastHeight: this.queue.lastHeight,
+        },
+      });
+
+      return;
+    }
+
+    // In case of errors we should throw all this away without try catch
+    // to reset everything and try again
+    await this.queue.enqueue(block);
+  }
+
+  private async enqueueBlocks(blocks: Block[]): Promise<void> {
+    blocks.sort((a, b) => {
+      if (a.blockNumber < b.blockNumber) return 1;
+      if (a.blockNumber > b.blockNumber) return -1;
+      return 0;
+    });
+
+    while (blocks.length > 0) {
+      const block = blocks.pop();
+
+      if (block) {
+        await this.enqueueBlock(block);
+      }
     }
   }
 }
