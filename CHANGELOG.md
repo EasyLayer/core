@@ -1,3 +1,9 @@
+## <small>0.6.14 (2025-06-07)</small>
+
+* refactor: rewrited subscribe block logic for evm loader; ([eca975b](https://github.com/EasyLayer/core/commit/eca975b))
+
+
+
 ## <small>0.6.13 (2025-06-04)</small>
 
 * refactor: refactored blocks queue and load strategies; ([397e648](https://github.com/EasyLayer/core/commit/397e648))
