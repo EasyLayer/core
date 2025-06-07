@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/bitcoin",
-  "version": "0.6.14",
+  "version": "0.6.15",
   "description": "",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -35,7 +35,7 @@
   "license": "",
   "packageManager": "yarn@4.5.0",
   "dependencies": {
-    "@easylayer/common": "0.6.14",
+    "@easylayer/common": "0.6.15",
     "@nestjs/common": "10.2.10",
     "@nestjs/core": "10.2.10",
     "@nestjs/swagger": "7.1.17",

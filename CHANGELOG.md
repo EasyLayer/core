@@ -1,3 +1,9 @@
+## <small>0.6.15 (2025-06-07)</small>
+
+* refactor: added initial catchup to subscribe load str; added reconnect to ws providers connections; ([7900da1](https://github.com/EasyLayer/core/commit/7900da1))
+
+
+
 ## <small>0.6.14 (2025-06-07)</small>
 
 * refactor: rewrited subscribe block logic for evm loader; ([eca975b](https://github.com/EasyLayer/core/commit/eca975b))
