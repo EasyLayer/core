@@ -3,6 +3,7 @@ import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
 import type { Hash } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
+import { RateLimiter } from './rate-limiter';
 
 export interface EtherJSProviderOptions extends BaseNodeProviderOptions {
   httpUrl: string;
@@ -20,6 +21,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   private wsUrl?: string;
   private network?: string;
   private isWebSocketConnected = false;
+  private rateLimiter: RateLimiter;
 
   constructor(options: EtherJSProviderOptions) {
     super(options);
@@ -28,6 +30,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     this._httpClient = new ethers.JsonRpcProvider(this.httpUrl);
     this.wsUrl = options.wsUrl;
     this.network = options.network;
+
+    // Initialize rate limiter with user config
+    this.rateLimiter = new RateLimiter(options.rateLimits);
   }
 
   get connectionOptions() {
@@ -37,6 +42,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
       network: this.network,
+      rateLimits: this.rateLimiter.getStats().config,
     };
   }
 
@@ -46,7 +52,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
   public async healthcheck(): Promise<boolean> {
     try {
-      await this._httpClient.getBlockNumber();
+      await this.rateLimiter.executeRequest(() => this._httpClient.getBlockNumber());
       return true;
     } catch (error) {
       return false;
@@ -198,31 +204,34 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getBlockHeight(): Promise<number> {
-    return await this._httpClient.getBlockNumber();
+    return await this.rateLimiter.executeRequest(() => this._httpClient.getBlockNumber());
   }
 
   public async getOneBlockByHeight(blockNumber: number, fullTransactions: boolean = false): Promise<any> {
-    return await this._httpClient.getBlock(blockNumber, fullTransactions);
+    return await this.rateLimiter.executeRequest(() => this._httpClient.getBlock(blockNumber, fullTransactions));
   }
 
   public async getOneBlockByHash(hash: Hash, fullTransactions: boolean = false): Promise<any> {
-    return await this._httpClient.getBlock(hash, fullTransactions);
+    return await this.rateLimiter.executeRequest(() => this._httpClient.getBlock(hash, fullTransactions));
   }
 
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<any[]> {
-    const promises = hashes.map((hash) => this._httpClient.getBlock(hash, fullTransactions));
-    return await Promise.all(promises);
+    const requestFns = hashes.map((hash) => () => this._httpClient.getBlock(hash, fullTransactions));
+
+    return await this.rateLimiter.executeBatchRequests(requestFns);
   }
 
   public async getManyHashesByHeights(heights: number[]): Promise<string[]> {
-    const promises = heights.map((height) => this._httpClient.getBlock(height));
-    const blocks = await Promise.all(promises);
+    const requestFns = heights.map((height) => () => this._httpClient.getBlock(height));
+
+    const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
     return blocks.map((block: any) => block.hash);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<any[]> {
-    const promises = heights.map((height) => this._httpClient.getBlock(height, fullTransactions));
-    return await Promise.all(promises);
+    const requestFns = heights.map((height) => () => this._httpClient.getBlock(height, fullTransactions));
+
+    return await this.rateLimiter.executeBatchRequests(requestFns);
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
@@ -231,20 +240,20 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
     if (hasGenesis) {
       // Get statistics for the genesis block (in Ethereum, this is block 0)
-      // If the node returns a valid size field for it, it will be used,
-      // otherwise you can set size to 0.
-      const genesisBlock = await this._httpClient.getBlock(genesisHeight, false);
+      const genesisBlock = (await this.rateLimiter.executeRequest(() =>
+        this._httpClient.getBlock(genesisHeight, false)
+      )) as any;
       const genesisStats = {
         number: genesisBlock.number,
         hash: genesisBlock.hash,
         size: genesisBlock.size ? parseInt(genesisBlock.size, 16) : 0,
       };
 
-      // We process the remaining blocks, excluding genesis
+      // Process the remaining blocks, excluding genesis
       const filteredHeights = heights.filter((height) => height !== genesisHeight);
-      const promises = filteredHeights.map((height) => this._httpClient.getBlock(height, false));
-      const blocks = await Promise.all(promises);
+      const requestFns = filteredHeights.map((height) => () => this._httpClient.getBlock(height, false));
 
+      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
       const stats = blocks.map((block: any) => ({
         number: block.number,
         hash: block.hash,
@@ -253,10 +262,10 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
       return [genesisStats, ...stats.filter((block: any) => block)];
     } else {
-      // If the genesis block is not included in the requested heights, we process all blocks equally
-      const promises = heights.map((height) => this._httpClient.getBlock(height, false));
-      const blocks = await Promise.all(promises);
+      // Process all blocks equally
+      const requestFns = heights.map((height) => () => this._httpClient.getBlock(height, false));
 
+      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
       return blocks
         .map((block: any) => ({
           number: block.number,
@@ -265,5 +274,12 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
         }))
         .filter((block: any) => block);
     }
+  }
+
+  /**
+   * Get rate limiter statistics
+   */
+  public getRateLimiterStats() {
+    return this.rateLimiter.getStats();
   }
 }

@@ -4,6 +4,7 @@ import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
 import type { Hash } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
+import { RateLimiter } from './rate-limiter';
 
 export interface Web3jsProviderOptions extends BaseNodeProviderOptions {
   httpUrl: string;
@@ -21,6 +22,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   private wsUrl?: string;
   private network?: string;
   private isWebSocketConnected = false;
+  private rateLimiter: RateLimiter;
 
   constructor(options: Web3jsProviderOptions) {
     super(options);
@@ -29,6 +31,9 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     this._httpClient = new Web3(new Web3.providers.HttpProvider(this.httpUrl));
     this.wsUrl = options.wsUrl;
     this.network = options.network;
+
+    // Initialize rate limiter with user config
+    this.rateLimiter = new RateLimiter(options.rateLimits);
   }
 
   get connectionOptions() {
@@ -38,6 +43,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
       network: this.network,
+      rateLimits: this.rateLimiter.getStats().config,
     };
   }
 
@@ -47,7 +53,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
   public async healthcheck(): Promise<boolean> {
     try {
-      await this._httpClient.eth.getBlockNumber();
+      await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlockNumber());
       return true;
     } catch (error) {
       return false;
@@ -181,31 +187,41 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async getBlockHeight(): Promise<number> {
-    const blockNumber = await this._httpClient.eth.getBlockNumber();
+    const blockNumber = await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlockNumber());
     return Number(blockNumber);
   }
 
   public async getOneBlockByHeight(blockNumber: number, fullTransactions: boolean = false): Promise<any> {
-    return await this._httpClient.eth.getBlock(blockNumber, fullTransactions);
+    return await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlock(blockNumber, fullTransactions));
   }
 
   public async getOneBlockByHash(hash: Hash, fullTransactions: boolean = false): Promise<any> {
-    return await this._httpClient.eth.getBlock(hash, fullTransactions);
+    return await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlock(hash, fullTransactions));
   }
 
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<any[]> {
-    const promises = hashes.map((hash) => this._httpClient.eth.getBlock(hash, fullTransactions));
-    return await Promise.all(promises);
+    const requestFns = hashes.map((hash) => () => this._httpClient.eth.getBlock(hash, fullTransactions));
+
+    return await this.rateLimiter.executeBatchRequests(requestFns);
   }
 
   public async getManyHashesByHeights(heights: number[]): Promise<string[]> {
-    const promises = heights.map((height) => this._httpClient.eth.getBlock(height));
-    const blocks = await Promise.all(promises);
-    return blocks.map((block) => block.hash).filter((hash): hash is string => !!hash);
+    const requestFns = heights.map((height) => () => this._httpClient.eth.getBlock(height));
+
+    const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    return blocks.map((block: any) => block.hash).filter((hash): hash is string => !!hash);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<any[]> {
-    const promises = heights.map((height) => this._httpClient.eth.getBlock(height, fullTransactions));
-    return await Promise.all(promises);
+    const requestFns = heights.map((height) => () => this._httpClient.eth.getBlock(height, fullTransactions));
+
+    return await this.rateLimiter.executeBatchRequests(requestFns);
+  }
+
+  /**
+   * Get rate limiter statistics
+   */
+  public getRateLimiterStats() {
+    return this.rateLimiter.getStats();
   }
 }

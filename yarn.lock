@@ -904,6 +904,7 @@ __metadata:
     "@types/node": "npm:20.10.4"
     "@types/uuid": "npm:9.0.7"
     async-mutex: "npm:0.5.0"
+    bottleneck: "npm:2.19.5"
     ethers: "npm:6.13.5"
     jest: "npm:29.7.0"
     lodash: "npm:4.17.21"
@@ -4050,6 +4051,13 @@ __metadata:
     raw-body: "npm:^3.0.0"
     type-is: "npm:^2.0.0"
   checksum: 10/e9d844b036bd15970df00a16f373c7ed28e1ef870974a0a1d4d6ef60d70e01087cc20a0dbb2081c49a88e3c08ce1d87caf1e2898c615dffa193f63e8faa8a84e
+  languageName: node
+  linkType: hard
+
+"bottleneck@npm:2.19.5":
+  version: 2.19.5
+  resolution: "bottleneck@npm:2.19.5"
+  checksum: 10/ffb982185236fc42b135f88eb3cfc8b87c4307fb9c3e3658e843ed673ad1c77780b65a01ab532f9857fa0f75ad4d6c1857985b21c9b2bd7eac8ef3c378d7ebf6
   languageName: node
   linkType: hard
 

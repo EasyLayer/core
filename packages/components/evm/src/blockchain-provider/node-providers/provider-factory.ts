@@ -1,10 +1,14 @@
-import type { ProviderNodeOptions } from './interfaces';
+import type { NodeProviderTypeInterface } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import type { BaseNodeProvider, BaseNodeProviderOptions } from './base-node-provider';
 import type { Web3jsProviderOptions } from './web3js.provider';
 import { createWeb3jsProvider } from './web3js.provider';
 import type { EtherJSProviderOptions } from './etherjs.provider';
 import { createEtherJSProvider } from './etherjs.provider';
+
+export type ProviderNodeOptions =
+  | (EtherJSProviderOptions & NodeProviderTypeInterface)
+  | (Web3jsProviderOptions & NodeProviderTypeInterface);
 
 export interface ProviderOptions<T extends ProviderNodeOptions = ProviderNodeOptions> {
   connection?: Omit<ProviderNodeOptions, 'uniqName'>; // TODO: think about uniqName
