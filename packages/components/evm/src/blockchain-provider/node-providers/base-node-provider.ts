@@ -1,7 +1,9 @@
-import type { Hash } from './interfaces';
+import type { Hash, RateLimits } from './interfaces';
 
 export interface BaseNodeProviderOptions {
   uniqName: string;
+  /** Rate limiting configuration */
+  rateLimits?: RateLimits;
 }
 
 export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseNodeProviderOptions>

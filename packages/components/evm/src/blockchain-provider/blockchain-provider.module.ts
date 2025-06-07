@@ -4,17 +4,19 @@ import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { ConnectionManager } from './connection-manager';
 import { EtherJSUtil, Web3Util } from './utils';
-import { createProvider, ProviderOptions } from './node-providers';
+import { createProvider, ProviderOptions, RateLimits } from './node-providers';
 
 export interface BlockchainProviderModuleOptions {
   providers: ProviderOptions[];
   isGlobal?: boolean;
+  /** Global rate limiting configuration (will be merged with individual provider configs) */
+  rateLimits?: RateLimits;
 }
 
 @Module({})
 export class BlockchainProviderModule {
   static async forRootAsync(options: BlockchainProviderModuleOptions): Promise<DynamicModule> {
-    const { providers, isGlobal } = options;
+    const { providers, isGlobal, rateLimits } = options;
 
     const providersInstance = (providers || []).map(async (providerOptions) => {
       if (providerOptions.useFactory) {
@@ -24,6 +26,7 @@ export class BlockchainProviderModule {
         return createProvider({
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
+          rateLimits,
         });
       } else {
         throw new Error('Provider configuration is invalid.');

@@ -1,3 +1,9 @@
+## <small>0.6.16 (2025-06-07)</small>
+
+* refactor: added rate limiter into providers; added max allowed gap into initial catchup into subscr; ([51db29e](https://github.com/EasyLayer/core/commit/51db29e))
+
+
+
 ## <small>0.6.15 (2025-06-07)</small>
 
 * refactor: added initial catchup to subscribe load str; added reconnect to ws providers connections; ([7900da1](https://github.com/EasyLayer/core/commit/7900da1))
