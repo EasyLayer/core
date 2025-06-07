@@ -147,11 +147,11 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
    * Performs initial catch-up to synchronize queue with current network height.
    *
    * This method fetches and enqueues all blocks from (queue.lastHeight + 1) to targetHeight
-   * to ensure no blocks are missed between getting network height and setting up subscription.
+   * using batch request to optimize network calls. All blocks are fetched with full transactions.
    *
    * @param targetHeight - The target height to catch up to (usually current network height)
+   * @throws {Error} When the gap is too large (>100 blocks)
    * @returns {Promise<void>} Resolves when all missing blocks are fetched and enqueued
-   *
    */
   private async performInitialCatchup(targetHeight: number): Promise<void> {
     const queueHeight = this.queue.lastHeight;
@@ -163,21 +163,52 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
       return;
     }
 
+    const blocksToFetch = targetHeight - queueHeight;
+    const maxAllowedGap = 100; // Maximum blocks to fetch in one batch
+
+    if (blocksToFetch > maxAllowedGap) {
+      const errorMessage =
+        `Gap too large for subscription strategy: ${blocksToFetch} blocks (max allowed: ${maxAllowedGap}). ` +
+        `Consider using a different loading strategy or reducing the gap. ` +
+        `Queue height: ${queueHeight}, Target height: ${targetHeight}`;
+
+      this.log.error('Initial catch-up gap too large', {
+        args: {
+          queueHeight,
+          targetHeight,
+          blocksToFetch,
+          maxAllowedGap,
+          suggestion: 'Use sequential or parallel loading strategy instead',
+        },
+      });
+
+      throw new Error(errorMessage);
+    }
+
     this.log.info('Performing initial catch-up', {
-      args: { from: queueHeight + 1, to: targetHeight },
+      args: {
+        from: queueHeight + 1,
+        to: targetHeight,
+        blocksCount: blocksToFetch,
+      },
     });
 
     const heights: number[] = [];
 
-    // Load blocks from queueHeight + 1 to targetHeight inclusively
+    // Generate array of heights to fetch
     for (let height = queueHeight + 1; height <= targetHeight; height++) {
       heights.push(height);
     }
 
-    const blocks = await this.blockchainProvider.getManyBlocksByHeights(heights, true); // fullTransactions=true
+    // Fetch all blocks in a single batch request with full transactions
+    const blocks = await this.blockchainProvider.getManyBlocksByHeights(heights, true);
+
+    // Enqueue blocks in correct order
     await this.enqueueBlocks(blocks);
 
-    this.log.debug('Initial catch-up completed');
+    this.log.debug('Initial catch-up completed successfully', {
+      args: { blocksProcessed: blocks.length },
+    });
   }
 
   private async enqueueBlock(block: Block): Promise<void> {
