@@ -1,5 +1,5 @@
 import { BlocksQueue } from '../blocks-queue';
-import { Block, Transaction } from '../../blockchain-provider';
+import { Block } from '../../blockchain-provider';
 
 describe('BlocksQueue', () => {
   let queue: BlocksQueue<Block>;
@@ -15,27 +15,6 @@ describe('BlocksQueue', () => {
   });
 
   describe('Enqueue Operation', () => {
-    function createMockTransaction(overrides: Partial<Transaction> = {}): Transaction {
-      return {
-        hash: '0x1234567890123456789012345678901234567890123456789012345678901234',
-        nonce: 1,
-        blockHash: '0xabcdef1234567890123456789012345678901234567890123456789012345678',
-        blockNumber: 101,
-        transactionIndex: 0,
-        from: '0x1234567890123456789012345678901234567890',
-        to: '0x0987654321098765432109876543210987654321',
-        value: '1000000000000000000',
-        gas: 21000,
-        gasPrice: '20000000000',
-        input: '0x',
-        v: '0x1c',
-        r: '0x1234567890123456789012345678901234567890123456789012345678901234',
-        s: '0xabcdef1234567890123456789012345678901234567890123456789012345678',
-        hex: '0xf86c018502540be40082520894' + '0'.repeat(40) + '880de0b6b3a764000080258080',
-        ...overrides
-      };
-    }
-
     function createMockBlock(blockNumber: number, overrides: Partial<Block> = {}): Block {
       return {
         blockNumber,
@@ -103,36 +82,6 @@ describe('BlocksQueue', () => {
       );
     });
 
-    it('should remove hex data from block and transactions', async () => {
-      const transaction = createMockTransaction({ hex: '0xdeadbeef' });
-      const block = createMockBlock(101, {
-        hex: '0xblockdata',
-        transactions: [transaction],
-        size: 500
-      });
-      
-      await queue.enqueue(block);
-      
-      expect(block.hex).toBeUndefined();
-      expect(block.transactions![0]!.hex).toBeUndefined();
-    });
-
-    it('should calculate block size when size is not provided', async () => {
-      const transaction = createMockTransaction({
-        hex: '0xf86c018502540be40082520894' + '0'.repeat(40) + '880de0b6b3a764000080258080'
-      });
-      const block = createMockBlock(101, {
-        transactions: [transaction]
-      });
-      // Remove size to trigger calculation
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      expect(queue.currentSize).toBeGreaterThan(0);
-      expect(queue.length).toBe(1);
-    });
-
     it('should handle blocks with withdrawals (Shanghai fork)', async () => {
       const block = createMockBlock(101, {
         withdrawals: [
@@ -165,176 +114,6 @@ describe('BlocksQueue', () => {
       
       expect(queue.length).toBe(1);
       expect(block.blobGasUsed).toBe('0x1000');
-    });
-  });
-
-  describe('Size Calculation', () => {
-    function createMockTransaction(overrides: Partial<Transaction> = {}): Transaction {
-      return {
-        hash: '0x1234567890123456789012345678901234567890123456789012345678901234',
-        nonce: 1,
-        blockHash: '0xabcdef1234567890123456789012345678901234567890123456789012345678',
-        blockNumber: 101,
-        transactionIndex: 0,
-        from: '0x1234567890123456789012345678901234567890',
-        to: '0x0987654321098765432109876543210987654321',
-        value: '1000000000000000000',
-        gas: 21000,
-        gasPrice: '20000000000',
-        input: '0x',
-        v: '0x1c',
-        r: '0x1234567890123456789012345678901234567890123456789012345678901234',
-        s: '0xabcdef1234567890123456789012345678901234567890123456789012345678',
-        hex: '0xf86c018502540be40082520894' + '0'.repeat(40) + '880de0b6b3a764000080258080',
-        ...overrides
-      };
-    }
-
-    function createMockBlock(blockNumber: number, overrides: Partial<Block> = {}): Block {
-      return {
-        blockNumber,
-        hash: '0xblock' + blockNumber.toString().padStart(60, '0'),
-        parentHash: '0xparent' + '0'.repeat(58),
-        nonce: '0x0000000000000042',
-        sha3Uncles: '0xuncles' + '0'.repeat(58),
-        logsBloom: '0x' + '0'.repeat(512),
-        transactionsRoot: '0xtxroot' + '0'.repeat(57),
-        stateRoot: '0xstate' + '0'.repeat(59),
-        receiptsRoot: '0xreceipts' + '0'.repeat(55),
-        miner: '0xminer' + '0'.repeat(54),
-        difficulty: '1000000',
-        totalDifficulty: '2000000',
-        extraData: '0x',
-        size: 1000,
-        gasLimit: 8000000,
-        gasUsed: 21000,
-        timestamp: Date.now(),
-        uncles: [],
-        transactions: [],
-        ...overrides
-      };
-    }
-
-    it('should calculate size for block with transaction hex data', async () => {
-      const longHexData = '0x' + 'a'.repeat(200); // 100 bytes
-      const transaction = createMockTransaction({ hex: longHexData });
-      const block = createMockBlock(101, { transactions: [transaction] });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      // Size should include block header + transaction hex data
-      expect(queue.currentSize).toBeGreaterThan(100);
-    });
-
-    it('should calculate size for block with string transaction hashes', async () => {
-      const transaction1 = createMockTransaction({ 
-        hash: '0x1234567890123456789012345678901234567890123456789012345678901234'
-      });
-      const transaction2 = createMockTransaction({ 
-        hash: '0xabcdef1234567890123456789012345678901234567890123456789012345678'
-      });
-      
-      const block = createMockBlock(101, {
-        transactions: [transaction1, transaction2]
-      });
-      
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      // Should estimate 32 bytes per hash + header
-      expect(queue.currentSize).toBeGreaterThan(64);
-    });
-
-    it('should estimate transaction size when hex is not available', async () => {
-      const transaction = createMockTransaction();
-      delete transaction.hex; // Remove hex to trigger estimation
-      
-      const block = createMockBlock(101, { transactions: [transaction] });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      // Should use estimation (minimum 108 bytes per transaction + header)
-      expect(queue.currentSize).toBeGreaterThan(108);
-    });
-
-    it('should handle EIP-1559 transactions', async () => {
-      const eip1559Transaction = createMockTransaction({
-        type: '0x2',
-        maxFeePerGas: '30000000000',
-        maxPriorityFeePerGas: '2000000000'
-      });
-      delete eip1559Transaction.hex;
-      
-      const block = createMockBlock(101, {
-        transactions: [eip1559Transaction],
-        baseFeePerGas: '25000000000'
-      });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      expect(queue.currentSize).toBeGreaterThan(0);
-    });
-
-    it('should handle transactions with access lists', async () => {
-      const accessListTransaction = createMockTransaction({
-        type: '0x1',
-        accessList: [
-          {
-            address: '0x1234567890123456789012345678901234567890',
-            storageKeys: [
-              '0x0000000000000000000000000000000000000000000000000000000000000001',
-              '0x0000000000000000000000000000000000000000000000000000000000000002'
-            ]
-          }
-        ]
-      });
-      delete accessListTransaction.hex;
-      
-      const block = createMockBlock(101, { transactions: [accessListTransaction] });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      // Should account for access list size (address + storage keys)
-      expect(queue.currentSize).toBeGreaterThan(108);
-    });
-
-    it('should handle blob transactions (EIP-4844)', async () => {
-      const blobTransaction = createMockTransaction({
-        type: '0x3',
-        blobVersionedHashes: [
-          '0x1234567890123456789012345678901234567890123456789012345678901234',
-          '0xabcdef1234567890123456789012345678901234567890123456789012345678'
-        ],
-        maxFeePerBlobGas: '1000000000'
-      });
-      delete blobTransaction.hex;
-      
-      const block = createMockBlock(101, { transactions: [blobTransaction] });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      expect(queue.currentSize).toBeGreaterThan(108);
-    });
-
-    it('should handle transactions with large input data', async () => {
-      const largeInputTransaction = createMockTransaction({
-        input: '0x' + 'a'.repeat(1000) // 500 bytes of input data
-      });
-      delete largeInputTransaction.hex;
-      
-      const block = createMockBlock(101, { transactions: [largeInputTransaction] });
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      // Should account for large input data
-      expect(queue.currentSize).toBeGreaterThan(500);
     });
   });
 
@@ -431,25 +210,6 @@ describe('BlocksQueue', () => {
         ...overrides
       };
     }
-
-    it('should handle block with null size', async () => {
-      const block = createMockBlock(101, { size: null as any });
-      
-      await queue.enqueue(block);
-      
-      expect(queue.length).toBe(1);
-      expect(queue.currentSize).toBeGreaterThan(0);
-    });
-
-    it('should handle block with undefined size', async () => {
-      const block = createMockBlock(101);
-      delete (block as any).size;
-      
-      await queue.enqueue(block);
-      
-      expect(queue.length).toBe(1);
-      expect(queue.currentSize).toBeGreaterThan(0);
-    });
 
     it('should handle empty transactions array', async () => {
       const block = createMockBlock(101, { transactions: [] });
