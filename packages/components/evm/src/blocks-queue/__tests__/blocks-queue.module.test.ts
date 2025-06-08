@@ -31,7 +31,7 @@ describe('BlocksQueueModule', () => {
     module = await Test.createTestingModule({
       imports: [
         // IMPORTANT: We are explicitly importing the EvmBlockchainProviderModule for testing
-        BlockchainProviderModule.forRootAsync({ isGlobal: true, providers: [] }),
+        BlockchainProviderModule.forRootAsync({ isGlobal: true, providers: [], network: {} as any }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],
     }).compile();

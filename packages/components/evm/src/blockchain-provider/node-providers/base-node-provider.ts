@@ -1,4 +1,5 @@
 import type { Hash, RateLimits } from './interfaces';
+import type { UniversalBlock, UniversalTransaction, UniversalTransactionReceipt } from './interfaces';
 
 export interface BaseNodeProviderOptions {
   uniqName: string;
@@ -47,43 +48,53 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method reconnectWebSocket() is not supported by this provider');
   }
 
+  // Transaction methods
   async sendTransaction(transaction: any): Promise<any> {
     throw new Error('Method sendTransaction() is not supported by this provider');
   }
 
+  async getOneTransactionByHash(hash: Hash): Promise<UniversalTransaction> {
+    throw new Error('Method getOneTransactionByHash() is not supported by this provider');
+  }
+
+  async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
+    throw new Error('Method getManyTransactionsByHashes() is not supported by this provider');
+  }
+
+  async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
+    throw new Error('Method getTransactionReceipt() is not supported by this provider');
+  }
+
+  async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
+    throw new Error('Method getManyTransactionReceipts() is not supported by this provider');
+  }
+
+  // Block methods
   async getBlockHeight(): Promise<number> {
     throw new Error('Method getBlockHeight() is not supported by this provider');
   }
 
-  async getOneBlockByHeight(height: number, fullTransactions?: boolean): Promise<any> {
+  async getOneBlockByHeight(height: number, fullTransactions?: boolean): Promise<UniversalBlock> {
     throw new Error('Method getOneBlockByHeight() is not supported by this provider');
   }
 
-  public async getOneBlockHashByHeight(height: number): Promise<any> {
+  public async getOneBlockHashByHeight(height: number): Promise<string> {
     throw new Error('Method getOneBlockHashByHeight() is not supported by this provider');
   }
 
-  async getManyBlocksByHeights(heights: number[], fullTransactions?: boolean): Promise<any> {
-    throw new Error('Method getManyBlocksByHeight() is not supported by this provider');
+  async getManyBlocksByHeights(heights: number[], fullTransactions?: boolean): Promise<UniversalBlock[]> {
+    throw new Error('Method getManyBlocksByHeights() is not supported by this provider');
   }
 
-  async getManyBlocksStatsByHeights(heights: number[]): Promise<any> {
+  async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
     throw new Error('Method getManyBlocksStatsByHeights() is not supported by this provider');
   }
 
-  async getOneBlockByHash(hash: Hash, fullTransactions?: boolean): Promise<any> {
+  async getOneBlockByHash(hash: Hash, fullTransactions?: boolean): Promise<UniversalBlock> {
     throw new Error('Method getOneBlockByHash() is not supported by this provider');
   }
 
-  async getManyBlocksByHashes(hashes: Hash[], fullTransactions?: boolean): Promise<any> {
-    throw new Error('Method getManyBlockByHash() is not supported by this provider');
-  }
-
-  async getOneTransactionByHash(hash: Hash): Promise<any> {
-    throw new Error('Method getOneTransactionByHash() is not supported by this provider');
-  }
-
-  async getManyTransactionsByHashes(hash: Hash[]): Promise<any> {
-    throw new Error('Method getManyTransactionsByHashes() is not supported by this provider');
+  async getManyBlocksByHashes(hashes: Hash[], fullTransactions?: boolean): Promise<UniversalBlock[]> {
+    throw new Error('Method getManyBlocksByHashes() is not supported by this provider');
   }
 }
