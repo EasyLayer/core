@@ -1,3 +1,9 @@
+## <small>0.6.17 (2025-06-08)</small>
+
+* refactor: improved blockchain provider to updated interfaces, normalization, calculation, tests; ([45ca6dc](https://github.com/EasyLayer/core/commit/45ca6dc))
+
+
+
 ## <small>0.6.16 (2025-06-07)</small>
 
 * refactor: added rate limiter into providers; added max allowed gap into initial catchup into subscr; ([51db29e](https://github.com/EasyLayer/core/commit/51db29e))
