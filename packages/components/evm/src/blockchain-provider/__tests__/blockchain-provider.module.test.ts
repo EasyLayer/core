@@ -10,11 +10,13 @@ describe('BlockchainProviderModule', () => {
 
   const moduleOptions: BlockchainProviderModuleOptions = {
     isGlobal: false,
+    network: {} as any,
     providers: [
       {
         connection: {
           type: NodeProviderTypes.ETHERJS,
           httpUrl: 'http://localhost',
+          network: {} as any
         },
       },
     ],

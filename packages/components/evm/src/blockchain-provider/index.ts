@@ -4,4 +4,4 @@ export { ConnectionManager } from './connection-manager';
 export { BlockchainProviderService } from './blockchain-provider.service';
 export * from './node-providers';
 export * from './components';
-export * from './utils';
+export { EtherJSUtil, Web3Util } from './utils';

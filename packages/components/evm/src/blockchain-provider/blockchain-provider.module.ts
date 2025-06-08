@@ -4,19 +4,19 @@ import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { ConnectionManager } from './connection-manager';
 import { EtherJSUtil, Web3Util } from './utils';
-import { createProvider, ProviderOptions, RateLimits } from './node-providers';
+import { createProvider, ProviderOptions, RateLimits, NetworkConfig } from './node-providers';
 
 export interface BlockchainProviderModuleOptions {
   providers: ProviderOptions[];
+  network: NetworkConfig;
   isGlobal?: boolean;
   /** Global rate limiting configuration (will be merged with individual provider configs) */
   rateLimits?: RateLimits;
 }
-
 @Module({})
 export class BlockchainProviderModule {
   static async forRootAsync(options: BlockchainProviderModuleOptions): Promise<DynamicModule> {
-    const { providers, isGlobal, rateLimits } = options;
+    const { providers, isGlobal, rateLimits, network } = options;
 
     const providersInstance = (providers || []).map(async (providerOptions) => {
       if (providerOptions.useFactory) {
@@ -27,6 +27,7 @@ export class BlockchainProviderModule {
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
           rateLimits,
+          network,
         });
       } else {
         throw new Error('Provider configuration is invalid.');
@@ -46,7 +47,19 @@ export class BlockchainProviderModule {
       module: BlockchainProviderModule,
       global: isGlobal || false,
       imports: [LoggerModule.forRoot({ componentName: BlockchainProviderModule.name })],
-      providers: [BlockchainProviderService, connectionManager, EtherJSUtil, Web3Util],
+      providers: [
+        BlockchainProviderService,
+        {
+          provide: BlockchainProviderService,
+          useFactory: (logger, connectionManager) => {
+            return new BlockchainProviderService(logger, connectionManager, network);
+          },
+          inject: [AppLogger, ConnectionManager],
+        },
+        connectionManager,
+        EtherJSUtil,
+        Web3Util,
+      ],
       exports: [BlockchainProviderService, ConnectionManager, EtherJSUtil, Web3Util],
     };
   }
