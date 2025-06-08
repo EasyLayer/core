@@ -128,14 +128,14 @@ describe('SubscribeBlocksProviderStrategy', () => {
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
       mockBlockchainProvider.subscribeToNewBlocks.mockImplementation((callback) => {
-        // Simulate callback execution that will throw error due to max height reached
+        // Simulate callback execution after subscription is set up
         setTimeout(async () => {
           try {
             await callback(mockBlock);
           } catch (error) {
             rejectSubscription(error as Error);
           }
-        }, 0);
+        }, 10);
         return mockSubscription;
       });
 
@@ -162,39 +162,13 @@ describe('SubscribeBlocksProviderStrategy', () => {
           } catch (error) {
             rejectSubscription(error as Error);
           }
-        }, 0);
+        }, 10);
         return mockSubscription;
       });
 
       mockQueue.isQueueFull = true;
 
       await expect(strategy.load(102)).rejects.toThrow('The queue is full');
-      expect(mockSubscription.unsubscribe).toHaveBeenCalled();
-    });
-
-    it('should handle current network height reached error in subscription callback', async () => {
-      let rejectSubscription: (error: Error) => void;
-      const mockSubscription = new Promise<void>((resolve, reject) => {
-        rejectSubscription = reject;
-      }) as Promise<void> & { unsubscribe: () => void };
-      
-      mockSubscription.unsubscribe = jest.fn();
-
-      mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
-      mockBlockchainProvider.subscribeToNewBlocks.mockImplementation((callback) => {
-        setTimeout(async () => {
-          try {
-            await callback(mockBlock);
-          } catch (error) {
-            rejectSubscription(error as Error);
-          }
-        }, 0);
-        return mockSubscription;
-      });
-
-      mockQueue.lastHeight = 105; // Higher than target height 102
-
-      await expect(strategy.load(102)).rejects.toThrow('Reached current network height');
       expect(mockSubscription.unsubscribe).toHaveBeenCalled();
     });
 
@@ -240,17 +214,20 @@ describe('SubscribeBlocksProviderStrategy', () => {
     });
 
     it('should not create duplicate subscriptions', async () => {
-      const mockSubscription = new Promise<void>(() => {
-        // Never resolves - simulates long-running subscription
+      let resolveSubscription: () => void;
+      const mockSubscription = new Promise<void>((resolve) => {
+        resolveSubscription = resolve;
       }) as Promise<void> & { unsubscribe: () => void };
       
-      mockSubscription.unsubscribe = jest.fn();
+      mockSubscription.unsubscribe = jest.fn().mockImplementation(() => {
+        resolveSubscription();
+      });
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
       mockBlockchainProvider.subscribeToNewBlocks.mockReturnValue(mockSubscription);
 
       // First call - starts subscription
-      const firstLoad = strategy.load(102);
+      const firstLoadPromise = strategy.load(102);
       
       // Wait a bit for subscription to be set up
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -261,27 +238,35 @@ describe('SubscribeBlocksProviderStrategy', () => {
       expect(mockBlockchainProvider.subscribeToNewBlocks).toHaveBeenCalledTimes(1);
       expect(mockLogger.debug).toHaveBeenCalledWith('Already subscribed to new blocks');
       
-      // Clean up
-      await strategy.stop();
+      // Clean up - resolve first load
+      mockSubscription.unsubscribe();
+      await firstLoadPromise;
     });
   });
 
   describe('stop', () => {
     it('should unsubscribe from active subscription', async () => {
-      const mockSubscription = new Promise<void>(() => {}) as Promise<void> & { unsubscribe: () => void };
-      mockSubscription.unsubscribe = jest.fn();
+      let resolveSubscription: () => void;
+      const mockSubscription = new Promise<void>((resolve) => {
+        resolveSubscription = resolve;
+      }) as Promise<void> & { unsubscribe: () => void };
+      
+      mockSubscription.unsubscribe = jest.fn().mockImplementation(() => {
+        resolveSubscription();
+      });
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
       mockBlockchainProvider.subscribeToNewBlocks.mockReturnValue(mockSubscription);
 
       // Start subscription
-      strategy.load(102);
+      const loadPromise = strategy.load(102);
       
       // Wait for subscription to be set up
       await new Promise(resolve => setTimeout(resolve, 10));
 
       // Stop subscription
       await strategy.stop();
+      await loadPromise; // Wait for load to complete
 
       expect(mockSubscription.unsubscribe).toHaveBeenCalled();
       expect(mockLogger.debug).toHaveBeenCalledWith('Unsubscribed from new blocks');
@@ -294,7 +279,11 @@ describe('SubscribeBlocksProviderStrategy', () => {
     });
 
     it('should handle unsubscribe errors gracefully', async () => {
-      const mockSubscription = new Promise<void>(() => {}) as Promise<void> & { unsubscribe: () => void };
+      let resolveSubscription!: () => void;
+      const mockSubscription = new Promise<void>((resolve) => {
+        resolveSubscription = resolve;
+      }) as Promise<void> & { unsubscribe: () => void };
+      
       mockSubscription.unsubscribe = jest.fn().mockImplementation(() => {
         throw new Error('Unsubscribe failed');
       });
@@ -303,15 +292,19 @@ describe('SubscribeBlocksProviderStrategy', () => {
       mockBlockchainProvider.subscribeToNewBlocks.mockReturnValue(mockSubscription);
 
       // Start subscription
-      strategy.load(102);
+      const loadPromise = strategy.load(102);
       
-      // Wait for subscription to be set up
+      // Wait for subscription to be set up  
       await new Promise(resolve => setTimeout(resolve, 10));
 
       // Stop subscription
       await strategy.stop();
 
-      expect(mockLogger.error).toHaveBeenCalledWith(
+      // Manually resolve since unsubscribe failed
+      resolveSubscription();
+      await loadPromise;
+
+      expect(mockLogger.debug).toHaveBeenCalledWith(
         'Error while unsubscribing',
         expect.objectContaining({
           args: { error: expect.any(Error) },

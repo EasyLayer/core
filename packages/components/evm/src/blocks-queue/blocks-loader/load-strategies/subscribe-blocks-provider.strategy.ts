@@ -49,82 +49,79 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
    * 1. Performs initial catch-up to sync with current network height
    * 2. Sets up WebSocket subscription to new blocks
    * 3. Handles incoming blocks with termination condition checks
-   * 4. Automatically cleans up resources on completion or error
+   * 4. Returns a Promise that resolves only when stopped or rejects on errors
    *
    * @param currentNetworkHeight - The current network block height to catch up to
-   * @throws {Error} When subscription fails, queue is full, max height reached, or current network height reached
-   * @returns {Promise<void>} Resolves when subscription completes normally or meets completion conditions
+   * @throws {Error} When subscription fails, queue is full, or critical errors occur
+   * @returns {Promise<void>} Resolves when subscription is stopped, rejects on errors for restart
    */
   async load(currentNetworkHeight: number): Promise<void> {
-    if (this._subscription) {
-      this.log.debug(`Already subscribed to new blocks`);
-      return;
-    }
-
-    try {
-      // First perform catch-up to current network height
-      await this.performInitialCatchup(currentNetworkHeight);
-
-      // Call subscribeToNewBlocks(…) and store its return-value (the promise object, which has `unsubscribe()`)
-      this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
-        if (this.queue.isMaxHeightReached) {
-          throw new Error('Reached max block height');
-        }
-
-        // Check if we have reached the current network height
-        if (this.queue.lastHeight >= currentNetworkHeight) {
-          throw new Error('Reached current network height');
-        }
-
-        // Check if the queue is full
-        if (this.queue.isQueueFull) {
-          throw new Error('The queue is full');
-        }
-
-        // Enqueue the new block
-        await this.enqueueBlock(block);
-      });
-
-      this.log.debug(`Subscription created, waiting for new blocks`);
-
-      // Wait for the subscription to complete (will hang until unsubscribed, error, or termination condition)
-      await this._subscription;
-
-      this.log.debug(`Subscription completed successfully`);
-    } finally {
-      // Always clean up subscription resources
+    return new Promise<void>((resolve, reject) => {
       if (this._subscription) {
-        try {
-          // Attempt to unsubscribe if the subscription object has unsubscribe method
-          if (typeof this._subscription.unsubscribe === 'function') {
-            this._subscription.unsubscribe();
-            this.log.debug(`Successfully unsubscribed from block subscription`);
-          }
-        } catch (unsubscribeError) {
-          // Log but don't throw - we don't want cleanup errors to mask original errors
-          this.log.debug(`Failed to unsubscribe from block subscription`, {
-            args: { error: unsubscribeError },
-            methodName: 'load',
-          });
-        }
+        this.log.debug('Already subscribed to new blocks');
+        resolve();
+        return;
       }
 
-      // Clear the subscription reference so future load() calls can create new subscriptions
-      this._subscription = undefined;
+      // Use async IIFE to handle async operations inside Promise
+      (async () => {
+        try {
+          // First perform catch-up to current network height
+          await this.performInitialCatchup(currentNetworkHeight);
 
-      this.log.debug(`Load method cleanup completed`);
-    }
+          // Create subscription to new blocks
+          this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
+            try {
+              if (this.queue.isMaxHeightReached) {
+                this._subscription?.unsubscribe();
+                reject(new Error('Reached max block height'));
+                return;
+              }
+
+              // IMPORTANT: we don't need to check currentNetworkHeight here
+              // because we subscribe on new blocks
+
+              // Check if the queue is full
+              if (this.queue.isQueueFull) {
+                this._subscription?.unsubscribe();
+                reject(new Error('The queue is full'));
+                return;
+              }
+
+              // Enqueue the new block
+              await this.enqueueBlock(block);
+            } catch (error) {
+              this._subscription?.unsubscribe();
+              reject(error);
+            }
+          });
+
+          this.log.debug('Subscription created, waiting for new blocks');
+
+          // Wait for the subscription to complete (will hang until unsubscribed, error, or termination condition)
+          await this._subscription;
+
+          this.log.debug('Subscription completed successfully');
+          resolve();
+        } catch (setupError) {
+          reject(setupError);
+        } finally {
+          // Always clean up subscription resources
+          this.cleanup();
+        }
+      })();
+    });
   }
 
   /**
-   * Cancels the existing subscription and stops the loading process.
-   *
-   * This method safely unsubscribes from the WebSocket connection and cleans up
-   * internal state. It can be called multiple times safely.
+   * Stops the subscription and cleans up resources.
+   * This will cause the load() Promise to resolve.
    *
    * @returns {Promise<void>} Resolves when cleanup is complete
    */
   public async stop(): Promise<void> {
+    this.log.debug('Stopping subscription strategy');
+
     if (!this._subscription) {
       this.log.debug('No active subscription to stop');
       return;
@@ -134,13 +131,38 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
       this._subscription.unsubscribe();
       this.log.debug('Unsubscribed from new blocks');
     } catch (error) {
-      this.log.error('Error while unsubscribing', {
+      this.log.debug('Error while unsubscribing', {
         args: { error },
         methodName: 'stop',
       });
     } finally {
       this._subscription = undefined;
     }
+  }
+
+  /**
+   * Cleans up subscription resources and resets state.
+   *
+   * @private
+   */
+  private cleanup(): void {
+    if (this._subscription) {
+      try {
+        if (typeof this._subscription.unsubscribe === 'function') {
+          this._subscription.unsubscribe();
+          this.log.debug('Successfully unsubscribed from block subscription');
+        }
+      } catch (unsubscribeError) {
+        this.log.debug('Failed to unsubscribe from block subscription', {
+          args: { error: unsubscribeError },
+          methodName: '_cleanup',
+        });
+      }
+    }
+
+    // Clear the subscription reference so future load() calls can create new subscriptions
+    this._subscription = undefined;
+    this.log.debug('Load method cleanup completed');
   }
 
   /**
