@@ -27,7 +27,6 @@ export class BlockchainProviderModule {
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
           rateLimits,
-          network,
         });
       } else {
         throw new Error('Provider configuration is invalid.');
