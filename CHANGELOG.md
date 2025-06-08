@@ -1,3 +1,9 @@
+## <small>0.6.18 (2025-06-08)</small>
+
+* refactor: fixed subscribe block problems with handling errors; ([3de33be](https://github.com/EasyLayer/core/commit/3de33be))
+
+
+
 ## <small>0.6.17 (2025-06-08)</small>
 
 * refactor: improved blockchain provider to updated interfaces, normalization, calculation, tests; ([45ca6dc](https://github.com/EasyLayer/core/commit/45ca6dc))
