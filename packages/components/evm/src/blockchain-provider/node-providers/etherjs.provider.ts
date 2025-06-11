@@ -346,43 +346,8 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   /**
-   * Normalizes ethers.js transaction receipt to UniversalTransactionReceipt
-   */
-  private normalizeReceipt(ethersReceipt: any): UniversalTransactionReceipt {
-    return {
-      transactionHash: ethersReceipt.hash || ethersReceipt.transactionHash,
-      transactionIndex: ethersReceipt.transactionIndex || ethersReceipt.index,
-      blockHash: ethersReceipt.blockHash,
-      blockNumber: ethersReceipt.blockNumber,
-      from: ethersReceipt.from,
-      to: ethersReceipt.to,
-      cumulativeGasUsed: ethersReceipt.cumulativeGasUsed?.toNumber?.() || Number(ethersReceipt.cumulativeGasUsed),
-      gasUsed: ethersReceipt.gasUsed?.toNumber?.() || Number(ethersReceipt.gasUsed),
-      contractAddress: ethersReceipt.contractAddress,
-      logs:
-        ethersReceipt.logs?.map((log: any) => ({
-          address: log.address,
-          topics: log.topics,
-          data: log.data,
-          blockNumber: log.blockNumber,
-          transactionHash: log.transactionHash,
-          transactionIndex: log.transactionIndex,
-          blockHash: log.blockHash,
-          logIndex: log.logIndex || log.index,
-          removed: log.removed || false,
-        })) || [],
-      logsBloom: ethersReceipt.logsBloom,
-      status: ethersReceipt.status === 1 ? '0x1' : '0x0',
-      type: ethersReceipt.type?.toString() || '0x0',
-      effectiveGasPrice: ethersReceipt.effectiveGasPrice?.toNumber?.() || Number(ethersReceipt.effectiveGasPrice || 0),
-      blobGasUsed: ethersReceipt.blobGasUsed?.toString?.(),
-      blobGasPrice: ethersReceipt.blobGasPrice?.toString?.(),
-    };
-  }
-
-  /**
-   * Normalizes data from ethers.js format to UniversalBlock
-   * This method can be called without networkConfig since it's just format conversion
+   * Normalizes ethers.js Block object to UniversalBlock format
+   * Handles BigInt values and ethers-specific field naming
    */
   private normalizeBlock(ethersBlock: any): UniversalBlock {
     return {
@@ -396,26 +361,41 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       stateRoot: ethersBlock.stateRoot,
       receiptsRoot: ethersBlock.receiptsRoot,
       miner: ethersBlock.miner,
+
+      // Convert BigInt to string for difficulty values
       difficulty: ethersBlock.difficulty?.toString() || '0',
       totalDifficulty: ethersBlock.totalDifficulty?.toString() || '0',
+
       extraData: ethersBlock.extraData,
       size: ethersBlock.size || 0,
-      gasLimit: ethersBlock.gasLimit?.toNumber?.() || Number(ethersBlock.gasLimit) || 0,
-      gasUsed: ethersBlock.gasUsed?.toNumber?.() || Number(ethersBlock.gasUsed) || 0,
+
+      // Convert BigInt to number for gas values
+      gasLimit: Number(ethersBlock.gasLimit) || 0,
+      gasUsed: Number(ethersBlock.gasUsed) || 0,
+
       timestamp: ethersBlock.timestamp || 0,
       uncles: ethersBlock.uncles || [],
+
+      // EIP-1559 fields - convert BigInt to string
       baseFeePerGas: ethersBlock.baseFeePerGas?.toString(),
+
+      // Shanghai fork fields
       withdrawals: ethersBlock.withdrawals,
       withdrawalsRoot: ethersBlock.withdrawalsRoot,
+
+      // Cancun fork fields - convert BigInt to string
       blobGasUsed: ethersBlock.blobGasUsed?.toString(),
       excessBlobGas: ethersBlock.excessBlobGas?.toString(),
       parentBeaconBlockRoot: ethersBlock.parentBeaconBlockRoot,
+
+      // Normalize transactions if present
       transactions: ethersBlock.transactions?.map((tx: any) => this.normalizeTransaction(tx)),
     };
   }
 
   /**
-   * Normalizes data from ethers.js transaction format to UniversalTransaction
+   * Normalizes ethers.js TransactionResponse to UniversalTransaction format
+   * Handles BigInt values, signature extraction, and field mapping
    */
   private normalizeTransaction(ethersTx: any): UniversalTransaction {
     return {
@@ -423,23 +403,86 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       nonce: ethersTx.nonce || 0,
       from: ethersTx.from,
       to: ethersTx.to,
+
+      // Convert BigInt value to string
       value: ethersTx.value?.toString() || '0',
-      gas: ethersTx.gasLimit?.toNumber?.() || Number(ethersTx.gasLimit || ethersTx.gas) || 0,
+
+      // Convert BigInt gasLimit to number for gas field
+      gas: Number(ethersTx.gasLimit) || 0,
+
       input: ethersTx.data || ethersTx.input || '0x',
       blockHash: ethersTx.blockHash,
       blockNumber: ethersTx.blockNumber,
-      transactionIndex: ethersTx.transactionIndex,
+
+      // Handle both transactionIndex and index fields
+      transactionIndex: ethersTx.transactionIndex ?? ethersTx.index,
+
+      // Convert BigInt gasPrice to string
       gasPrice: ethersTx.gasPrice?.toString(),
-      chainId: ethersTx.chainId,
-      v: ethersTx.v?.toString(),
-      r: ethersTx.r,
-      s: ethersTx.s,
-      type: ethersTx.type?.toString(),
+
+      // Convert BigInt chainId to number
+      chainId: ethersTx.chainId ? Number(ethersTx.chainId) : undefined,
+
+      // Extract signature fields from signature object or direct fields
+      v: ethersTx.signature?.v?.toString() || ethersTx.v?.toString(),
+      r: ethersTx.signature?.r || ethersTx.r,
+      s: ethersTx.signature?.s || ethersTx.s,
+
+      // Convert transaction type to string
+      type: ethersTx.type?.toString() || '0',
+
+      // EIP-1559 fields - convert BigInt to string
       maxFeePerGas: ethersTx.maxFeePerGas?.toString(),
       maxPriorityFeePerGas: ethersTx.maxPriorityFeePerGas?.toString(),
+
+      // EIP-2930 access list
       accessList: ethersTx.accessList,
+
+      // EIP-4844 blob transaction fields - convert BigInt to string
       maxFeePerBlobGas: ethersTx.maxFeePerBlobGas?.toString(),
       blobVersionedHashes: ethersTx.blobVersionedHashes,
+    };
+  }
+
+  /**
+   * Normalizes ethers.js transaction receipt to UniversalTransactionReceipt
+   */
+  private normalizeReceipt(ethersReceipt: any): UniversalTransactionReceipt {
+    return {
+      transactionHash: ethersReceipt.hash || ethersReceipt.transactionHash,
+      transactionIndex: ethersReceipt.transactionIndex ?? ethersReceipt.index,
+      blockHash: ethersReceipt.blockHash,
+      blockNumber: ethersReceipt.blockNumber,
+      from: ethersReceipt.from,
+      to: ethersReceipt.to,
+
+      // Convert BigInt values to numbers
+      cumulativeGasUsed: Number(ethersReceipt.cumulativeGasUsed),
+      gasUsed: Number(ethersReceipt.gasUsed),
+
+      contractAddress: ethersReceipt.contractAddress,
+      logs:
+        ethersReceipt.logs?.map((log: any) => ({
+          address: log.address,
+          topics: log.topics,
+          data: log.data,
+          blockNumber: log.blockNumber,
+          transactionHash: log.transactionHash,
+          transactionIndex: log.transactionIndex,
+          blockHash: log.blockHash,
+          logIndex: log.logIndex ?? log.index,
+          removed: log.removed || false,
+        })) || [],
+      logsBloom: ethersReceipt.logsBloom,
+      status: ethersReceipt.status === 1 ? '0x1' : '0x0',
+      type: ethersReceipt.type?.toString() || '0x0',
+
+      // Convert BigInt effectiveGasPrice to number
+      effectiveGasPrice: Number(ethersReceipt.effectiveGasPrice || 0),
+
+      // Convert BigInt blob fields to strings
+      blobGasUsed: ethersReceipt.blobGasUsed?.toString(),
+      blobGasPrice: ethersReceipt.blobGasPrice?.toString(),
     };
   }
 }

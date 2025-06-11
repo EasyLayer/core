@@ -10,7 +10,6 @@ export interface BlockchainProviderModuleOptions {
   providers: ProviderOptions[];
   network: NetworkConfig;
   isGlobal?: boolean;
-  /** Global rate limiting configuration (will be merged with individual provider configs) */
   rateLimits?: RateLimits;
 }
 @Module({})
@@ -27,6 +26,7 @@ export class BlockchainProviderModule {
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
           rateLimits,
+          network,
         });
       } else {
         throw new Error('Provider configuration is invalid.');

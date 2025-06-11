@@ -16,7 +16,6 @@ describe('BlockchainProviderModule', () => {
         connection: {
           type: NodeProviderTypes.ETHERJS,
           httpUrl: 'http://localhost',
-          network: {} as any
         },
       },
     ],
