@@ -393,13 +393,17 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   /**
-   * Normalizes data from web3.js format to UniversalBlock
+   * Normalizes web3.js block object to UniversalBlock format
+   * Handles web3.js specific field types and naming conventions
    */
-  normalizeBlock(web3Block: any): UniversalBlock {
+  private normalizeBlock(web3Block: any): UniversalBlock {
     return {
       hash: web3Block.hash,
       parentHash: web3Block.parentHash,
-      blockNumber: Number(web3Block.number || web3Block.blockNumber),
+
+      // Handle both number and blockNumber fields
+      blockNumber: Number(web3Block.blockNumber || web3Block.number),
+
       nonce: web3Block.nonce,
       sha3Uncles: web3Block.sha3Uncles,
       logsBloom: web3Block.logsBloom,
@@ -407,48 +411,79 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       stateRoot: web3Block.stateRoot,
       receiptsRoot: web3Block.receiptsRoot,
       miner: web3Block.miner,
+
+      // Convert to string for large numbers
       difficulty: web3Block.difficulty?.toString() || '0',
       totalDifficulty: web3Block.totalDifficulty?.toString() || '0',
+
       extraData: web3Block.extraData,
+
+      // Ensure numeric values are properly converted
       size: Number(web3Block.size) || 0,
       gasLimit: Number(web3Block.gasLimit) || 0,
       gasUsed: Number(web3Block.gasUsed) || 0,
       timestamp: Number(web3Block.timestamp) || 0,
+
       uncles: web3Block.uncles || [],
+
+      // EIP-1559 fields
       baseFeePerGas: web3Block.baseFeePerGas?.toString(),
+
+      // Shanghai fork fields
       withdrawals: web3Block.withdrawals,
       withdrawalsRoot: web3Block.withdrawalsRoot,
+
+      // Cancun fork fields
       blobGasUsed: web3Block.blobGasUsed?.toString(),
       excessBlobGas: web3Block.excessBlobGas?.toString(),
       parentBeaconBlockRoot: web3Block.parentBeaconBlockRoot,
+
+      // Normalize transactions if present
       transactions: web3Block.transactions?.map((tx: any) => this.normalizeTransaction(tx)),
     };
   }
 
   /**
-   * Normalizes data from web3.js transaction format to UniversalTransaction
+   * Normalizes web3.js transaction object to UniversalTransaction format
+   * Handles web3.js specific field types and ensures proper data conversion
    */
-  normalizeTransaction(web3Tx: any): UniversalTransaction {
+  private normalizeTransaction(web3Tx: any): UniversalTransaction {
     return {
       hash: web3Tx.hash,
       nonce: Number(web3Tx.nonce) || 0,
       from: web3Tx.from,
       to: web3Tx.to,
+
+      // Convert value to string for large numbers
       value: web3Tx.value?.toString() || '0',
+
       gas: Number(web3Tx.gas) || 0,
       input: web3Tx.input || '0x',
       blockHash: web3Tx.blockHash,
       blockNumber: Number(web3Tx.blockNumber),
       transactionIndex: Number(web3Tx.transactionIndex),
+
+      // Convert gas price to string
       gasPrice: web3Tx.gasPrice?.toString(),
+
       chainId: Number(web3Tx.chainId),
+
+      // Signature fields
       v: web3Tx.v?.toString(),
       r: web3Tx.r,
       s: web3Tx.s,
-      type: web3Tx.type?.toString(),
+
+      // Transaction type
+      type: web3Tx.type?.toString() || '0',
+
+      // EIP-1559 fields
       maxFeePerGas: web3Tx.maxFeePerGas?.toString(),
       maxPriorityFeePerGas: web3Tx.maxPriorityFeePerGas?.toString(),
+
+      // EIP-2930 access list
       accessList: web3Tx.accessList,
+
+      // EIP-4844 blob transaction fields
       maxFeePerBlobGas: web3Tx.maxFeePerBlobGas?.toString(),
       blobVersionedHashes: web3Tx.blobVersionedHashes,
     };

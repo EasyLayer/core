@@ -11,7 +11,7 @@ export type ProviderNodeOptions =
   | (Web3jsProviderOptions & NodeProviderTypeInterface);
 
 export interface ProviderOptions<T extends ProviderNodeOptions = ProviderNodeOptions> {
-  connection?: Omit<ProviderNodeOptions, 'uniqName'>; // TODO: think about uniqName
+  connection?: Omit<T, 'uniqName' | 'network'>; // TODO: think about uniqName
   useFactory?: (options?: T) => Promise<BaseNodeProvider<T>> | BaseNodeProvider<T>;
 }
 
