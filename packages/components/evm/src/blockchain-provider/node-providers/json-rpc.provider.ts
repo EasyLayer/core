@@ -293,15 +293,18 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   // ===== NORMALIZATION METHODS =====
 
   /**
-   * Normalizes raw JSON-RPC block response to UniversalBlock
+   * Normalizes raw JSON-RPC block response to UniversalBlock format
+   * Handles hex string conversion and different provider field naming
    */
   private normalizeRawBlock(rawBlock: any): UniversalBlock {
     return {
       hash: rawBlock.hash,
       parentHash: rawBlock.parentHash,
-      // Handle different provider naming for block number (QuickNode vs others)
+
+      // Handle different provider naming for block number
       blockNumber: rawBlock.blockNumber ? parseInt(rawBlock.blockNumber, 16) : undefined,
       number: rawBlock.number ? parseInt(rawBlock.number, 16) : undefined,
+
       nonce: rawBlock.nonce,
       sha3Uncles: rawBlock.sha3Uncles,
       logsBloom: rawBlock.logsBloom,
@@ -309,28 +312,34 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
       stateRoot: rawBlock.stateRoot,
       receiptsRoot: rawBlock.receiptsRoot,
       miner: rawBlock.miner,
+
+      // Keep hex strings as-is for difficulty
       difficulty: rawBlock.difficulty,
       totalDifficulty: rawBlock.totalDifficulty,
+
       extraData: rawBlock.extraData,
+
+      // Convert hex strings to numbers
       size: parseInt(rawBlock.size, 16),
       gasLimit: parseInt(rawBlock.gasLimit, 16),
       gasUsed: parseInt(rawBlock.gasUsed, 16),
       timestamp: parseInt(rawBlock.timestamp, 16),
+
       uncles: rawBlock.uncles || [],
 
-      // Optional EIP-1559 fields
+      // EIP-1559 fields - keep as hex strings
       baseFeePerGas: rawBlock.baseFeePerGas,
 
-      // Optional Shanghai fork fields
+      // Shanghai fork fields
       withdrawals: rawBlock.withdrawals,
       withdrawalsRoot: rawBlock.withdrawalsRoot,
 
-      // Optional Cancun fork fields
+      // Cancun fork fields - keep as hex strings
       blobGasUsed: rawBlock.blobGasUsed,
       excessBlobGas: rawBlock.excessBlobGas,
       parentBeaconBlockRoot: rawBlock.parentBeaconBlockRoot,
 
-      // Handle transactions
+      // Handle transactions - could be hashes or full objects
       transactions: rawBlock.transactions?.map((tx: any) =>
         typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx)
       ),
@@ -338,39 +347,69 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   }
 
   /**
-   * Normalizes raw JSON-RPC transaction response to UniversalTransaction
+   * Normalizes raw JSON-RPC transaction response to UniversalTransaction format
+   * Handles hex string parsing and ensures all fields are properly formatted
    */
   private normalizeRawTransaction(rawTx: any): UniversalTransaction {
+    // Helper function to safely parse hex values
+    const parseHexSafely = (value: string | undefined, fieldName: string): number => {
+      if (!value) return 0;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value for ${fieldName}: ${value}`);
+      }
+      return parsed;
+    };
+
+    // Helper function for optional hex parsing
+    const parseHexOptional = (value: string | undefined): number | null => {
+      if (!value) return null;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value: ${value}`);
+      }
+      return parsed;
+    };
+
     return {
       hash: rawTx.hash,
-      nonce: parseInt(rawTx.nonce, 16),
+      nonce: parseHexSafely(rawTx.nonce, 'nonce'),
       from: rawTx.from,
       to: rawTx.to,
+
+      // Keep value as hex string
       value: rawTx.value,
-      gas: parseInt(rawTx.gas, 16),
+
+      gas: parseHexSafely(rawTx.gas, 'gas'),
       input: rawTx.input,
       blockHash: rawTx.blockHash,
-      blockNumber: rawTx.blockNumber ? parseInt(rawTx.blockNumber, 16) : null,
-      transactionIndex: rawTx.transactionIndex ? parseInt(rawTx.transactionIndex, 16) : null,
 
-      // Gas pricing
+      // Parse hex block number and transaction index
+      blockNumber: parseHexOptional(rawTx.blockNumber),
+      transactionIndex: parseHexOptional(rawTx.transactionIndex),
+
+      // Keep gas price as hex string
       gasPrice: rawTx.gasPrice,
 
+      // Parse hex chain ID
+      chainId: rawTx.chainId ? parseHexSafely(rawTx.chainId, 'chainId') : undefined,
+
       // Signature fields
-      chainId: rawTx.chainId ? parseInt(rawTx.chainId, 16) : undefined,
       v: rawTx.v,
       r: rawTx.r,
       s: rawTx.s,
 
-      // Transaction type and EIP-1559 fields
+      // Transaction type - default to legacy if not specified
       type: rawTx.type || '0x0',
+
+      // EIP-1559 fields - keep as hex strings
       maxFeePerGas: rawTx.maxFeePerGas,
       maxPriorityFeePerGas: rawTx.maxPriorityFeePerGas,
 
       // EIP-2930 access list
       accessList: rawTx.accessList,
 
-      // EIP-4844 blob fields
+      // EIP-4844 blob transaction fields
       maxFeePerBlobGas: rawTx.maxFeePerBlobGas,
       blobVersionedHashes: rawTx.blobVersionedHashes,
     };
