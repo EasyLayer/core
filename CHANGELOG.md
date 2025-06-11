@@ -1,3 +1,9 @@
+## <small>0.6.19 (2025-06-11)</small>
+
+* refactor: fixed providers components normalization; ([ab07efd](https://github.com/EasyLayer/core/commit/ab07efd))
+
+
+
 ## <small>0.6.18 (2025-06-08)</small>
 
 * refactor: fixed subscribe block problems with handling errors; ([3de33be](https://github.com/EasyLayer/core/commit/3de33be))
