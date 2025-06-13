@@ -358,16 +358,20 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   /**
-   * Normalizes web3.js transaction receipt to UniversalTransactionReceipt
+   * Normalizes web3.js v4 transaction receipt to UniversalTransactionReceipt
+   * Handles BigInt values that Web3.js v4 returns
    */
-  private normalizeReceipt(web3Receipt: any): UniversalTransactionReceipt {
+  normalizeReceipt(web3Receipt: any): UniversalTransactionReceipt {
     return {
       transactionHash: web3Receipt.transactionHash,
+      // Convert BigInt transactionIndex to number
       transactionIndex: Number(web3Receipt.transactionIndex),
       blockHash: web3Receipt.blockHash,
+      // Convert BigInt blockNumber to number
       blockNumber: Number(web3Receipt.blockNumber),
       from: web3Receipt.from,
       to: web3Receipt.to,
+      // Convert BigInt gas values to numbers
       cumulativeGasUsed: Number(web3Receipt.cumulativeGasUsed),
       gasUsed: Number(web3Receipt.gasUsed),
       contractAddress: web3Receipt.contractAddress,
@@ -376,34 +380,38 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
           address: log.address,
           topics: log.topics,
           data: log.data,
+          // Convert BigInt blockNumber to number
           blockNumber: Number(log.blockNumber),
           transactionHash: log.transactionHash,
+          // Convert BigInt transactionIndex to number
           transactionIndex: Number(log.transactionIndex),
           blockHash: log.blockHash,
+          // Convert BigInt logIndex to number
           logIndex: Number(log.logIndex),
           removed: log.removed || false,
         })) || [],
       logsBloom: web3Receipt.logsBloom,
       status: web3Receipt.status ? '0x1' : '0x0',
+      // Convert BigInt type to string
       type: web3Receipt.type?.toString() || '0x0',
+      // Convert BigInt effectiveGasPrice to number
       effectiveGasPrice: Number(web3Receipt.effectiveGasPrice || 0),
-      blobGasUsed: web3Receipt.blobGasUsed?.toString?.(),
-      blobGasPrice: web3Receipt.blobGasPrice?.toString?.(),
+      // Convert BigInt blob fields to strings
+      blobGasUsed: web3Receipt.blobGasUsed?.toString(),
+      blobGasPrice: web3Receipt.blobGasPrice?.toString(),
     };
   }
 
   /**
-   * Normalizes web3.js block object to UniversalBlock format
-   * Handles web3.js specific field types and naming conventions
+   * Normalizes web3.js v4 block object to UniversalBlock format
+   * Handles BigInt values and web3.js v4 specific field types
    */
-  private normalizeBlock(web3Block: any): UniversalBlock {
+  normalizeBlock(web3Block: any): UniversalBlock {
     return {
       hash: web3Block.hash,
       parentHash: web3Block.parentHash,
-
-      // Handle both number and blockNumber fields
+      // Priority: blockNumber field first, then number field
       blockNumber: Number(web3Block.blockNumber || web3Block.number),
-
       nonce: web3Block.nonce,
       sha3Uncles: web3Block.sha3Uncles,
       logsBloom: web3Block.logsBloom,
@@ -411,79 +419,78 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       stateRoot: web3Block.stateRoot,
       receiptsRoot: web3Block.receiptsRoot,
       miner: web3Block.miner,
-
-      // Convert to string for large numbers
+      // Convert BigInt to string for large numbers
       difficulty: web3Block.difficulty?.toString() || '0',
       totalDifficulty: web3Block.totalDifficulty?.toString() || '0',
-
       extraData: web3Block.extraData,
-
-      // Ensure numeric values are properly converted
+      // Convert BigInt size to number
       size: Number(web3Block.size) || 0,
+      // Convert BigInt gas values to numbers
       gasLimit: Number(web3Block.gasLimit) || 0,
       gasUsed: Number(web3Block.gasUsed) || 0,
+      // Convert BigInt timestamp to number
       timestamp: Number(web3Block.timestamp) || 0,
-
       uncles: web3Block.uncles || [],
-
-      // EIP-1559 fields
+      // EIP-1559 fields - convert BigInt to string
       baseFeePerGas: web3Block.baseFeePerGas?.toString(),
-
       // Shanghai fork fields
       withdrawals: web3Block.withdrawals,
       withdrawalsRoot: web3Block.withdrawalsRoot,
-
-      // Cancun fork fields
+      // Cancun fork fields - convert BigInt to string
       blobGasUsed: web3Block.blobGasUsed?.toString(),
       excessBlobGas: web3Block.excessBlobGas?.toString(),
       parentBeaconBlockRoot: web3Block.parentBeaconBlockRoot,
-
       // Normalize transactions if present
-      transactions: web3Block.transactions?.map((tx: any) => this.normalizeTransaction(tx)),
+      // In Web3.js v4, when hydrated=true, transactions are full objects
+      // When hydrated=false, transactions are string hashes
+      transactions: web3Block.transactions?.map((tx: any) => {
+        // If transaction is a string (hash), return as is
+        if (typeof tx === 'string') {
+          return tx;
+        }
+        // If transaction is an object, normalize it
+        return this.normalizeTransaction(tx);
+      }),
     };
   }
 
   /**
-   * Normalizes web3.js transaction object to UniversalTransaction format
-   * Handles web3.js specific field types and ensures proper data conversion
+   * Normalizes web3.js v4 transaction object to UniversalTransaction format
+   * Handles BigInt values that Web3.js v4 returns and ensures proper data conversion
    */
-  private normalizeTransaction(web3Tx: any): UniversalTransaction {
+  normalizeTransaction(web3Tx: any): UniversalTransaction {
     return {
       hash: web3Tx.hash,
+      // Convert BigInt nonce to number
       nonce: Number(web3Tx.nonce) || 0,
       from: web3Tx.from,
       to: web3Tx.to,
-
-      // Convert value to string for large numbers
+      // Convert BigInt value to string for large numbers
       value: web3Tx.value?.toString() || '0',
-
-      gas: Number(web3Tx.gas) || 0,
-      input: web3Tx.input || '0x',
+      // Convert BigInt gas to number (gas field, not gasLimit)
+      gas: Number(web3Tx.gas || web3Tx.gasLimit) || 0,
+      input: web3Tx.input || web3Tx.data || '0x',
       blockHash: web3Tx.blockHash,
-      blockNumber: Number(web3Tx.blockNumber),
-      transactionIndex: Number(web3Tx.transactionIndex),
-
-      // Convert gas price to string
+      // Convert BigInt blockNumber to number (handle undefined properly)
+      blockNumber: web3Tx.blockNumber !== undefined ? Number(web3Tx.blockNumber) : undefined,
+      // Convert BigInt transactionIndex to number (handle undefined properly)
+      transactionIndex: web3Tx.transactionIndex !== undefined ? Number(web3Tx.transactionIndex) : undefined,
+      // Convert BigInt gasPrice to string
       gasPrice: web3Tx.gasPrice?.toString(),
-
-      chainId: Number(web3Tx.chainId),
-
-      // Signature fields
+      // Convert BigInt chainId to number (handle undefined properly)
+      chainId: web3Tx.chainId !== undefined ? Number(web3Tx.chainId) : undefined,
+      // Signature fields - convert BigInt v to string
       v: web3Tx.v?.toString(),
       r: web3Tx.r,
       s: web3Tx.s,
-
-      // Transaction type
+      // Convert BigInt type to string
       type: web3Tx.type?.toString() || '0',
-
-      // EIP-1559 fields
+      // EIP-1559 fields - convert BigInt to string
       maxFeePerGas: web3Tx.maxFeePerGas?.toString(),
       maxPriorityFeePerGas: web3Tx.maxPriorityFeePerGas?.toString(),
-
       // EIP-2930 access list
       accessList: web3Tx.accessList,
-
-      // EIP-4844 blob transaction fields
+      // EIP-4844 blob transaction fields - convert BigInt to string
       maxFeePerBlobGas: web3Tx.maxFeePerBlobGas?.toString(),
       blobVersionedHashes: web3Tx.blobVersionedHashes,
     };

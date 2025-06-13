@@ -102,17 +102,18 @@ export class BlockchainNormalizer {
       s: rawTx.s || '',
     };
 
-    // Handle gas pricing based on transaction type and network capabilities
-    if (transaction.type === '0x0' || transaction.type === '0x1' || !this.networkConfig.hasEIP1559) {
-      // Legacy or EIP-2930 transactions, or network doesn't support EIP-1559
+    // Always preserve all available gas fields
+    if (rawTx.gasPrice) {
       transaction.gasPrice = rawTx.gasPrice;
-    } else if (transaction.type === '0x2' && this.networkConfig.hasEIP1559) {
-      // EIP-1559 transactions
+    }
+    if (rawTx.maxFeePerGas) {
       transaction.maxFeePerGas = rawTx.maxFeePerGas;
+    }
+    if (rawTx.maxPriorityFeePerGas) {
       transaction.maxPriorityFeePerGas = rawTx.maxPriorityFeePerGas;
     }
 
-    // Add optional fields
+    // Optional fields
     if (rawTx.accessList) {
       transaction.accessList = rawTx.accessList.map((entry) => ({
         address: entry.address,
@@ -120,8 +121,10 @@ export class BlockchainNormalizer {
       }));
     }
 
-    if (this.networkConfig.hasBlobTransactions && transaction.type === '0x3') {
+    if (rawTx.maxFeePerBlobGas) {
       transaction.maxFeePerBlobGas = rawTx.maxFeePerBlobGas;
+    }
+    if (rawTx.blobVersionedHashes) {
       transaction.blobVersionedHashes = rawTx.blobVersionedHashes;
     }
 

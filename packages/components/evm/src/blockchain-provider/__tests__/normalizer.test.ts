@@ -297,8 +297,8 @@ describe('BlockchainNormalizer', () => {
       expect(result.s).toBe('');
     });
 
-    describe('Legacy transactions (Type 0)', () => {
-      it('should handle legacy transactions with gasPrice', () => {
+    describe('Gas field preservation', () => {
+      it('should preserve gasPrice when present', () => {
         const legacyTx = {
           ...baseUniversalTx,
           type: '0x0',
@@ -307,11 +307,37 @@ describe('BlockchainNormalizer', () => {
 
         const result = normalizer.normalizeTransaction(legacyTx);
         expect(result.gasPrice).toBe('0x3b9aca00');
-        expect(result.maxFeePerGas).toBeUndefined();
-        expect(result.maxPriorityFeePerGas).toBeUndefined();
       });
 
-      it('should use gasPrice for networks without EIP-1559 even with type 2', () => {
+      it('should preserve EIP-1559 fields when present', () => {
+        const eip1559Tx = {
+          ...baseUniversalTx,
+          type: '0x2',
+          maxFeePerGas: '0x5d21dba00', // 25 Gwei
+          maxPriorityFeePerGas: '0x1dcd6500', // 0.5 Gwei
+        };
+
+        const result = normalizer.normalizeTransaction(eip1559Tx);
+        expect(result.maxFeePerGas).toBe('0x5d21dba00');
+        expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
+      });
+
+      it('should preserve all gas fields when present together', () => {
+        const mixedTx = {
+          ...baseUniversalTx,
+          type: '0x2',
+          gasPrice: '0x3b9aca00',
+          maxFeePerGas: '0x5d21dba00',
+          maxPriorityFeePerGas: '0x1dcd6500',
+        };
+
+        const result = normalizer.normalizeTransaction(mixedTx);
+        expect(result.gasPrice).toBe('0x3b9aca00');
+        expect(result.maxFeePerGas).toBe('0x5d21dba00');
+        expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
+      });
+
+      it('should preserve EIP-1559 fields regardless of network config', () => {
         const bscNormalizer = new BlockchainNormalizer(bscConfig);
         const eip1559TxOnBsc = {
           ...baseUniversalTx,
@@ -323,28 +349,12 @@ describe('BlockchainNormalizer', () => {
 
         const result = bscNormalizer.normalizeTransaction(eip1559TxOnBsc);
         expect(result.gasPrice).toBe('0x3b9aca00');
-        expect(result.maxFeePerGas).toBeUndefined();
-        expect(result.maxPriorityFeePerGas).toBeUndefined();
-      });
-    });
-
-    describe('EIP-1559 transactions (Type 2)', () => {
-      it('should handle EIP-1559 transactions on supporting networks', () => {
-        const eip1559Tx = {
-          ...baseUniversalTx,
-          type: '0x2',
-          maxFeePerGas: '0x5d21dba00', // 25 Gwei
-          maxPriorityFeePerGas: '0x1dcd6500', // 0.5 Gwei
-        };
-
-        const result = normalizer.normalizeTransaction(eip1559Tx);
         expect(result.maxFeePerGas).toBe('0x5d21dba00');
         expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
-        expect(result.gasPrice).toBeUndefined();
       });
     });
 
-    describe('Access list transactions (Type 1)', () => {
+    describe('Access list transactions', () => {
       it('should handle access list', () => {
         const accessListTx = {
           ...baseUniversalTx,
@@ -367,8 +377,8 @@ describe('BlockchainNormalizer', () => {
       });
     });
 
-    describe('Blob transactions (Type 3)', () => {
-      it('should handle blob transactions on Ethereum', () => {
+    describe('Blob transactions', () => {
+      it('should preserve blob fields when present', () => {
         const blobTx = {
           ...baseUniversalTx,
           type: '0x3',
@@ -383,7 +393,7 @@ describe('BlockchainNormalizer', () => {
         expect(result.blobVersionedHashes).toEqual(['0xhash1', '0xhash2']);
       });
 
-      it('should not include blob fields for non-supporting networks', () => {
+      it('should preserve blob fields regardless of network config', () => {
         const polygonNormalizer = new BlockchainNormalizer(polygonConfig);
         const blobTx = {
           ...baseUniversalTx,
@@ -393,8 +403,8 @@ describe('BlockchainNormalizer', () => {
         };
 
         const result = polygonNormalizer.normalizeTransaction(blobTx);
-        expect(result.maxFeePerBlobGas).toBeUndefined();
-        expect(result.blobVersionedHashes).toBeUndefined();
+        expect(result.maxFeePerBlobGas).toBe('0x77359400');
+        expect(result.blobVersionedHashes).toEqual(['0xhash1', '0xhash2']);
       });
     });
   });
@@ -624,7 +634,7 @@ describe('BlockchainNormalizer', () => {
       expect(result.transactions![0]!.maxFeePerGas).toBe('0x2540be400');
     });
 
-    it('should handle BSC transaction with high gas usage', () => {
+    it('should handle BSC transaction with preserved gas fields', () => {
       const bscTransaction = {
         hash: '0xbsc123',
         nonce: 1,
@@ -651,7 +661,6 @@ describe('BlockchainNormalizer', () => {
       expect(result.gasPrice).toBe('0x12a05f200');
       expect(result.chainId).toBe(56);
       expect(result.type).toBe('0x0');
-      expect(result.maxFeePerGas).toBeUndefined();
     });
 
     it('should handle Polygon EIP-1559 transaction with access list', () => {
@@ -688,9 +697,6 @@ describe('BlockchainNormalizer', () => {
       expect(result.maxPriorityFeePerGas).toBe('0x3b9aca00');
       expect(result.accessList).toHaveLength(1);
       expect(result.chainId).toBe(137);
-      expect(result.gasPrice).toBeUndefined();
     });
   });
-
-  
 });
