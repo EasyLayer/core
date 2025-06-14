@@ -53,7 +53,7 @@ describe('JsonRpcProvider Normalization', () => {
 
       const result = provider['normalizeRawBlock'](rawBlock);
 
-      expect(result.number).toBe(12345);
+      expect(result.blockNumber).toBe(12345);
       expect(result.size).toBe(1024);
       expect(result.gasLimit).toBe(30000000);
       expect(result.gasUsed).toBe(15000000);
@@ -84,7 +84,6 @@ describe('JsonRpcProvider Normalization', () => {
       const result = provider['normalizeRawBlock'](rawBlock);
 
       expect(result.blockNumber).toBe(12345);
-      expect(result.number).toBeUndefined();
     });
 
     it('should handle transactions as strings or objects', () => {

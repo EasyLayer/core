@@ -272,7 +272,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       );
 
       const genesisStats = {
-        number: genesisBlock.number,
+        number: genesisBlock.blockNumber,
         hash: genesisBlock.hash,
         size: genesisBlock.size || 0,
       };
@@ -400,6 +400,8 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       parentBeaconBlockRoot: ethersBlock.parentBeaconBlockRoot,
 
       transactions,
+
+      // receipts will be added by the fetching methods
     };
   }
 

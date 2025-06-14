@@ -284,7 +284,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       );
 
       const genesisStats = {
-        number: Number(genesisBlock.number),
+        number: Number(genesisBlock.blockNumber),
         hash: genesisBlock.hash,
         size: Number(genesisBlock.size) || 0,
       };

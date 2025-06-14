@@ -302,8 +302,11 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
       parentHash: rawBlock.parentHash,
 
       // Handle different provider naming for block number
-      blockNumber: rawBlock.blockNumber ? parseInt(rawBlock.blockNumber, 16) : undefined,
-      number: rawBlock.number ? parseInt(rawBlock.number, 16) : undefined,
+      blockNumber: rawBlock.blockNumber
+        ? parseInt(rawBlock.blockNumber, 16)
+        : rawBlock.number
+          ? parseInt(rawBlock.number, 16)
+          : 0,
 
       nonce: rawBlock.nonce,
       sha3Uncles: rawBlock.sha3Uncles,
