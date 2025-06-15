@@ -178,40 +178,11 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   private async performInitialCatchup(targetHeight: number): Promise<void> {
     const queueHeight = this.queue.lastHeight;
 
-    if (queueHeight >= targetHeight) {
-      this.log.debug('No initial catch-up needed', {
-        args: { queueHeight, targetHeight },
-      });
-      return;
-    }
-
-    const blocksToFetch = targetHeight - queueHeight;
-    const maxAllowedGap = 100; // Maximum blocks to fetch in one batch
-
-    if (blocksToFetch > maxAllowedGap) {
-      const errorMessage =
-        `Gap too large for subscription strategy: ${blocksToFetch} blocks (max allowed: ${maxAllowedGap}). ` +
-        `Consider using a different loading strategy or reducing the gap. ` +
-        `Queue height: ${queueHeight}, Target height: ${targetHeight}`;
-
-      this.log.error('Initial catch-up gap too large', {
-        args: {
-          queueHeight,
-          targetHeight,
-          blocksToFetch,
-          maxAllowedGap,
-          suggestion: 'Use sequential or parallel loading strategy instead',
-        },
-      });
-
-      throw new Error(errorMessage);
-    }
-
-    this.log.debug('Performing initial catch-up', {
+    this.log.info('Performing initial catch-up', {
       args: {
         from: queueHeight + 1,
         to: targetHeight,
-        blocksCount: blocksToFetch,
+        blocksCount: targetHeight - queueHeight,
       },
     });
 
@@ -228,7 +199,7 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
     // Enqueue blocks in correct order
     await this.enqueueBlocks(blocks);
 
-    this.log.debug('Initial catch-up completed successfully', {
+    this.log.info('Initial catch-up completed successfully', {
       args: { blocksProcessed: blocks.length },
     });
   }

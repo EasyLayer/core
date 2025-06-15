@@ -72,6 +72,10 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           // Get the strategy that should work now
           this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
 
+          this.log.info('Loading strategy created', {
+            args: { strategy: this._currentStrategy?.name },
+          });
+
           // IMPORTANT: We expect that strategy load all blocks to currentNetworkHeight for one method call
           await this._currentStrategy?.load(currentNetworkHeight);
           this.log.debug('Strategy.load completed, resetting interval');
