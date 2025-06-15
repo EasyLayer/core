@@ -18,6 +18,12 @@ export interface JsonRpcProviderOptions extends BaseNodeProviderOptions {
   network: NetworkConfig;
 }
 
+interface PendingRequest {
+  resolve: (value: any) => void;
+  reject: (error: any) => void;
+  timeout: NodeJS.Timeout;
+}
+
 export const createJsonRpcProvider = (options: JsonRpcProviderOptions): JsonRpcProvider => {
   return new JsonRpcProvider(options);
 };
@@ -30,6 +36,13 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   private network: NetworkConfig;
   private rateLimiter: RateLimiter;
   private requestId = 1;
+
+  // WebSocket specific properties
+  private isWebSocketConnected = false;
+  private pendingRequests = new Map<number, PendingRequest>();
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
 
   constructor(options: JsonRpcProviderOptions) {
     super(options);
@@ -68,6 +81,24 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
     }
   }
 
+  /**
+   * Checks if WebSocket connection is healthy
+   */
+  public async healthcheckWebSocket(): Promise<boolean> {
+    if (!this._wsClient || !this.isWebSocketConnected) {
+      return false;
+    }
+
+    try {
+      // Try a simple JSON-RPC call through WebSocket
+      await this.wsJsonRpcCall('eth_blockNumber', []);
+      return true;
+    } catch (error) {
+      this.isWebSocketConnected = false;
+      return false;
+    }
+  }
+
   public async connect(): Promise<void> {
     const health = await this.healthcheck();
     if (!health) {
@@ -86,17 +117,309 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
     } catch (error) {
       throw new Error(`Chain validation failed: ${error}`);
     }
+
+    // Connect WebSocket if URL is provided
+    if (this.wsUrl) {
+      await this.connectWebSocket();
+    }
   }
 
   public async disconnect(): Promise<void> {
-    // JSON-RPC over HTTP doesn't maintain persistent connections
-    // WebSocket implementation would go here if needed
+    this.isWebSocketConnected = false;
+
+    // Clear all pending requests
+    this.pendingRequests.forEach((request) => {
+      clearTimeout(request.timeout);
+      request.reject(new Error('Connection closed'));
+    });
+    this.pendingRequests.clear();
+
+    if (this._wsClient) {
+      try {
+        this._wsClient.close(1000, 'Client disconnecting');
+      } catch (error) {
+        // Ignore disconnection errors
+      }
+      this._wsClient = undefined;
+    }
   }
 
   /**
-   * Makes a JSON-RPC call to the node
+   * Reconnects WebSocket connection
+   * This method is called by ConnectionManager when WebSocket health check fails
    */
+  public async reconnectWebSocket(): Promise<void> {
+    // Disconnect existing WebSocket first
+    if (this._wsClient) {
+      try {
+        this._wsClient.close(1000, 'Reconnecting');
+      } catch (error) {
+        // Ignore disconnection errors
+      }
+      this._wsClient = undefined;
+      this.isWebSocketConnected = false;
+    }
+
+    // Establish new WebSocket connection
+    if (this.wsUrl) {
+      await this.connectWebSocket();
+    }
+  }
+
+  /* eslint-disable no-empty */
+  private async connectWebSocket(): Promise<void> {
+    if (!this.wsUrl) {
+      throw new Error('WebSocket URL not provided');
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this._wsClient = new WebSocket(this.wsUrl!);
+
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('WebSocket connection timeout'));
+        }, 10000);
+
+        const handleOpen = async () => {
+          try {
+            // Validate chainId after WebSocket connection
+            const connectedChainId = await this.wsJsonRpcCall('eth_chainId', []);
+            const expectedChainId = this.network.chainId;
+            const parsedChainId = parseInt(connectedChainId, 16);
+
+            if (parsedChainId !== expectedChainId) {
+              this.isWebSocketConnected = false;
+              clearTimeout(timeout);
+              cleanup();
+              reject(new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${parsedChainId}`));
+              return;
+            }
+
+            this.isWebSocketConnected = true;
+            this.reconnectAttempts = 0;
+            clearTimeout(timeout);
+            cleanup();
+            resolve();
+          } catch (error) {
+            this.isWebSocketConnected = false;
+            clearTimeout(timeout);
+            cleanup();
+            reject(new Error(`WebSocket validation error: ${error}`));
+          }
+        };
+
+        const handleError = (error: any) => {
+          this.isWebSocketConnected = false;
+          clearTimeout(timeout);
+          cleanup();
+          reject(new Error(`WebSocket connection error: ${error.message || error}`));
+        };
+
+        const handleClose = () => {
+          this.isWebSocketConnected = false;
+
+          // Reject all pending requests
+          this.pendingRequests.forEach((request) => {
+            clearTimeout(request.timeout);
+            request.reject(new Error('WebSocket connection closed'));
+          });
+          this.pendingRequests.clear();
+
+          // Auto-reconnect logic (handled by ConnectionManager)
+        };
+
+        const handleMessage = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (Array.isArray(data)) {
+              // Batch response
+              data.forEach((response) => this.handleSingleResponse(response));
+            } else {
+              // Single response
+              this.handleSingleResponse(data);
+            }
+          } catch (error) {}
+        };
+
+        const cleanup = () => {
+          this._wsClient?.removeEventListener('open', handleOpen);
+          this._wsClient?.removeEventListener('error', handleError);
+          this._wsClient?.removeEventListener('close', handleClose);
+          this._wsClient?.removeEventListener('message', handleMessage);
+        };
+
+        this._wsClient.addEventListener('open', handleOpen);
+        this._wsClient.addEventListener('error', handleError);
+        this._wsClient.addEventListener('close', handleClose);
+        this._wsClient.addEventListener('message', handleMessage);
+      } catch (error) {
+        this.isWebSocketConnected = false;
+        reject(error);
+      }
+    });
+  }
+  /* eslint-enable no-empty */
+
+  private handleSingleResponse(response: any) {
+    const requestId = response.id;
+    const pendingRequest = this.pendingRequests.get(requestId);
+
+    if (pendingRequest) {
+      this.pendingRequests.delete(requestId);
+      clearTimeout(pendingRequest.timeout);
+
+      if (response.error) {
+        pendingRequest.reject(new Error(`JSON-RPC Error ${response.error.code}: ${response.error.message}`));
+      } else {
+        pendingRequest.resolve(response.result);
+      }
+    }
+  }
+
+  /**
+   * Makes a JSON-RPC call - automatically chooses WebSocket or HTTP
+   */
+
   private async jsonRpcCall(method: string, params: any[]): Promise<any> {
+    // Use WebSocket if available and connected
+    if (this.isWebSocketConnected && this._wsClient) {
+      try {
+        return await this.wsJsonRpcCall(method, params);
+      } catch (error) {
+        // Intentionally ignored, fallback to HTTP
+      }
+    }
+
+    // Fallback to HTTP
+    return await this.httpJsonRpcCall(method, params);
+  }
+
+  /**
+   * Makes a batch JSON-RPC call - automatically chooses WebSocket or HTTP
+   */
+
+  private async jsonRpcBatchCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    // Use WebSocket if available and connected
+    if (this.isWebSocketConnected && this._wsClient) {
+      try {
+        return await this.wsJsonRpcBatchCall(calls);
+      } catch (error) {
+        // Intentionally ignored, fallback to HTTP
+      }
+    }
+
+    // Fallback to HTTP
+    return await this.httpJsonRpcBatchCall(calls);
+  }
+
+  /**
+   * Makes a single JSON-RPC call via WebSocket
+   */
+  private async wsJsonRpcCall(method: string, params: any[]): Promise<any> {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket not connected');
+    }
+
+    const id = this.requestId++;
+    const payload = {
+      jsonrpc: '2.0',
+      method,
+      params,
+      id,
+    };
+
+    return new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`WebSocket request timeout for ${method}`));
+      }, this.timeout);
+
+      this.pendingRequests.set(id, { resolve, reject, timeout });
+
+      try {
+        this._wsClient!.send(JSON.stringify(payload));
+      } catch (error) {
+        this.pendingRequests.delete(id);
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Makes a batch JSON-RPC call via WebSocket
+   */
+  private async wsJsonRpcBatchCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket not connected');
+    }
+
+    const payload = calls.map((call) => ({
+      jsonrpc: '2.0',
+      method: call.method,
+      params: call.params,
+      id: this.requestId++,
+    }));
+
+    const requestIds = payload.map((p) => p.id);
+
+    return new Promise<any[]>((resolve, reject) => {
+      const responses: any[] = new Array(payload.length);
+      let receivedCount = 0;
+
+      const cleanup = () => {
+        requestIds.forEach((id) => {
+          const pendingRequest = this.pendingRequests.get(id);
+          if (pendingRequest) {
+            this.pendingRequests.delete(id);
+            clearTimeout(pendingRequest.timeout);
+          }
+        });
+      };
+
+      const batchTimeout = setTimeout(() => {
+        cleanup();
+        reject(new Error(`WebSocket batch request timeout`));
+      }, this.timeout);
+
+      // Set up individual request handlers
+      requestIds.forEach((id, index) => {
+        this.pendingRequests.set(id, {
+          resolve: (result) => {
+            responses[index] = result;
+            receivedCount++;
+
+            if (receivedCount === payload.length) {
+              clearTimeout(batchTimeout);
+              cleanup();
+              resolve(responses);
+            }
+          },
+          reject: (error) => {
+            clearTimeout(batchTimeout);
+            cleanup();
+            reject(error);
+          },
+          timeout: batchTimeout, // We use the batch timeout for all
+        });
+      });
+
+      try {
+        this._wsClient!.send(JSON.stringify(payload));
+      } catch (error) {
+        clearTimeout(batchTimeout);
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Makes a single JSON-RPC call via HTTP
+   */
+  private async httpJsonRpcCall(method: string, params: any[]): Promise<any> {
     const payload = {
       jsonrpc: '2.0',
       method,
@@ -127,9 +450,9 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   }
 
   /**
-   * Makes a batch JSON-RPC call
+   * Makes a batch JSON-RPC call via HTTP
    */
-  private async jsonRpcBatchCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+  private async httpJsonRpcBatchCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
     const payload = calls.map((call) => ({
       jsonrpc: '2.0',
       method: call.method,
@@ -206,42 +529,73 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   }
 
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const calls = hashes.map((hash) => ({
-      method: 'eth_getBlockByHash',
-      params: [hash, fullTransactions],
-    }));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const rawBlocks = await this.rateLimiter.executeRequest(() => this.jsonRpcBatchCall(calls));
+    // Create batch function for JSON-RPC batch calls
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalBlock[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getBlockByHash',
+        params: [hash, fullTransactions],
+      }));
 
-    return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+      // One request (WebSocket or HTTP) with batch JSON-RPC calls
+      const rawBlocks = await this.jsonRpcBatchCall(calls);
+
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+    };
+
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const calls = heights.map((height) => ({
-      method: 'eth_getBlockByNumber',
-      params: [`0x${height.toString(16)}`, fullTransactions],
-    }));
+    if (heights.length === 0) {
+      return [];
+    }
 
-    const rawBlocks = await this.rateLimiter.executeRequest(() => this.jsonRpcBatchCall(calls));
+    // Create batch function for JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<UniversalBlock[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, fullTransactions],
+      }));
 
-    return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+      // One request (WebSocket or HTTP) with batch JSON-RPC calls
+      const rawBlocks = await this.jsonRpcBatchCall(calls);
+
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+    };
+
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
-    const calls = heights.map((height) => ({
-      method: 'eth_getBlockByNumber',
-      params: [`0x${height.toString(16)}`, false],
-    }));
+    if (heights.length === 0) {
+      return [];
+    }
 
-    const rawBlocks = await this.rateLimiter.executeRequest(() => this.jsonRpcBatchCall(calls));
-
-    return rawBlocks
-      .filter((block) => block !== null)
-      .map((block: any) => ({
-        number: parseInt(block.number || block.blockNumber, 16),
-        hash: block.hash,
-        size: parseInt(block.size, 16),
+    // Create batch function for JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<any[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, false],
       }));
+
+      const rawBlocks = await this.jsonRpcBatchCall(calls);
+
+      return rawBlocks
+        .filter((block) => block !== null)
+        .map((block: any) => ({
+          number: parseInt(block.number || block.blockNumber, 16),
+          hash: block.hash,
+          size: parseInt(block.size, 16),
+        }));
+    };
+
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   // ===== TRANSACTION METHODS =====
@@ -257,14 +611,22 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   }
 
   public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
-    const calls = hashes.map((hash) => ({
-      method: 'eth_getTransactionByHash',
-      params: [hash],
-    }));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const rawTransactions = await this.rateLimiter.executeRequest(() => this.jsonRpcBatchCall(calls));
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransaction[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionByHash',
+        params: [hash],
+      }));
 
-    return rawTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeRawTransaction(tx));
+      const rawTransactions = await this.jsonRpcBatchCall(calls);
+
+      return rawTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeRawTransaction(tx));
+    };
+
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
@@ -280,14 +642,22 @@ export class JsonRpcProvider extends BaseNodeProvider<JsonRpcProviderOptions> {
   }
 
   public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
-    const calls = hashes.map((hash) => ({
-      method: 'eth_getTransactionReceipt',
-      params: [hash],
-    }));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const rawReceipts = await this.rateLimiter.executeRequest(() => this.jsonRpcBatchCall(calls));
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransactionReceipt[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionReceipt',
+        params: [hash],
+      }));
 
-    return rawReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeRawReceipt(receipt));
+      const rawReceipts = await this.jsonRpcBatchCall(calls);
+
+      return rawReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeRawReceipt(receipt));
+    };
+
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   // ===== NORMALIZATION METHODS =====

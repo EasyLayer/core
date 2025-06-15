@@ -55,11 +55,39 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
   public async healthcheck(): Promise<boolean> {
     try {
-      await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlockNumber());
+      await this.rateLimiter.executeRequest(() => this.getActiveWeb3().eth.getBlockNumber());
       return true;
     } catch (error) {
       return false;
     }
+  }
+
+  /**
+   * Gets the active Web3 instance - WebSocket if available, otherwise HTTP
+   */
+  private getActiveWeb3(): any {
+    if (this.isWebSocketConnected && this._wsClient) {
+      return this._wsClient;
+    }
+    return this._httpClient;
+  }
+
+  /**
+   * Executes a request with automatic WebSocket/HTTP fallback
+   */
+  private async executeWithFallback<T>(operation: (web3: any) => Promise<T>): Promise<T> {
+    // Try WebSocket first if available
+    if (this.isWebSocketConnected && this._wsClient) {
+      try {
+        return await operation(this._wsClient);
+      } catch (error) {
+        // Mark WebSocket as disconnected and fallback to HTTP
+        this.isWebSocketConnected = false;
+      }
+    }
+
+    // Fallback to HTTP
+    return await operation(this._httpClient);
   }
 
   /**
@@ -210,13 +238,15 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   // ===== BLOCK METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    const blockNumber = await this.rateLimiter.executeRequest(() => this._httpClient.eth.getBlockNumber());
+    const blockNumber = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((web3) => web3.eth.getBlockNumber())
+    );
     return Number(blockNumber);
   }
 
   public async getOneBlockByHeight(blockNumber: number, fullTransactions: boolean = false): Promise<UniversalBlock> {
     const web3Block = await this.rateLimiter.executeRequest(() =>
-      this._httpClient.eth.getBlock(blockNumber, fullTransactions)
+      this.executeWithFallback((web3) => web3.eth.getBlock(blockNumber, fullTransactions))
     );
 
     if (!web3Block) {
@@ -227,8 +257,8 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async getOneBlockHashByHeight(height: number): Promise<string> {
-    const block = await this.rateLimiter.executeRequest<UniversalBlock>(() =>
-      this._httpClient.eth.getBlock(height, false)
+    const block = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback<any>((web3) => web3.eth.getBlock(height, false))
     );
 
     if (!block) {
@@ -240,7 +270,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
   public async getOneBlockByHash(hash: Hash, fullTransactions: boolean = false): Promise<UniversalBlock> {
     const web3Block = await this.rateLimiter.executeRequest(() =>
-      this._httpClient.eth.getBlock(hash, fullTransactions)
+      this.executeWithFallback((web3) => web3.eth.getBlock(hash, fullTransactions))
     );
 
     if (!web3Block) {
@@ -251,49 +281,79 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.eth.getBlock(hash, fullTransactions));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const web3Blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    // Web3.js doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map(
+      (hash) => () => this.executeWithFallback((web3) => web3.eth.getBlock(hash, fullTransactions))
+    );
+
+    const web3Blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return web3Blocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
   }
 
   public async getManyHashesByHeights(heights: number[]): Promise<string[]> {
-    const requestFns = heights.map((height) => () => this._httpClient.eth.getBlock(height));
+    if (heights.length === 0) {
+      return [];
+    }
 
-    const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    // Web3.js doesn't support native batch requests, use sequential execution
+    const requestFns = heights.map((height) => () => this.executeWithFallback((web3) => web3.eth.getBlock(height)));
+
+    const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
     return blocks.map((block: any) => block.hash).filter((hash): hash is string => !!hash);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const requestFns = heights.map((height) => () => this._httpClient.eth.getBlock(height, fullTransactions));
+    if (heights.length === 0) {
+      return [];
+    }
 
-    const web3Blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    // Web3.js doesn't support native batch requests, use sequential execution
+    const requestFns = heights.map(
+      (height) => () => this.executeWithFallback((web3) => web3.eth.getBlock(height, fullTransactions))
+    );
+
+    const web3Blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return web3Blocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
+    if (heights.length === 0) {
+      return [];
+    }
+
     const genesisHeight = 0;
     const hasGenesis = heights.includes(genesisHeight);
 
     if (hasGenesis) {
       // Get statistics for the genesis block
-      const genesisBlock = await this.rateLimiter.executeRequest<UniversalBlock>(() =>
-        this._httpClient.eth.getBlock(genesisHeight, false)
+      const genesisBlock = await this.rateLimiter.executeRequest(() =>
+        this.executeWithFallback<any>((web3) => web3.eth.getBlock(genesisHeight, false))
       );
 
       const genesisStats = {
-        number: Number(genesisBlock.blockNumber),
+        number: Number(genesisBlock.blockNumber || genesisBlock.number),
         hash: genesisBlock.hash,
         size: Number(genesisBlock.size) || 0,
       };
 
       // Process the remaining blocks, excluding genesis
       const filteredHeights = heights.filter((height) => height !== genesisHeight);
-      const requestFns = filteredHeights.map((height) => () => this._httpClient.eth.getBlock(height, false));
 
-      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+      if (filteredHeights.length === 0) {
+        return [genesisStats];
+      }
+
+      const requestFns = filteredHeights.map(
+        (height) => () => this.executeWithFallback<any>((web3) => web3.eth.getBlock(height, false))
+      );
+
+      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
       const stats = blocks
         .filter((block) => block !== null)
         .map((block: any) => ({
@@ -305,9 +365,11 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [genesisStats, ...stats];
     } else {
       // Process all blocks equally
-      const requestFns = heights.map((height) => () => this._httpClient.eth.getBlock(height, false));
+      const requestFns = heights.map(
+        (height) => () => this.executeWithFallback<any>((web3) => web3.eth.getBlock(height, false))
+      );
 
-      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
       return blocks
         .filter((block) => block !== null)
         .map((block: any) => ({
@@ -321,7 +383,9 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   // ===== TRANSACTION METHODS =====
 
   public async getOneTransactionByHash(hash: Hash): Promise<UniversalTransaction> {
-    const web3Tx = await this.rateLimiter.executeRequest(() => this._httpClient.eth.getTransaction(hash));
+    const web3Tx = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((web3) => web3.eth.getTransaction(hash))
+    );
 
     if (!web3Tx) {
       throw new Error(`Transaction ${hash} not found`);
@@ -331,15 +395,22 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.eth.getTransaction(hash));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const web3Transactions = await this.rateLimiter.executeBatchRequests(requestFns);
+    // Web3.js doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map((hash) => () => this.executeWithFallback((web3) => web3.eth.getTransaction(hash)));
+
+    const web3Transactions = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return web3Transactions.filter((tx) => tx !== null).map((tx) => this.normalizeTransaction(tx));
   }
 
   public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
-    const web3Receipt = await this.rateLimiter.executeRequest(() => this._httpClient.eth.getTransactionReceipt(hash));
+    const web3Receipt = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((web3) => web3.eth.getTransactionReceipt(hash))
+    );
 
     if (!web3Receipt) {
       throw new Error(`Transaction receipt ${hash} not found`);
@@ -350,9 +421,16 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.eth.getTransactionReceipt(hash));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const web3Receipts = await this.rateLimiter.executeBatchRequests(requestFns);
+    // Web3.js doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map(
+      (hash) => () => this.executeWithFallback((web3) => web3.eth.getTransactionReceipt(hash))
+    );
+
+    const web3Receipts = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return web3Receipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeReceipt(receipt));
   }

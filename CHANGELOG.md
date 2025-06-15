@@ -1,3 +1,9 @@
+## <small>0.6.21 (2025-06-15)</small>
+
+* refactor: chnaged rate limiter logic to add correct batch loading; ([f568eb0](https://github.com/EasyLayer/core/commit/f568eb0))
+
+
+
 ## <small>0.6.20 (2025-06-15)</small>
 
 * feat: implemented receipts loading with blocks; ([c88fbee](https://github.com/EasyLayer/core/commit/c88fbee))
