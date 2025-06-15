@@ -18,13 +18,14 @@ export class BlockchainNormalizer {
 
   /**
    * Normalizes a raw block from any provider into the application Block interface
-   * Automatically calculates block size if not provided
+   * Now includes normalization of receipts if present
+   * Automatically calculates block size with and without receipts
    */
   normalizeBlock(rawBlock: UniversalBlock): Block {
     const block: Block = {
       hash: rawBlock.hash,
       parentHash: rawBlock.parentHash,
-      blockNumber: this.extractBlockNumber(rawBlock),
+      blockNumber: rawBlock.blockNumber,
       nonce: rawBlock.nonce,
       sha3Uncles: rawBlock.sha3Uncles,
       logsBloom: rawBlock.logsBloom,
@@ -35,7 +36,8 @@ export class BlockchainNormalizer {
       difficulty: rawBlock.difficulty,
       totalDifficulty: rawBlock.totalDifficulty,
       extraData: rawBlock.extraData,
-      size: rawBlock.size || 0, // Will be calculated later if 0
+      size: 0, // Will be calculated below
+      sizeWithoutReceipts: 0, // Will be calculated below
       gasLimit: rawBlock.gasLimit,
       gasUsed: rawBlock.gasUsed,
       timestamp: rawBlock.timestamp,
@@ -72,12 +74,38 @@ export class BlockchainNormalizer {
       block.transactions = rawBlock.transactions.map((tx) => this.normalizeTransaction(tx));
     }
 
-    // Calculate block size if not provided or is 0
-    if (!block.size || block.size <= 0) {
-      block.size = BlockSizeCalculator.calculateBlockSizeFromDecodedTransactions(block);
+    // Normalize receipts if present
+    if (rawBlock.receipts) {
+      block.receipts = rawBlock.receipts.map((receipt) => this.normalizeTransactionReceipt(receipt));
     }
 
+    // Calculate sizes
+    this.calculateBlockSizes(block, rawBlock);
+
     return block;
+  }
+
+  /**
+   * Calculates both size (with receipts) and sizeWithoutReceipts for a block
+   */
+  private calculateBlockSizes(block: Block, rawBlock: UniversalBlock): void {
+    // First calculate size without receipts (original block + transactions)
+    if (rawBlock.size && rawBlock.size > 0) {
+      // If provider gives us the original block size, use it
+      block.sizeWithoutReceipts = rawBlock.size;
+    } else {
+      // Calculate from block structure
+      block.sizeWithoutReceipts = BlockSizeCalculator.calculateBlockSizeFromDecodedTransactions(block);
+    }
+
+    // Calculate total size including receipts
+    if (block.receipts && block.receipts.length > 0) {
+      const receiptsSize = BlockSizeCalculator.calculateReceiptsSize(block.receipts);
+      block.size = block.sizeWithoutReceipts + receiptsSize;
+    } else {
+      // No receipts, so both sizes are the same
+      block.size = block.sizeWithoutReceipts;
+    }
   }
 
   /**
@@ -102,17 +130,18 @@ export class BlockchainNormalizer {
       s: rawTx.s || '',
     };
 
-    // Handle gas pricing based on transaction type and network capabilities
-    if (transaction.type === '0x0' || transaction.type === '0x1' || !this.networkConfig.hasEIP1559) {
-      // Legacy or EIP-2930 transactions, or network doesn't support EIP-1559
+    // Always preserve all available gas fields
+    if (rawTx.gasPrice) {
       transaction.gasPrice = rawTx.gasPrice;
-    } else if (transaction.type === '0x2' && this.networkConfig.hasEIP1559) {
-      // EIP-1559 transactions
+    }
+    if (rawTx.maxFeePerGas) {
       transaction.maxFeePerGas = rawTx.maxFeePerGas;
+    }
+    if (rawTx.maxPriorityFeePerGas) {
       transaction.maxPriorityFeePerGas = rawTx.maxPriorityFeePerGas;
     }
 
-    // Add optional fields
+    // Optional fields
     if (rawTx.accessList) {
       transaction.accessList = rawTx.accessList.map((entry) => ({
         address: entry.address,
@@ -120,8 +149,10 @@ export class BlockchainNormalizer {
       }));
     }
 
-    if (this.networkConfig.hasBlobTransactions && transaction.type === '0x3') {
+    if (rawTx.maxFeePerBlobGas) {
       transaction.maxFeePerBlobGas = rawTx.maxFeePerBlobGas;
+    }
+    if (rawTx.blobVersionedHashes) {
       transaction.blobVersionedHashes = rawTx.blobVersionedHashes;
     }
 
@@ -183,9 +214,47 @@ export class BlockchainNormalizer {
   }
 
   /**
-   * Extracts block number from different provider formats
+   * Get detailed size breakdown for a block
    */
-  private extractBlockNumber(block: UniversalBlock): number {
-    return block.blockNumber ?? block.number ?? 0;
+  public getBlockSizeBreakdown(block: Block): {
+    total: number;
+    sizeWithoutReceipts: number;
+    receiptsSize: number;
+    header: number;
+    transactions: number;
+    receipts: {
+      total: number;
+      count: number;
+      averageSize: number;
+    };
+  } {
+    const headerSize = BlockSizeCalculator.estimateBlockHeaderSize(block);
+
+    let transactionsSize = 0;
+    if (block.transactions) {
+      transactionsSize = block.transactions.reduce((sum, tx) => {
+        if (typeof tx === 'string') {
+          return sum + 32; // Just hash
+        } else {
+          return sum + BlockSizeCalculator.calculateTransactionSize(tx);
+        }
+      }, 0);
+    }
+
+    const receiptsSize = block.receipts ? BlockSizeCalculator.calculateReceiptsSize(block.receipts) : 0;
+    const receiptsCount = block.receipts?.length || 0;
+
+    return {
+      total: block.size,
+      sizeWithoutReceipts: block.sizeWithoutReceipts,
+      receiptsSize,
+      header: headerSize,
+      transactions: transactionsSize,
+      receipts: {
+        total: receiptsSize,
+        count: receiptsCount,
+        averageSize: receiptsCount > 0 ? Math.round(receiptsSize / receiptsCount) : 0,
+      },
+    };
   }
 }

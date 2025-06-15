@@ -53,19 +53,19 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method sendTransaction() is not supported by this provider');
   }
 
-  async getOneTransactionByHash(hash: Hash): Promise<UniversalTransaction> {
+  async getOneTransactionByHash(hash: Hash | string[]): Promise<UniversalTransaction> {
     throw new Error('Method getOneTransactionByHash() is not supported by this provider');
   }
 
-  async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
+  async getManyTransactionsByHashes(hashes: Hash[] | string[]): Promise<UniversalTransaction[]> {
     throw new Error('Method getManyTransactionsByHashes() is not supported by this provider');
   }
 
-  async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
+  async getTransactionReceipt(hash: Hash | string[]): Promise<UniversalTransactionReceipt> {
     throw new Error('Method getTransactionReceipt() is not supported by this provider');
   }
 
-  async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
+  async getManyTransactionReceipts(hashes: Hash[] | string[]): Promise<UniversalTransactionReceipt[]> {
     throw new Error('Method getManyTransactionReceipts() is not supported by this provider');
   }
 
@@ -94,7 +94,7 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getOneBlockByHash() is not supported by this provider');
   }
 
-  async getManyBlocksByHashes(hashes: Hash[], fullTransactions?: boolean): Promise<UniversalBlock[]> {
+  async getManyBlocksByHashes(hashes: Hash[] | string[], fullTransactions?: boolean): Promise<UniversalBlock[]> {
     throw new Error('Method getManyBlocksByHashes() is not supported by this provider');
   }
 }

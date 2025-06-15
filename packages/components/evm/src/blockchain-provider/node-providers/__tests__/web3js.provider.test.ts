@@ -24,11 +24,11 @@ describe('Web3jsProvider Normalization', () => {
   });
 
   describe('normalizeBlock', () => {
-    it('should normalize web3 block with string numbers', () => {
+    it('should normalize web3 block with BigInt values', () => {
       const web3Block = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        number: '12345',
+        number: 12345n, // BigInt in v4
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
         logsBloom: '0x00000000000000000000000000000000',
@@ -36,17 +36,17 @@ describe('Web3jsProvider Normalization', () => {
         stateRoot: '0xstate123',
         receiptsRoot: '0xreceipts456',
         miner: '0xminer789',
-        difficulty: '1000000',
-        totalDifficulty: '5000000',
+        difficulty: 1000000n, // BigInt in v4
+        totalDifficulty: 5000000n, // BigInt in v4
         extraData: '0x',
-        size: '1024',
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        size: 1024n, // BigInt in v4
+        gasLimit: 30000000n, // BigInt in v4
+        gasUsed: 15000000n, // BigInt in v4
+        timestamp: 1640995200n, // BigInt in v4
         uncles: [],
-        baseFeePerGas: '20000000000',
-        blobGasUsed: '131072',
-        excessBlobGas: '0',
+        baseFeePerGas: 20000000000n, // BigInt in v4
+        blobGasUsed: 131072n, // BigInt in v4
+        excessBlobGas: 0n, // BigInt in v4
         parentBeaconBlockRoot: '0xbeacon123',
         transactions: [],
       };
@@ -86,11 +86,11 @@ describe('Web3jsProvider Normalization', () => {
       const web3Block = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        blockNumber: '12345',
-        number: '67890', // Should prefer blockNumber over number
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        blockNumber: 12345n, // BigInt in v4
+        number: 67890n, // Should prefer blockNumber over number
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
         uncles: [],
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
@@ -111,10 +111,10 @@ describe('Web3jsProvider Normalization', () => {
       const web3Block = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        number: '67890',
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        number: 67890n, // BigInt in v4
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
         uncles: [],
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
@@ -135,7 +135,7 @@ describe('Web3jsProvider Normalization', () => {
       const minimalBlock = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        number: '12345',
+        number: 12345n, // BigInt in v4
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
         logsBloom: '0x00000000000000000000000000000000',
@@ -143,9 +143,9 @@ describe('Web3jsProvider Normalization', () => {
         stateRoot: '0xstate123',
         receiptsRoot: '0xreceipts456',
         miner: '0xminer789',
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
         uncles: [],
         extraData: '0x',
       };
@@ -159,11 +159,11 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.blobGasUsed).toBeUndefined();
     });
 
-    it('should normalize transactions in block', () => {
+    it('should normalize transactions in block when full objects provided', () => {
       const web3Block = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        number: '12345',
+        number: 12345n,
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
         logsBloom: '0x00000000000000000000000000000000',
@@ -171,20 +171,20 @@ describe('Web3jsProvider Normalization', () => {
         stateRoot: '0xstate123',
         receiptsRoot: '0xreceipts456',
         miner: '0xminer789',
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
         uncles: [],
         extraData: '0x',
         transactions: [{
           hash: '0xtx123',
-          nonce: '42',
+          nonce: 42n, // BigInt in v4
           from: '0xfrom123',
           to: '0xto456',
-          value: '1000000000000000000',
-          gas: '21000',
+          value: 1000000000000000000n, // BigInt in v4
+          gas: 21000n, // BigInt in v4
           input: '0x',
-          type: '2',
+          type: 2n, // BigInt in v4
         }],
       };
 
@@ -194,27 +194,52 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.transactions![0]!.hash).toBe('0xtx123');
       expect(result.transactions![0]!.type).toBe('2');
     });
+
+    it('should handle transactions as hashes when not hydrated', () => {
+      const web3Block = {
+        hash: '0xabc123',
+        parentHash: '0xdef456',
+        number: 12345n,
+        nonce: '0x0000000000000000',
+        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+        logsBloom: '0x00000000000000000000000000000000',
+        transactionsRoot: '0x789abc',
+        stateRoot: '0xstate123',
+        receiptsRoot: '0xreceipts456',
+        miner: '0xminer789',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
+        uncles: [],
+        extraData: '0x',
+        transactions: ['0xtx123', '0xtx456'], // String hashes when not hydrated
+      };
+
+      const result = provider['normalizeBlock'](web3Block);
+
+      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+    });
   });
 
   describe('normalizeTransaction', () => {
-    it('should normalize Legacy transaction (type 0)', () => {
+    it('should normalize Legacy transaction (type 0) with BigInt values', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '42',
+        nonce: 42n, // BigInt in v4
         from: '0xfrom123',
         to: '0xto456',
-        value: '1000000000000000000',
-        gas: '21000',
+        value: 1000000000000000000n, // BigInt in v4
+        gas: 21000n, // BigInt in v4
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
-        gasPrice: '20000000000',
-        chainId: '1',
-        v: '27',
+        blockNumber: 12345n, // BigInt in v4
+        transactionIndex: 0n, // BigInt in v4
+        gasPrice: 20000000000n, // BigInt in v4
+        chainId: 1n, // BigInt in v4
+        v: 27n, // BigInt in v4
         r: '0xr123',
         s: '0xs456',
-        type: '0',
+        type: 0n, // BigInt in v4
       };
 
       const result = provider['normalizeTransaction'](web3Tx);
@@ -244,25 +269,25 @@ describe('Web3jsProvider Normalization', () => {
       });
     });
 
-    it('should normalize EIP-1559 transaction (type 2)', () => {
+    it('should normalize EIP-1559 transaction (type 2) with BigInt values', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '42',
+        nonce: 42n,
         from: '0xfrom123',
         to: '0xto456',
-        value: '1000000000000000000',
-        gas: '21000',
+        value: 1000000000000000000n,
+        gas: 21000n,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
-        chainId: '1',
-        maxFeePerGas: '30000000000',
-        maxPriorityFeePerGas: '2000000000',
-        v: '0',
+        blockNumber: 12345n,
+        transactionIndex: 0n,
+        chainId: 1n,
+        maxFeePerGas: 30000000000n, // BigInt in v4
+        maxPriorityFeePerGas: 2000000000n, // BigInt in v4
+        v: 0n,
         r: '0xr123',
         s: '0xs456',
-        type: '2',
+        type: 2n,
         accessList: [],
       };
 
@@ -275,27 +300,27 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.accessList).toEqual([]);
     });
 
-    it('should normalize Blob transaction (type 3)', () => {
+    it('should normalize Blob transaction (type 3) with BigInt values', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '42',
+        nonce: 42n,
         from: '0xfrom123',
         to: '0xto456',
-        value: '0',
-        gas: '21000',
+        value: 0n,
+        gas: 21000n,
         input: '0xblobdata',
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
-        chainId: '1',
-        maxFeePerGas: '30000000000',
-        maxPriorityFeePerGas: '2000000000',
-        maxFeePerBlobGas: '1000000000',
+        blockNumber: 12345n,
+        transactionIndex: 0n,
+        chainId: 1n,
+        maxFeePerGas: 30000000000n,
+        maxPriorityFeePerGas: 2000000000n,
+        maxFeePerBlobGas: 1000000000n, // BigInt in v4
         blobVersionedHashes: ['0xblob1', '0xblob2'],
-        v: '0',
+        v: 0n,
         r: '0xr123',
         s: '0xs456',
-        type: '3',
+        type: 3n,
       };
 
       const result = provider['normalizeTransaction'](web3Tx);
@@ -305,24 +330,24 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.blobVersionedHashes).toEqual(['0xblob1', '0xblob2']);
     });
 
-    it('should handle numeric string conversion', () => {
+    it('should handle BigInt conversion', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '999',
+        nonce: 999n,
         from: '0xfrom123',
         to: '0xto456',
-        value: '999999999999999999999999',
-        gas: '100000',
+        value: 999999999999999999999999n, // Very large BigInt
+        gas: 100000n,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '999999',
-        transactionIndex: '55',
-        gasPrice: '50000000000',
-        chainId: '137', // Polygon
-        v: '27',
+        blockNumber: 999999n,
+        transactionIndex: 55n,
+        gasPrice: 50000000000n,
+        chainId: 137n, // Polygon
+        v: 27n,
         r: '0xr123',
         s: '0xs456',
-        type: '0',
+        type: 0n,
       };
 
       const result = provider['normalizeTransaction'](web3Tx);
@@ -343,12 +368,12 @@ describe('Web3jsProvider Normalization', () => {
         from: '0xfrom123',
         to: '0xto456',
         value: undefined,
-        gas: '21000',
+        gas: 21000n,
         input: undefined,
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
-        chainId: '1',
+        blockNumber: 12345n,
+        transactionIndex: 0n,
+        chainId: 1n,
         type: undefined,
       };
 
@@ -362,24 +387,24 @@ describe('Web3jsProvider Normalization', () => {
   });
 
   describe('normalizeReceipt', () => {
-    it('should normalize web3 transaction receipt with string numbers', () => {
+    it('should normalize web3 transaction receipt with BigInt values', () => {
       const web3Receipt = {
         transactionHash: '0xtx123',
-        transactionIndex: '0',
+        transactionIndex: 0n, // BigInt in v4
         blockHash: '0xblock123',
-        blockNumber: '12345',
+        blockNumber: 12345n, // BigInt in v4
         from: '0xfrom123',
         to: '0xto456',
-        cumulativeGasUsed: '21000',
-        gasUsed: '21000',
+        cumulativeGasUsed: 21000n, // BigInt in v4
+        gasUsed: 21000n, // BigInt in v4
         contractAddress: null,
         logs: [],
         logsBloom: '0x00000000000000000000000000000000',
         status: true,
-        type: '2',
-        effectiveGasPrice: '25000000000',
-        blobGasUsed: '131072',
-        blobGasPrice: '1000000000',
+        type: 2n, // BigInt in v4
+        effectiveGasPrice: 25000000000n, // BigInt in v4
+        blobGasUsed: 131072n, // BigInt in v4
+        blobGasPrice: 1000000000n, // BigInt in v4
       };
 
       const result = provider['normalizeReceipt'](web3Receipt);
@@ -407,19 +432,19 @@ describe('Web3jsProvider Normalization', () => {
     it('should handle failed transaction status', () => {
       const web3Receipt = {
         transactionHash: '0xtx123',
-        transactionIndex: '0',
+        transactionIndex: 0n,
         blockHash: '0xblock123',
-        blockNumber: '12345',
+        blockNumber: 12345n,
         from: '0xfrom123',
         to: '0xto456',
-        cumulativeGasUsed: '21000',
-        gasUsed: '21000',
+        cumulativeGasUsed: 21000n,
+        gasUsed: 21000n,
         contractAddress: null,
         logs: [],
         logsBloom: '0x00000000000000000000000000000000',
-        status: false,
-        type: '0',
-        effectiveGasPrice: '20000000000',
+        status: false, // Failed transaction
+        type: 0n,
+        effectiveGasPrice: 20000000000n,
       };
 
       const result = provider['normalizeReceipt'](web3Receipt);
@@ -427,34 +452,34 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.status).toBe('0x0');
     });
 
-    it('should normalize logs in receipt', () => {
+    it('should normalize logs in receipt with BigInt values', () => {
       const web3Receipt = {
         transactionHash: '0xtx123',
-        transactionIndex: '0',
+        transactionIndex: 0n,
         blockHash: '0xblock123',
-        blockNumber: '12345',
+        blockNumber: 12345n,
         from: '0xfrom123',
         to: '0xto456',
-        cumulativeGasUsed: '21000',
-        gasUsed: '21000',
+        cumulativeGasUsed: 21000n,
+        gasUsed: 21000n,
         contractAddress: null,
         logs: [
           {
             address: '0xcontract123',
             topics: ['0xtopic1', '0xtopic2'],
             data: '0xlogdata',
-            blockNumber: '12345',
+            blockNumber: 12345n, // BigInt in v4
             transactionHash: '0xtx123',
-            transactionIndex: '0',
+            transactionIndex: 0n, // BigInt in v4
             blockHash: '0xblock123',
-            logIndex: '0',
+            logIndex: 0n, // BigInt in v4
             removed: false,
           },
         ],
         logsBloom: '0x00000000000000000000000000000000',
         status: true,
-        type: '2',
-        effectiveGasPrice: '25000000000',
+        type: 2n,
+        effectiveGasPrice: 25000000000n,
       };
 
       const result = provider['normalizeReceipt'](web3Receipt);
@@ -473,22 +498,22 @@ describe('Web3jsProvider Normalization', () => {
       });
     });
 
-    it('should handle large gas values', () => {
+    it('should handle large BigInt gas values', () => {
       const web3Receipt = {
         transactionHash: '0xtx123',
-        transactionIndex: '0',
+        transactionIndex: 0n,
         blockHash: '0xblock123',
-        blockNumber: '12345',
+        blockNumber: 12345n,
         from: '0xfrom123',
         to: '0xto456',
-        cumulativeGasUsed: '999999999',
-        gasUsed: '500000000',
+        cumulativeGasUsed: 999999999n, // Large BigInt
+        gasUsed: 500000000n, // Large BigInt
         contractAddress: null,
         logs: [],
         logsBloom: '0x00000000000000000000000000000000',
         status: true,
-        type: '2',
-        effectiveGasPrice: '100000000000', // 100 gwei
+        type: 2n,
+        effectiveGasPrice: 100000000000n, // 100 gwei as BigInt
       };
 
       const result = provider['normalizeReceipt'](web3Receipt);
@@ -514,19 +539,19 @@ describe('Web3jsProvider Normalization', () => {
 
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '42',
+        nonce: 42n,
         from: '0xfrom123',
         to: '0xto456',
-        value: '1000000000000000000',
-        gas: '21000',
+        value: 1000000000000000000n,
+        gas: 21000n,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
-        chainId: '1',
-        maxFeePerGas: '30000000000',
-        maxPriorityFeePerGas: '2000000000',
-        type: '1',
+        blockNumber: 12345n,
+        transactionIndex: 0n,
+        chainId: 1n,
+        maxFeePerGas: 30000000000n,
+        maxPriorityFeePerGas: 2000000000n,
+        type: 1n,
         accessList,
       };
 
@@ -548,7 +573,7 @@ describe('Web3jsProvider Normalization', () => {
       const web3Block = {
         hash: '0xabc123',
         parentHash: '0xdef456',
-        number: '12345',
+        number: 12345n,
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
         logsBloom: '0x00000000000000000000000000000000',
@@ -556,9 +581,9 @@ describe('Web3jsProvider Normalization', () => {
         stateRoot: '0xstate123',
         receiptsRoot: '0xreceipts456',
         miner: '0xminer789',
-        gasLimit: '30000000',
-        gasUsed: '15000000',
-        timestamp: '1640995200',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200n,
         uncles: [],
         extraData: '0x',
         withdrawals,
@@ -572,21 +597,21 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.withdrawalsRoot).toBe('0xwithdrawalsroot123');
     });
 
-    it('should handle zero values correctly', () => {
+    it('should handle zero BigInt values correctly', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '0',
+        nonce: 0n,
         from: '0xfrom123',
         to: '0xto456',
-        value: '0',
-        gas: '21000',
+        value: 0n,
+        gas: 21000n,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '0',
-        transactionIndex: '0',
-        gasPrice: '0',
-        chainId: '0',
-        type: '0',
+        blockNumber: 0n,
+        transactionIndex: 0n,
+        gasPrice: 0n,
+        chainId: 0n,
+        type: 0n,
       };
 
       const result = provider['normalizeTransaction'](web3Tx);
@@ -602,19 +627,19 @@ describe('Web3jsProvider Normalization', () => {
     it('should handle missing blob gas fields gracefully', () => {
       const web3Receipt = {
         transactionHash: '0xtx123',
-        transactionIndex: '0',
+        transactionIndex: 0n,
         blockHash: '0xblock123',
-        blockNumber: '12345',
+        blockNumber: 12345n,
         from: '0xfrom123',
         to: '0xto456',
-        cumulativeGasUsed: '21000',
-        gasUsed: '21000',
+        cumulativeGasUsed: 21000n,
+        gasUsed: 21000n,
         contractAddress: null,
         logs: [],
         logsBloom: '0x00000000000000000000000000000000',
         status: true,
-        type: '0',
-        effectiveGasPrice: '20000000000',
+        type: 0n,
+        effectiveGasPrice: 20000000000n,
         // Missing blobGasUsed and blobGasPrice
       };
 
@@ -624,20 +649,20 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.blobGasPrice).toBeUndefined();
     });
 
-    it('should handle null and undefined values', () => {
+    it('should handle null and undefined values with BigInt fallbacks', () => {
       const web3Tx = {
         hash: '0xtx123',
         nonce: null,
         from: '0xfrom123',
         to: null,
         value: null,
-        gas: '21000',
+        gas: 21000n,
         input: null,
         blockHash: '0xblock123',
-        blockNumber: '12345',
-        transactionIndex: '0',
+        blockNumber: 12345n,
+        transactionIndex: 0n,
         gasPrice: null,
-        chainId: '1',
+        chainId: 1n,
         v: null,
         r: null,
         s: null,
@@ -653,21 +678,21 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.type).toBe('0');
     });
 
-    it('should handle very large string numbers', () => {
+    it('should handle very large BigInt numbers', () => {
       const web3Tx = {
         hash: '0xtx123',
-        nonce: '99999999999999999999',
+        nonce: 99999999999999999999n, // Very large BigInt
         from: '0xfrom123',
         to: '0xto456',
-        value: '123456789012345678901234567890',
-        gas: '99999999',
+        value: 123456789012345678901234567890n, // Extremely large BigInt
+        gas: 99999999n,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: '99999999999',
-        transactionIndex: '99999',
-        gasPrice: '999999999999999999999',
-        chainId: '999999',
-        type: '0',
+        blockNumber: 99999999999n,
+        transactionIndex: 99999n,
+        gasPrice: 999999999999999999999n, // Very large BigInt
+        chainId: 999999n,
+        type: 0n,
       };
 
       const result = provider['normalizeTransaction'](web3Tx);

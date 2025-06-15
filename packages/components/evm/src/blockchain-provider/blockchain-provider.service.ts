@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
-import type { Hash, NetworkConfig } from './node-providers';
+import type { Hash, NetworkConfig, UniversalBlock, UniversalTransaction } from './node-providers';
 import { BlockchainNormalizer } from './normalizer';
 import { Block, Transaction, TransactionReceipt } from './components';
+import { BlockSizeCalculator } from './utils';
 
 /**
  * A Subscription is a Promise that resolves once unsubscribed, and also provides
@@ -76,14 +77,11 @@ export class BlockchainProviderService {
         // Define a listener that fires on each "block" event
         const listener = async (blockNumber: number) => {
           try {
-            // Fetch the full block (including transactions) by height
-            const rawBlock = await provider.getOneBlockByHeight(blockNumber, true);
-
-            // Normalize the block data before passing to callback
-            const normalizedBlock = this.normalizer.normalizeBlock(rawBlock);
+            // Get block with receipts using our simple method
+            const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
 
             // Invoke the user-provided callback with the normalized block data
-            callback(normalizedBlock);
+            callback(blockWithReceipts);
           } catch (error) {
             this.log.error('Error fetching block', { args: error });
             // If fetching or processing the block fails, reject the subscription promise
@@ -108,6 +106,155 @@ export class BlockchainProviderService {
 
     // Return the Subscription (Promise<void> & { unsubscribe(): void })
     return subscriptionPromise;
+  }
+
+  /**
+   * Gets a block with full transactions and all receipts.
+   * Simple approach: get block + transactions, then get receipts, then combine.
+   */
+  public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block> {
+    try {
+      const provider = await this._connectionManager.getActiveProvider();
+
+      // Get block
+      const rawBlock = await provider.getOneBlockByHeight(Number(height), fullTransactions);
+
+      // Get receipts for all transactions
+      if (rawBlock.transactions && rawBlock.transactions.length > 0) {
+        const txHashes = rawBlock.transactions.map((tx: any) => tx.hash);
+        const rawReceipts = await provider.getManyTransactionReceipts(txHashes);
+
+        // Add receipts to the raw block
+        rawBlock.receipts = rawReceipts;
+      } else {
+        rawBlock.receipts = [];
+      }
+
+      // Normalize the complete block (including receipts)
+      const normalizedBlock = this.normalizer.normalizeBlock(rawBlock);
+
+      return normalizedBlock;
+    } catch (error) {
+      this.log.error('getOneBlockWithReceipts() failed', {
+        args: { height, error },
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Gets multiple blocks with full transactions and receipts.
+   * Simple approach: get all blocks with transactions, then get all receipts, then combine.
+   */
+  public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
+    try {
+      const provider = await this._connectionManager.getActiveProvider();
+      const numericHeights = heights.map((h) => Number(h));
+
+      // Get all blocks
+      const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
+
+      // Collect all transaction hashes from all blocks
+      const allTxHashes: string[] = [];
+      const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
+
+      rawBlocks.forEach((rawBlock: UniversalBlock) => {
+        if (rawBlock.transactions && rawBlock.transactions.length > 0) {
+          const txHashes = rawBlock.transactions.map((tx: UniversalTransaction) => tx.hash);
+          blockTxMapping.set(rawBlock.blockNumber, txHashes);
+          allTxHashes.push(...txHashes);
+        } else {
+          blockTxMapping.set(rawBlock.blockNumber, []);
+        }
+      });
+
+      // Get all receipts at once
+      let allRawReceipts: any[] = [];
+      if (allTxHashes.length > 0) {
+        allRawReceipts = await provider.getManyTransactionReceipts(allTxHashes);
+      }
+
+      // Map receipts back to blocks
+      let receiptIndex = 0;
+      rawBlocks.forEach((rawBlock) => {
+        const txHashes = blockTxMapping.get(rawBlock.blockNumber) || [];
+        if (txHashes.length > 0) {
+          rawBlock.receipts = allRawReceipts.slice(receiptIndex, receiptIndex + txHashes.length);
+          receiptIndex += txHashes.length;
+        } else {
+          rawBlock.receipts = [];
+        }
+      });
+
+      // Normalize all blocks
+      const normalizedBlocks = rawBlocks.map((rawBlock) => this.normalizer.normalizeBlock(rawBlock));
+
+      return normalizedBlocks;
+    } catch (error) {
+      this.log.error('getManyBlocksWithReceipts() failed', {
+        args: { heights, error },
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Merges receipts into blocks that already have transactions loaded.
+   * This method is optimized for memory efficiency by modifying blocks in place.
+   *
+   * @param blocks - Array of blocks with transactions but without receipts
+   * @param receipts - Array of transaction receipts to merge into blocks
+   * @returns Promise resolving to the same blocks array with receipts added and sizes recalculated
+   */
+  public async mergeReceiptsIntoBlocks(blocks: Block[], receipts: TransactionReceipt[]): Promise<Block[]> {
+    try {
+      // Collect all transaction hashes from all blocks
+      const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
+
+      blocks.forEach((block: Block) => {
+        if (block.transactions && block.transactions.length > 0) {
+          const txHashes = block.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+          blockTxMapping.set(block.blockNumber, txHashes);
+        } else {
+          blockTxMapping.set(block.blockNumber, []);
+        }
+      });
+
+      // Map receipts back to blocks in place to optimize memory
+      let receiptIndex = 0;
+
+      for (const block of blocks) {
+        const txHashes = blockTxMapping.get(block.blockNumber) || [];
+
+        // Add receipts directly to block to avoid copying
+        if (txHashes.length > 0) {
+          (block as any).receipts = receipts.slice(receiptIndex, receiptIndex + txHashes.length);
+          receiptIndex += txHashes.length;
+        } else {
+          (block as any).receipts = [];
+        }
+
+        // Recalculate sizes with receipts using BlockSizeCalculator
+        // Calculate size without receipts (original block + transactions)
+        block.sizeWithoutReceipts = BlockSizeCalculator.calculateBlockSizeFromDecodedTransactions(block);
+
+        // Calculate total size including receipts
+        if (block.receipts && block.receipts.length > 0) {
+          const receiptsSize = BlockSizeCalculator.calculateReceiptsSize(block.receipts);
+          block.size = block.sizeWithoutReceipts + receiptsSize;
+        } else {
+          // No receipts, so both sizes are the same
+          block.size = block.sizeWithoutReceipts;
+        }
+      }
+
+      return blocks;
+    } catch (error) {
+      this.log.error('mergeReceiptsIntoBlocks() failed', {
+        args: { blockCount: blocks.length, receiptsCount: receipts.length, error },
+      });
+      throw error;
+    }
   }
 
   /**

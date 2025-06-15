@@ -272,7 +272,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       );
 
       const genesisStats = {
-        number: genesisBlock.number,
+        number: genesisBlock.blockNumber,
         hash: genesisBlock.hash,
         size: genesisBlock.size || 0,
       };
@@ -350,6 +350,17 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
    * Handles BigInt values and ethers-specific field naming
    */
   private normalizeBlock(ethersBlock: any): UniversalBlock {
+    // In ethers v6, full transactions are in prefetchedTransactions
+    let transactions;
+
+    if (ethersBlock.prefetchedTransactions && ethersBlock.prefetchedTransactions.length > 0) {
+      // If there are prefetchedTransactions - these are full transaction objects
+      transactions = ethersBlock.prefetchedTransactions.map((tx: any) => this.normalizeTransaction(tx));
+    } else if (ethersBlock.transactions) {
+      // Otherwise, they are just transaction hashes
+      transactions = ethersBlock.transactions;
+    }
+
     return {
       hash: ethersBlock.hash,
       parentHash: ethersBlock.parentHash,
@@ -388,8 +399,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       excessBlobGas: ethersBlock.excessBlobGas?.toString(),
       parentBeaconBlockRoot: ethersBlock.parentBeaconBlockRoot,
 
-      // Normalize transactions if present
-      transactions: ethersBlock.transactions?.map((tx: any) => this.normalizeTransaction(tx)),
+      transactions,
+
+      // receipts will be added by the fetching methods
     };
   }
 
