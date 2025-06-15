@@ -5,13 +5,18 @@ export const enum NodeProviderTypes {
   WEB3JS = 'web3js',
 }
 
+/**
+ * Rate limiting configuration interface
+ */
 export interface RateLimits {
-  /** Maximum requests per second (default: 12 for QuickNode free plan) */
+  /** Maximum requests per second (default: 10 for QuickNode free plan) */
   maxRequestsPerSecond?: number;
-  /** Maximum concurrent requests (default: 10) */
+  /** Maximum concurrent requests (default: 8) */
   maxConcurrentRequests?: number;
-  /** Maximum batch size for parallel requests (default: 25) */
+  /** Maximum batch size for parallel requests (default: 15) */
   maxBatchSize?: number;
+  /** Delay between batches AND between concurrent requests in milliseconds (default: 1000) */
+  batchDelayMs?: number;
 }
 
 export interface NodeProviderTypeInterface {
