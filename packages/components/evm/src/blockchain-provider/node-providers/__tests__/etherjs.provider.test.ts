@@ -48,7 +48,7 @@ describe('EtherJSProvider Normalization', () => {
         blobGasUsed: 131072n,
         excessBlobGas: 0n,
         parentBeaconBlockRoot: '0xbeacon123',
-        transactions: [],
+        transactions: ['0xtx1', '0xtx2'],
       };
 
       const result = provider['normalizeBlock'](ethersBlock);
@@ -78,7 +78,7 @@ describe('EtherJSProvider Normalization', () => {
         blobGasUsed: '131072',
         excessBlobGas: '0',
         parentBeaconBlockRoot: '0xbeacon123',
-        transactions: [],
+        transactions: ['0xtx1', '0xtx2'],
       });
     });
 
@@ -110,7 +110,7 @@ describe('EtherJSProvider Normalization', () => {
       expect(result.blobGasUsed).toBeUndefined();
     });
 
-    it('should normalize transactions in block', () => {
+    it('should normalize transactions in block when only hashes provided', () => {
       const ethersBlock = {
         hash: '0xabc123',
         parentHash: '0xdef456',
@@ -127,23 +127,162 @@ describe('EtherJSProvider Normalization', () => {
         timestamp: 1640995200,
         uncles: [],
         extraData: '0x',
-        transactions: [{
-          hash: '0xtx123',
-          nonce: 42,
-          from: '0xfrom123',
-          to: '0xto456',
-          value: 1000000000000000000n,
-          gasLimit: 21000n,
-          data: '0x',
-          type: 2,
-        }],
+        transactions: ['0xtx123', '0xtx456'],
+      };
+
+      const result = provider['normalizeBlock'](ethersBlock);
+
+      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+    });
+
+    it('should normalize prefetchedTransactions from ethers v6', () => {
+      const mockTransaction = {
+        hash: '0xtx123',
+        nonce: 42,
+        from: '0xfrom123',
+        to: '0xto456',
+        value: 1000000000000000000n,
+        gasLimit: 21000n,
+        data: '0x',
+        type: 2,
+        blockHash: '0xabc123',
+        blockNumber: 12345,
+        transactionIndex: 0,
+      };
+
+      const ethersBlock = {
+        hash: '0xabc123',
+        parentHash: '0xdef456',
+        number: 12345,
+        nonce: '0x0000000000000000',
+        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+        logsBloom: '0x00000000000000000000000000000000',
+        transactionsRoot: '0x789abc',
+        stateRoot: '0xstate123',
+        receiptsRoot: '0xreceipts456',
+        miner: '0xminer789',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200,
+        uncles: [],
+        extraData: '0x',
+        transactions: ['0xtx123'],
+        prefetchedTransactions: [mockTransaction],
       };
 
       const result = provider['normalizeBlock'](ethersBlock);
 
       expect(result.transactions).toHaveLength(1);
+      expect(result.transactions![0]).toMatchObject({
+        hash: '0xtx123',
+        nonce: 42,
+        from: '0xfrom123',
+        to: '0xto456',
+        value: '1000000000000000000',
+        gas: 21000,
+        input: '0x',
+        type: '2',
+      });
+    });
+
+    it('should prioritize prefetchedTransactions over regular transactions', () => {
+      const mockTransaction1 = {
+        hash: '0xtx123',
+        nonce: 42,
+        from: '0xfrom123',
+        to: '0xto456',
+        value: 1000000000000000000n,
+        gasLimit: 21000n,
+        data: '0x',
+        type: 2,
+      };
+
+      const mockTransaction2 = {
+        hash: '0xtx456',
+        nonce: 43,
+        from: '0xfrom456',
+        to: '0xto789',
+        value: 2000000000000000000n,
+        gasLimit: 25000n,
+        data: '0xdata',
+        type: 0,
+      };
+
+      const ethersBlock = {
+        hash: '0xabc123',
+        parentHash: '0xdef456',
+        number: 12345,
+        nonce: '0x0000000000000000',
+        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+        logsBloom: '0x00000000000000000000000000000000',
+        transactionsRoot: '0x789abc',
+        stateRoot: '0xstate123',
+        receiptsRoot: '0xreceipts456',
+        miner: '0xminer789',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200,
+        uncles: [],
+        extraData: '0x',
+        transactions: ['0xtx123', '0xtx456'],
+        prefetchedTransactions: [mockTransaction1, mockTransaction2],
+      };
+
+      const result = provider['normalizeBlock'](ethersBlock);
+
+      expect(result.transactions).toHaveLength(2);
+      expect(typeof result.transactions![0]).toBe('object');
       expect(result.transactions![0]!.hash).toBe('0xtx123');
-      expect(result.transactions![0]!.type).toBe('2');
+      expect(result.transactions![1]!.hash).toBe('0xtx456');
+    });
+
+    it('should handle empty prefetchedTransactions array', () => {
+      const ethersBlock = {
+        hash: '0xabc123',
+        parentHash: '0xdef456',
+        number: 12345,
+        nonce: '0x0000000000000000',
+        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+        logsBloom: '0x00000000000000000000000000000000',
+        transactionsRoot: '0x789abc',
+        stateRoot: '0xstate123',
+        receiptsRoot: '0xreceipts456',
+        miner: '0xminer789',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200,
+        uncles: [],
+        extraData: '0x',
+        transactions: ['0xtx123', '0xtx456'],
+        prefetchedTransactions: [],
+      };
+
+      const result = provider['normalizeBlock'](ethersBlock);
+      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+    });
+
+    it('should handle block without any transactions', () => {
+      const ethersBlock = {
+        hash: '0xabc123',
+        parentHash: '0xdef456',
+        number: 12345,
+        nonce: '0x0000000000000000',
+        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+        logsBloom: '0x00000000000000000000000000000000',
+        transactionsRoot: '0x789abc',
+        stateRoot: '0xstate123',
+        receiptsRoot: '0xreceipts456',
+        miner: '0xminer789',
+        gasLimit: 30000000n,
+        gasUsed: 15000000n,
+        timestamp: 1640995200,
+        uncles: [],
+        extraData: '0x',
+      };
+
+      const result = provider['normalizeBlock'](ethersBlock);
+
+      expect(result.transactions).toBeUndefined();
     });
   });
 
@@ -273,7 +412,7 @@ describe('EtherJSProvider Normalization', () => {
         data: '0x',
         blockHash: '0xblock123',
         blockNumber: 12345,
-        index: 0, // Test index field instead of transactionIndex
+        index: 0,
         gasPrice: 20000000000n,
         chainId: 1n,
         v: '27',

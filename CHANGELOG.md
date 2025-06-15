@@ -1,3 +1,10 @@
+## <small>0.6.20 (2025-06-15)</small>
+
+* feat: implemented receipts loading with blocks; ([c88fbee](https://github.com/EasyLayer/core/commit/c88fbee))
+* refactor: fixed providers components normalization; ([f8c7c74](https://github.com/EasyLayer/core/commit/f8c7c74))
+
+
+
 ## <small>0.6.19 (2025-06-11)</small>
 
 * refactor: fixed providers components normalization; ([ab07efd](https://github.com/EasyLayer/core/commit/ab07efd))

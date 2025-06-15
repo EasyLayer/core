@@ -207,7 +207,7 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
       throw new Error(errorMessage);
     }
 
-    this.log.info('Performing initial catch-up', {
+    this.log.debug('Performing initial catch-up', {
       args: {
         from: queueHeight + 1,
         to: targetHeight,
@@ -222,8 +222,8 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
       heights.push(height);
     }
 
-    // Fetch all blocks in a single batch request with full transactions
-    const blocks = await this.blockchainProvider.getManyBlocksByHeights(heights, true);
+    // Fetch all blocks in a single batch request with full transactions + receipts
+    const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true);
 
     // Enqueue blocks in correct order
     await this.enqueueBlocks(blocks);

@@ -42,33 +42,33 @@ describe('BlockchainNormalizer', () => {
     hasBlobTransactions: false,
   };
 
+  const baseUniversalBlock: UniversalBlock = {
+    hash: '0x1234567890abcdef',
+    parentHash: '0xabcdef1234567890',
+    blockNumber: 1000,
+    nonce: '0x0000000000000042',
+    sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+    logsBloom: '0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
+    transactionsRoot: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
+    stateRoot: '0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544',
+    receiptsRoot: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
+    miner: '0x5a0b54d5dc17e0aadc383d2db43b0a0d3e029c4c',
+    difficulty: '0x4ea3f27bc',
+    totalDifficulty: '0x10b260b6f5',
+    extraData: '0x476574682f4c5649562f76312e302e302f6c696e75782f676f312e342e32',
+    size: 1000,
+    gasLimit: 8000000,
+    gasUsed: 5000000,
+    timestamp: 1634567890,
+    uncles: [],
+  };
+
   beforeEach(() => {
     networkConfig = ethereumConfig;
     normalizer = new BlockchainNormalizer(networkConfig);
   });
 
   describe('normalizeBlock', () => {
-    const baseUniversalBlock: UniversalBlock = {
-      hash: '0x1234567890abcdef',
-      parentHash: '0xabcdef1234567890',
-      blockNumber: 1000,
-      nonce: '0x0000000000000042',
-      sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-      logsBloom: '0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
-      transactionsRoot: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
-      stateRoot: '0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544',
-      receiptsRoot: '0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421',
-      miner: '0x5a0b54d5dc17e0aadc383d2db43b0a0d3e029c4c',
-      difficulty: '0x4ea3f27bc',
-      totalDifficulty: '0x10b260b6f5',
-      extraData: '0x476574682f4c5649562f76312e302e302f6c696e75782f676f312e342e32',
-      size: 1000,
-      gasLimit: 8000000,
-      gasUsed: 5000000,
-      timestamp: 1634567890,
-      uncles: [],
-    };
-
     it('should normalize basic block fields correctly', () => {
       const result = normalizer.normalizeBlock(baseUniversalBlock);
 
@@ -92,22 +92,6 @@ describe('BlockchainNormalizer', () => {
         timestamp: 1634567890,
         uncles: [],
       });
-    });
-
-    it('should extract block number using extractBlockNumber method', () => {
-      const blockWithNumber = { ...baseUniversalBlock, number: 2000 };
-      delete blockWithNumber.blockNumber;
-      
-      const result = normalizer.normalizeBlock(blockWithNumber);
-      expect(result.blockNumber).toBe(2000);
-    });
-
-    it('should default block number to 0 if neither blockNumber nor number is present', () => {
-      const blockWithoutNumber = { ...baseUniversalBlock };
-      delete blockWithoutNumber.blockNumber;
-      
-      const result = normalizer.normalizeBlock(blockWithoutNumber);
-      expect(result.blockNumber).toBe(0);
     });
 
     describe('EIP-1559 support (Ethereum, Polygon)', () => {
@@ -297,8 +281,8 @@ describe('BlockchainNormalizer', () => {
       expect(result.s).toBe('');
     });
 
-    describe('Legacy transactions (Type 0)', () => {
-      it('should handle legacy transactions with gasPrice', () => {
+    describe('Gas field preservation', () => {
+      it('should preserve gasPrice when present', () => {
         const legacyTx = {
           ...baseUniversalTx,
           type: '0x0',
@@ -307,11 +291,37 @@ describe('BlockchainNormalizer', () => {
 
         const result = normalizer.normalizeTransaction(legacyTx);
         expect(result.gasPrice).toBe('0x3b9aca00');
-        expect(result.maxFeePerGas).toBeUndefined();
-        expect(result.maxPriorityFeePerGas).toBeUndefined();
       });
 
-      it('should use gasPrice for networks without EIP-1559 even with type 2', () => {
+      it('should preserve EIP-1559 fields when present', () => {
+        const eip1559Tx = {
+          ...baseUniversalTx,
+          type: '0x2',
+          maxFeePerGas: '0x5d21dba00', // 25 Gwei
+          maxPriorityFeePerGas: '0x1dcd6500', // 0.5 Gwei
+        };
+
+        const result = normalizer.normalizeTransaction(eip1559Tx);
+        expect(result.maxFeePerGas).toBe('0x5d21dba00');
+        expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
+      });
+
+      it('should preserve all gas fields when present together', () => {
+        const mixedTx = {
+          ...baseUniversalTx,
+          type: '0x2',
+          gasPrice: '0x3b9aca00',
+          maxFeePerGas: '0x5d21dba00',
+          maxPriorityFeePerGas: '0x1dcd6500',
+        };
+
+        const result = normalizer.normalizeTransaction(mixedTx);
+        expect(result.gasPrice).toBe('0x3b9aca00');
+        expect(result.maxFeePerGas).toBe('0x5d21dba00');
+        expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
+      });
+
+      it('should preserve EIP-1559 fields regardless of network config', () => {
         const bscNormalizer = new BlockchainNormalizer(bscConfig);
         const eip1559TxOnBsc = {
           ...baseUniversalTx,
@@ -323,28 +333,12 @@ describe('BlockchainNormalizer', () => {
 
         const result = bscNormalizer.normalizeTransaction(eip1559TxOnBsc);
         expect(result.gasPrice).toBe('0x3b9aca00');
-        expect(result.maxFeePerGas).toBeUndefined();
-        expect(result.maxPriorityFeePerGas).toBeUndefined();
-      });
-    });
-
-    describe('EIP-1559 transactions (Type 2)', () => {
-      it('should handle EIP-1559 transactions on supporting networks', () => {
-        const eip1559Tx = {
-          ...baseUniversalTx,
-          type: '0x2',
-          maxFeePerGas: '0x5d21dba00', // 25 Gwei
-          maxPriorityFeePerGas: '0x1dcd6500', // 0.5 Gwei
-        };
-
-        const result = normalizer.normalizeTransaction(eip1559Tx);
         expect(result.maxFeePerGas).toBe('0x5d21dba00');
         expect(result.maxPriorityFeePerGas).toBe('0x1dcd6500');
-        expect(result.gasPrice).toBeUndefined();
       });
     });
 
-    describe('Access list transactions (Type 1)', () => {
+    describe('Access list transactions', () => {
       it('should handle access list', () => {
         const accessListTx = {
           ...baseUniversalTx,
@@ -367,8 +361,8 @@ describe('BlockchainNormalizer', () => {
       });
     });
 
-    describe('Blob transactions (Type 3)', () => {
-      it('should handle blob transactions on Ethereum', () => {
+    describe('Blob transactions', () => {
+      it('should preserve blob fields when present', () => {
         const blobTx = {
           ...baseUniversalTx,
           type: '0x3',
@@ -383,7 +377,7 @@ describe('BlockchainNormalizer', () => {
         expect(result.blobVersionedHashes).toEqual(['0xhash1', '0xhash2']);
       });
 
-      it('should not include blob fields for non-supporting networks', () => {
+      it('should preserve blob fields regardless of network config', () => {
         const polygonNormalizer = new BlockchainNormalizer(polygonConfig);
         const blobTx = {
           ...baseUniversalTx,
@@ -393,8 +387,8 @@ describe('BlockchainNormalizer', () => {
         };
 
         const result = polygonNormalizer.normalizeTransaction(blobTx);
-        expect(result.maxFeePerBlobGas).toBeUndefined();
-        expect(result.blobVersionedHashes).toBeUndefined();
+        expect(result.maxFeePerBlobGas).toBe('0x77359400');
+        expect(result.blobVersionedHashes).toEqual(['0xhash1', '0xhash2']);
       });
     });
   });
@@ -543,32 +537,6 @@ describe('BlockchainNormalizer', () => {
     });
   });
 
-  describe('extractBlockNumber', () => {
-    it('should extract from blockNumber field', () => {
-      const block = { blockNumber: 1000 } as UniversalBlock;
-      const result = (normalizer as any).extractBlockNumber(block);
-      expect(result).toBe(1000);
-    });
-
-    it('should extract from number field when blockNumber is not present', () => {
-      const block = { number: 2000 } as UniversalBlock;
-      const result = (normalizer as any).extractBlockNumber(block);
-      expect(result).toBe(2000);
-    });
-
-    it('should return 0 when neither field is present', () => {
-      const block = {} as UniversalBlock;
-      const result = (normalizer as any).extractBlockNumber(block);
-      expect(result).toBe(0);
-    });
-
-    it('should prefer blockNumber over number when both are present', () => {
-      const block = { blockNumber: 1000, number: 2000 } as UniversalBlock;
-      const result = (normalizer as any).extractBlockNumber(block);
-      expect(result).toBe(1000);
-    });
-  });
-
   describe('Integration scenarios', () => {
     it('should handle complete Ethereum transaction flow', () => {
       // Modern Ethereum block with EIP-1559 transaction
@@ -624,7 +592,7 @@ describe('BlockchainNormalizer', () => {
       expect(result.transactions![0]!.maxFeePerGas).toBe('0x2540be400');
     });
 
-    it('should handle BSC transaction with high gas usage', () => {
+    it('should handle BSC transaction with preserved gas fields', () => {
       const bscTransaction = {
         hash: '0xbsc123',
         nonce: 1,
@@ -651,7 +619,6 @@ describe('BlockchainNormalizer', () => {
       expect(result.gasPrice).toBe('0x12a05f200');
       expect(result.chainId).toBe(56);
       expect(result.type).toBe('0x0');
-      expect(result.maxFeePerGas).toBeUndefined();
     });
 
     it('should handle Polygon EIP-1559 transaction with access list', () => {
@@ -688,9 +655,171 @@ describe('BlockchainNormalizer', () => {
       expect(result.maxPriorityFeePerGas).toBe('0x3b9aca00');
       expect(result.accessList).toHaveLength(1);
       expect(result.chainId).toBe(137);
-      expect(result.gasPrice).toBeUndefined();
     });
   });
 
-  
+  describe('sizeWithoutReceipts field', () => {
+    it('should calculate sizeWithoutReceipts when size and receipts are provided', () => {
+    const blockWithReceipts = {
+      ...baseUniversalBlock,
+      size: 5000,
+      receipts: [
+        {
+          transactionHash: '0x111',
+          transactionIndex: 0,
+          blockHash: '0x123',
+          blockNumber: 1000,
+          from: '0x1111111111111111111111111111111111111111',
+          to: '0x2222222222222222222222222222222222222222',
+          cumulativeGasUsed: 21000,
+          gasUsed: 21000,
+          contractAddress: null,
+          logs: [
+            {
+              address: '0x1234567890123456789012345678901234567890',
+              topics: ['0xtopic1'],
+              data: '0x1234',
+              blockNumber: 1000,
+              transactionHash: '0x111',
+              transactionIndex: 0,
+              blockHash: '0x123',
+              logIndex: 0,
+              removed: false,
+            },
+          ],
+          logsBloom: '0x' + '0'.repeat(512),
+          status: '0x1',
+        },
+      ],
+    } as UniversalBlock;;
+
+    const result = normalizer.normalizeBlock(blockWithReceipts);
+    
+    expect(result.size).toBe(5736);
+    expect(result.sizeWithoutReceipts).toBeDefined();
+    expect(result.sizeWithoutReceipts).toBeLessThan(5001);
+    expect(result.sizeWithoutReceipts).toBeGreaterThan(0);
+  });
+
+    it('should set sizeWithoutReceipts equal to size when no receipts present', () => {
+      const blockWithoutReceipts = {
+        ...baseUniversalBlock,
+        size: 1500,
+        receipts: undefined,
+      };
+
+      const result = normalizer.normalizeBlock(blockWithoutReceipts);
+      
+      expect(result.size).toBe(1500);
+      expect(result.sizeWithoutReceipts).toBe(1500);
+    });
+
+    it('should handle empty receipts array', () => {
+      const blockWithEmptyReceipts = {
+        ...baseUniversalBlock,
+        size: 1000,
+        receipts: [],
+      };
+
+      const result = normalizer.normalizeBlock(blockWithEmptyReceipts);
+      
+      expect(result.size).toBe(1000);
+      expect(result.sizeWithoutReceipts).toBe(1000);
+    });
+
+    it('should calculate both size and sizeWithoutReceipts when size not provided', () => {
+      const blockWithoutSize = {
+        ...baseUniversalBlock,
+        transactions: [
+          {
+            hash: '0xtx1',
+            nonce: 1,
+            from: '0x1111111111111111111111111111111111111111',
+            to: '0x2222222222222222222222222222222222222222',
+            value: '0x100',
+            gas: 21000,
+            input: '0x',
+            gasPrice: '0x3b9aca00',
+            chainId: 1,
+            v: '0x1c',
+            r: '0xabc',
+            s: '0xdef',
+          },
+        ],
+        receipts: [
+          {
+            transactionHash: '0xtx1',
+            transactionIndex: 0,
+            blockHash: '0x123',
+            blockNumber: 1000,
+            from: '0x1111111111111111111111111111111111111111',
+            to: '0x2222222222222222222222222222222222222222',
+            cumulativeGasUsed: 21000,
+            gasUsed: 21000,
+            contractAddress: null,
+            logs: [],
+            logsBloom: '0x' + '0'.repeat(512),
+            status: '0x1',
+          },
+        ],
+      } as UniversalBlock;
+
+      const result = normalizer.normalizeBlock(blockWithoutSize);
+      
+      expect(result.size).toBeDefined();
+      expect(result.sizeWithoutReceipts).toBeDefined();
+      expect(result.sizeWithoutReceipts).toBeLessThan(result.size!);
+      expect(result.sizeWithoutReceipts).toBeGreaterThan(0);
+    });
+
+    it('should calculate sizeWithoutReceipts with complex receipts correctly', () => {
+      const blockWithComplexReceipts = {
+        ...baseUniversalBlock,
+        size: 10000,
+        receipts: [
+          {
+            transactionHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
+            transactionIndex: 0,
+            blockHash: '0x2222222222222222222222222222222222222222222222222222222222222222',
+            blockNumber: 1000,
+            from: '0x1111111111111111111111111111111111111111',
+            to: '0x2222222222222222222222222222222222222222',
+            cumulativeGasUsed: 150000,
+            gasUsed: 150000,
+            contractAddress: null,
+            logs: [
+              {
+                address: '0x1111111111111111111111111111111111111111',
+                topics: [
+                  '0xtopic1111111111111111111111111111111111111111111111111111111111',
+                  '0xtopic2222222222222222222222222222222222222222222222222222222222',
+                  '0xtopic3333333333333333333333333333333333333333333333333333333333',
+                ],
+                data: '0x' + '1234'.repeat(100), // Large data
+                blockNumber: 1000,
+                transactionHash: '0x1111111111111111111111111111111111111111111111111111111111111111',
+                transactionIndex: 0,
+                blockHash: '0x2222222222222222222222222222222222222222222222222222222222222222',
+                logIndex: 0,
+                removed: false,
+              },
+            ],
+            logsBloom: '0x' + 'a'.repeat(512),
+            status: '0x1',
+          },
+        ],
+      } as UniversalBlock;;
+
+      const result = normalizer.normalizeBlock(blockWithComplexReceipts);
+      
+      expect(result.size).toBe(11120);
+      expect(result.sizeWithoutReceipts).toBeDefined();
+      expect(result.sizeWithoutReceipts).toBeLessThan(10001);
+      expect(result.sizeWithoutReceipts).toBeGreaterThan(0);
+      
+      // The difference should be significant due to complex receipts
+      const receiptSize = result.size! - result.sizeWithoutReceipts!;
+      expect(receiptSize).toBeGreaterThan(500); // Should be substantial
+    });
+  });
 });

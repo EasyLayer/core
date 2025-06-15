@@ -65,8 +65,7 @@ export interface UniversalBlock {
   uncles: string[];
 
   // Block number - handle different provider naming
-  blockNumber?: number; // Standard field
-  number?: number; // QuickNode, Ankr format
+  blockNumber: number;
 
   // Optional hex representation
   hex?: string;
@@ -83,8 +82,9 @@ export interface UniversalBlock {
   excessBlobGas?: string;
   parentBeaconBlockRoot?: string;
 
-  // Transactions
+  // Transactions and receipts
   transactions?: UniversalTransaction[];
+  receipts?: UniversalTransactionReceipt[];
 }
 
 export interface UniversalTransaction {

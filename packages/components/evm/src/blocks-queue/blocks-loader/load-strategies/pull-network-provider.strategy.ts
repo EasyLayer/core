@@ -4,29 +4,30 @@ import type { Block } from '../../../blockchain-provider';
 import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
 import { BlocksQueue } from '../../blocks-queue';
 
-interface BlockInfo {
-  hash: string;
-  size: number;
-  blockNumber: number;
-}
-
+/**
+ * Pull-based network provider strategy with two-phase loading optimization.
+ *
+ * This strategy implements an optimized approach for loading blockchain blocks:
+ * - Phase 1: Loads blocks with transactions (without receipts) and stores them locally
+ * - Phase 2: Loads only receipts in batches and combines them with existing blocks
+ *
+ * Features:
+ * - Dynamic batch size adjustment based on consumption patterns
+ * - Intelligent receipt size estimation using heuristics
+ * - Memory-optimized processing to avoid unnecessary object copying
+ * - Concurrent receipt loading with configurable concurrency
+ *
+ */
 export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
   private _concurrency: number = 1;
-  private _preloadedItemsQueue: BlockInfo[] = [];
+  private _preloadedItemsQueue: Block[] = []; // Blocks + Transactions - Receipts
 
   private _maxPreloadCount: number;
   private _lastPreloadCount = 0;
   private _lastLoadedCount = 0;
 
-  /**
-   * Creates an instance of PullNetworkProviderStrategy.
-   * @param log - The application logger.
-   * @param blockchainProvider - The network provider service.
-   * @param queue - The blocks queue.
-   * @param config - Configuration object containing maxRequestBlocksBatchSize.
-   */
   constructor(
     private readonly log: AppLogger,
     private readonly blockchainProvider: BlockchainProviderService,
@@ -63,65 +64,56 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       throw new Error('The queue is full');
     }
 
-    // We only upload new hashes if we've already used them all.
+    // Only preload blocks with transactions if array is empty
     if (this._preloadedItemsQueue.length === 0) {
-      await this.preloadBlocksInfo(currentNetworkHeight);
+      await this.preloadBlocksWithTransactions(currentNetworkHeight);
     }
 
     // IMPORTANT: This check is mandatory after preload.
-    // We don't want to start downloading blocks if there is no items in the queue for them
+    // We don't want to start downloading receipts if there is no space in the queue
     if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * this._concurrency)) {
       this.log.debug('The queue is overloaded');
       return;
     }
 
+    // Load receipts and enqueue complete blocks
     if (this._preloadedItemsQueue.length > 0) {
-      await this.loadAndEnqueueBlocks();
+      await this.loadReceiptsAndEnqueueBlocks();
     }
   }
 
   /**
-   * Stops the loading process by clearing the _preloadedItemsQueue.
+   * Stops the loading process by clearing the preloaded items queue.
    */
   public async stop(): Promise<void> {
     this._preloadedItemsQueue = [];
   }
 
   /**
-   * Preloads block metadata (blockNumber, hash, size) into the internal queue in a single RPC call,
-   * and dynamically tunes the preload batch size based on previous consumption.
+   * Phase 1: Preloads blocks with transactions and stores them locally.
    *
-   * Behavior:
-   * 1. If this is not the first preload invocation, compute the consumption ratio:
-   *    `ratio = _lastLoadedCount / _lastPreloadCount`.
-   *    - If `ratio > 0.9`, increase `_maxPreloadCount` by 25%.
-   *    - If `ratio < 0.2`, decrease `_maxPreloadCount` by 25%, but not below 1.
-   *    - Otherwise, leave `_maxPreloadCount` unchanged.
-   * 2. Calculate how many blocks remain between `queue.lastHeight` and
-   *    `currentNetworkHeight`, and cap the request count to `_maxPreloadCount`.
-   * 3. If the resulting `count` is zero or negative, return immediately.
-   * 4. Record `_lastPreloadCount = count`.
-   * 5. Request stats for heights `[lastHeight+1 ... lastHeight+count]` via
-   *    `blockchainProvider.getManyBlocksStatsByHeights`.
-   * 6. For each returned stat:
-   *    - Throw if `blockhash` or `height` is missing.
-   *    - Use `total_size` if present, otherwise fall back to `queue.blockSize`.
-   *    - Push `{ blockNumber, hash, size }` into `_preloadedItemsQueue`.
+   * This method implements dynamic adjustment of the preload count based on consumption patterns:
+   * - If consumption ratio > 0.9, increases preload count by 25%
+   * - If consumption ratio < 0.2, decreases preload count by 25% (minimum 1)
+   * - Otherwise, keeps the current preload count unchanged
    *
-   * @param currentNetworkHeight - The latest block height as reported by the network.
-   * @throws {Error} If any returned block stat is missing a hash or height.
-   * @returns A promise that resolves once all stats have been enqueued.
+   * The method loads blocks with full transactions but without receipts to optimize
+   * memory usage and network traffic for the initial phase.
+   *
+   * @param currentNetworkHeight - The latest block height as reported by the network
+   * @throws {Error} If the blockchain provider fails to fetch blocks
+   * @returns A promise that resolves once all blocks with transactions are preloaded
    */
   @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
-  private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
-    // Dynamic adjustment
+  private async preloadBlocksWithTransactions(currentNetworkHeight: number): Promise<void> {
+    // Dynamic adjustment based on consumption ratio
     if (this._lastPreloadCount > 0) {
       const ratio = this._lastLoadedCount / this._lastPreloadCount;
       if (ratio > 0.9) {
-        // almost everything was used
+        // Almost everything was used, increase preload count
         this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
       } else if (ratio < 0.2) {
-        // you barely used any
+        // Barely used any, decrease preload count
         this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
       }
     }
@@ -136,95 +128,201 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     this._lastPreloadCount = count;
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
-    const stats = await this.blockchainProvider.getManyBlocksStatsByHeights(heights);
-
-    // Fill the preload queue, substituting the default size if there is none
-    for (const { blockNumber, hash, size } of stats) {
-      if (!hash || blockNumber == null) {
-        throw new Error('Block stats missing required hash and height');
-      }
-      const blockSize = size != null ? size : this.queue.blockSize;
-      this._preloadedItemsQueue.push({ hash, size: blockSize, blockNumber });
-    }
+    this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true); // true = with transactions
   }
 
   /**
-   * Load blocks metadata in parallel batches, parse them into Block instances and enqueue.
+   * Phase 2: Loads receipts for preloaded blocks and enqueues complete blocks.
    *
-   * - Sorts pending block infos by height (highest first).
-   * - Splits into up to `_concurrency` batches, each limited by `_maxRequestBlocksBatchSize`.
-   * - For each batch:
-   * - Calls `loadBlocks(infos, retryLimit)` to fetch full blocks (fullTransactions=true) with retries.
-   * - Flattens all loaded blocks and calls `enqueueBlocks(blocks)`.
+   * This method processes the blocks loaded in Phase 1 by:
+   * 1. Creating optimal batches based on estimated receipt sizes
+   * 2. Loading receipts concurrently for each batch
+   * 3. Combining receipts with existing block data
+   * 4. Normalizing and enqueuing the complete blocks
    *
-   * @returns A promise that resolves once all blocks are enqueued.
-   * @internal
+   * The batching algorithm uses heuristics to estimate receipt sizes based on
+   * transaction count and block size to optimize network requests.
+   *
+   * @throws {Error} If receipt loading fails after maximum retries
+   * @returns A promise that resolves once all blocks are processed and enqueued
    */
-  private async loadAndEnqueueBlocks(): Promise<void> {
-    // Number of retries
+  private async loadReceiptsAndEnqueueBlocks(): Promise<void> {
     const retryLimit = 3;
 
-    const activeTasks: Promise<Block[]>[] = [];
-    let totalInfosPulled = 0;
+    // Create batches for receipts loading based on transaction count and estimated receipt sizes
+    const receiptsBatches = this.createOptimalBatchesForReceipts();
 
+    const activeTasks: Promise<Block[]>[] = [];
+
+    for (let i = 0; i < this._concurrency; i++) {
+      const batch = receiptsBatches[i];
+      if (batch) {
+        activeTasks.push(this.loadBlocks(batch.blocks, retryLimit));
+      }
+    }
+
+    const results: Block[][] = await Promise.all(activeTasks);
+    const completeBlocks: Block[] = results.flat();
+
+    // Clear processed blocks and update loaded count
+    this._preloadedItemsQueue = [];
+    this._lastLoadedCount = completeBlocks.length;
+
+    // Enqueue complete blocks
+    await this.enqueueBlocks(completeBlocks);
+  }
+
+  /**
+   * Creates optimal batches for receipt loading based on estimated sizes.
+   *
+   * This method analyzes the preloaded blocks and groups them into batches
+   * that respect the maximum batch size limit. The algorithm:
+   * 1. Sorts blocks by block number (descending)
+   * 2. Estimates receipt size for each block using heuristics
+   * 3. Groups blocks into batches that don't exceed the size limit
+   * 4. Ensures each batch has at least one block
+   *
+   * The estimation heuristics consider transaction count and block size:
+   * - Large blocks (> 2MB): ~2KB per receipt
+   * - Medium blocks (> 500KB): ~1KB per receipt
+   * - Small blocks (< 500KB): ~500B per receipt
+   *
+   * @returns Array of batch objects containing blocks and estimated sizes
+   */
+  private createOptimalBatchesForReceipts(): { blocks: Block[]; maxPossibleSize: number }[] {
+    const batches: { blocks: Block[]; maxPossibleSize: number }[] = [];
     this._preloadedItemsQueue.sort((a, b) => {
-      if (a.blockNumber < b.blockNumber) return 1;
-      if (a.blockNumber > b.blockNumber) return -1;
+      if (a.blockNumber < b.blockNumber) return -1;
+      if (a.blockNumber > b.blockNumber) return 1;
       return 0;
     });
 
-    for (let i = 0; i < this._concurrency; i++) {
-      const infos: BlockInfo[] = [];
-      let size = 0;
+    let currentBatch: Block[] = [];
+    let currentEstimatedReceiptsSize = 0;
 
-      while (size < this._maxRequestBlocksBatchSize && this._preloadedItemsQueue.length > 0) {
-        const info = this._preloadedItemsQueue.pop()!;
-        infos.push(info);
-        size += info.size;
-      }
+    for (const block of this._preloadedItemsQueue) {
+      // Estimate receipts size for this block
+      const estimatedReceiptsSize = this.estimateReceiptsSize(block);
 
-      if (infos.length > 0) {
-        totalInfosPulled += infos.length;
-        activeTasks.push(this.loadBlocks(infos, retryLimit));
+      // Check if receipts fit in current batch
+      if (
+        currentEstimatedReceiptsSize + estimatedReceiptsSize <= this._maxRequestBlocksBatchSize ||
+        currentBatch.length === 0
+      ) {
+        currentBatch.push(block);
+        currentEstimatedReceiptsSize += estimatedReceiptsSize;
+      } else {
+        // Finish current batch and start new one
+        batches.push({
+          blocks: [...currentBatch],
+          maxPossibleSize: currentEstimatedReceiptsSize,
+        });
+
+        currentBatch = [block];
+        currentEstimatedReceiptsSize = estimatedReceiptsSize;
       }
     }
 
-    this._lastLoadedCount = totalInfosPulled;
-    const batches: Block[][] = await Promise.all(activeTasks);
-    const blocks: Block[] = batches.flat();
-    await this.enqueueBlocks(blocks);
+    // Add final batch if not empty
+    if (currentBatch.length > 0) {
+      batches.push({
+        blocks: currentBatch,
+        maxPossibleSize: currentEstimatedReceiptsSize,
+      });
+    }
 
-    this._lastLoadedCount = blocks.length;
+    return batches;
   }
 
   /**
-   * Fetches blocks in batches with retry logic.
-   * @param infos - Array of block infos.
-   * @param maxRetries - Maximum number of retry attempts.
-   * @returns Array of fetched blocks.
-   * @throws Will throw an error if fetching blocks fails after maximum retries.
+   * Estimates the size of receipts for a given block using heuristic analysis.
+   *
+   * The estimation algorithm considers:
+   * - Number of transactions in the block
+   * - Block size without receipts as an indicator of transaction complexity
+   * - Different receipt size multipliers based on block characteristics
+   *
+   * Size categories and estimates:
+   * - Large blocks (> 2MB): Complex transactions with many logs → 2KB per receipt
+   * - Medium blocks (> 500KB): Moderate complexity → 1KB per receipt
+   * - Small blocks (< 500KB): Simple transactions → 500B per receipt
+   *
+   * @param block - The block to estimate receipt size for
+   * @returns Estimated total size of receipts in bytes, or 0 if no transactions
+   */
+  private estimateReceiptsSize(block: Block): number {
+    if (!block.transactions || block.transactions.length === 0) {
+      return 0;
+    }
+
+    const txCount = block.transactions.length;
+    const blockSizeWithoutReceipts = block.sizeWithoutReceipts || 0;
+
+    // Use heuristics based on block size and transaction count
+    if (blockSizeWithoutReceipts > 2 * 1024 * 1024) {
+      // > 2MB
+      // Large blocks likely have complex transactions with many logs
+      return txCount * 2000; // ~2KB per receipt on average
+    } else if (blockSizeWithoutReceipts > 500 * 1024) {
+      // > 500KB
+      // Medium blocks with moderate complexity
+      return txCount * 1000; // ~1KB per receipt on average
+    } else {
+      // Small blocks with simple transactions
+      return txCount * 500; // ~500B per receipt on average
+    }
+  }
+
+  /**
+   * Loads receipts for a batch of blocks and combines them efficiently.
+   *
+   * This method implements optimized receipt loading:
+   * 1. Extracts transaction hashes from all blocks in the batch
+   * 2. Loads all receipts in a single batch request to minimize network overhead
+   * 3. Uses provider service to merge receipts with blocks and recalculate sizes
+   *
+   * @param blocks - Array of blocks to load receipts for
+   * @param maxRetries - Maximum number of retry attempts for failed requests
+   * @throws {Error} If receipt loading fails after all retry attempts
+   * @returns Promise resolving to array of blocks with receipts attached
    */
   @RuntimeTracker({ warningThresholdMs: 3000, errorThresholdMs: 10000 })
-  private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
+  private async loadBlocks(blocks: Block[], maxRetries: number): Promise<Block[]> {
     let attempt = 0;
+
     while (attempt < maxRetries) {
       try {
-        const hashes = infos.map((i) => i.hash);
-        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHashes(hashes, true); // fullTransactions=true
-        return blocks;
+        // Collect all transaction hashes from all blocks in batch
+        const allTxHashes: string[] = [];
+
+        blocks.forEach((block: Block) => {
+          if (block.transactions && block.transactions.length > 0) {
+            const txHashes = block.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+            allTxHashes.push(...txHashes);
+          }
+        });
+
+        // Get all receipts at once if there are any transactions
+        let allReceipts: any[] = [];
+        if (allTxHashes.length > 0) {
+          allReceipts = await this.blockchainProvider.getManyTransactionReceipts(allTxHashes);
+        }
+
+        // Use provider service to merge receipts into blocks
+        return await this.blockchainProvider.mergeReceiptsIntoBlocks(blocks, allReceipts);
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
-          this.log.debug('Exceeded max retries for fetching blocks batch.', {
-            methodName: 'loadBlocks',
-            args: { batchLength: infos.length },
+          this.log.error('Exceeded max retries for receipts batch', {
+            args: { blockCount: blocks.length, error },
           });
           throw error;
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
       }
     }
-    throw new Error('Failed to fetch blocks batch after maximum retries.');
+
+    throw new Error('Failed to fetch receipts batch after maximum retries.');
   }
 
   private async enqueueBlocks(blocks: Block[]): Promise<void> {
@@ -246,7 +344,6 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
               lastHeight: this.queue.lastHeight,
             },
           });
-
           continue;
         }
 

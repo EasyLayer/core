@@ -1,4 +1,4 @@
-import type { Transaction } from './transaction.interfaces';
+import type { Transaction, TransactionReceipt } from './transaction.interfaces';
 
 export interface Withdrawal {
   index: string;
@@ -26,7 +26,8 @@ export interface Block {
   gasUsed: number;
   timestamp: number;
   uncles: string[];
-  size: number;
+  size: number; // Total size including receipts
+  sizeWithoutReceipts: number; // Original block size without receipts
 
   // Optional fields based on network capabilities
   baseFeePerGas?: string; // Only if network supports EIP-1559
@@ -36,6 +37,7 @@ export interface Block {
   excessBlobGas?: string; // Only if network supports blob transactions
   parentBeaconBlockRoot?: string; // Only if network supports blob transactions
 
-  // Transactions
+  // Transactions and receipts
   transactions?: Transaction[];
+  receipts?: TransactionReceipt[];
 }

@@ -1,5 +1,5 @@
 import type { Block } from '../components/block.interfaces';
-import type { Transaction } from '../components/transaction.interfaces';
+import type { Transaction, TransactionReceipt } from '../components/transaction.interfaces';
 
 /**
  * Utility class for calculating block and transaction sizes
@@ -61,6 +61,64 @@ export class BlockSizeCalculator {
   static calculateTransactionSize(transaction: Transaction): number {
     // Since hex data is not available from providers, always estimate from fields
     return this.estimateTransactionSizeFromFields(transaction);
+  }
+
+  /**
+   * Efficiently calculates the total size of receipts in bytes
+   * Uses approximation based on receipt structure to avoid expensive JSON.stringify
+   * @param receipts - Array of transaction receipts
+   * @returns Total size in bytes
+   */
+  static calculateReceiptsSize(receipts: TransactionReceipt[]): number {
+    if (!receipts || receipts.length === 0) return 0;
+
+    let totalSize = 0;
+
+    receipts.forEach((receipt) => {
+      // Base receipt size (fixed fields) ~200 bytes
+      let receiptSize = 200;
+
+      // Add size for logs
+      receipt.logs.forEach((log) => {
+        // Base log size ~150 bytes
+        receiptSize += 150;
+
+        // Add topic sizes (32 bytes each)
+        receiptSize += log.topics.length * 32;
+
+        // Add data size (hex string, so /2 for actual bytes)
+        receiptSize += log.data.length / 2;
+      });
+
+      // Add variable string field sizes
+      receiptSize += receipt.transactionHash.length;
+      receiptSize += receipt.blockHash.length;
+      receiptSize += receipt.from.length;
+      receiptSize += receipt.to?.length || 0;
+      receiptSize += receipt.contractAddress?.length || 0;
+      receiptSize += receipt.logsBloom.length / 2; // hex string
+
+      totalSize += receiptSize;
+    });
+
+    return totalSize;
+  }
+
+  /**
+   * Alternative precise method for calculating receipts size (slower but accurate)
+   * Use this for debugging or when you need exact measurements
+   * @param receipts - Array of transaction receipts
+   * @returns Precise size in bytes
+   */
+  static calculateReceiptsSizePrecise(receipts: TransactionReceipt[]): number {
+    if (!receipts || receipts.length === 0) return 0;
+
+    try {
+      return JSON.stringify(receipts).length;
+    } catch (error) {
+      // Fallback to approximation if JSON.stringify fails
+      return this.calculateReceiptsSize(receipts);
+    }
   }
 
   /**
