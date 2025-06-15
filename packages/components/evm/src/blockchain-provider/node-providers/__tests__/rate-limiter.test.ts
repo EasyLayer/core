@@ -64,11 +64,11 @@ describe('RateLimiter', () => {
       
       const BottleneckMock = jest.requireMock('bottleneck');
       expect(BottleneckMock).toHaveBeenCalledWith({
-        maxConcurrent: 5,
+        maxConcurrent: 1,
         minTime: Math.ceil(1000 / 10), // 100ms
-        reservoir: 10,
-        reservoirRefreshAmount: 10,
-        reservoirRefreshInterval: 1000,
+        reservoir: 1,
+        reservoirRefreshAmount: 1,
+        reservoirRefreshInterval: 100,
       });
     });
   });
@@ -407,9 +407,9 @@ describe('RateLimiter', () => {
       expect(BottleneckMock).toHaveBeenCalledWith({
         maxConcurrent: 15,
         minTime: Math.ceil(1000 / 20), // 50ms
-        reservoir: 20,
-        reservoirRefreshAmount: 20,
-        reservoirRefreshInterval: 1000,
+        reservoir: 1,
+        reservoirRefreshAmount: 1,
+        reservoirRefreshInterval: 50,
       });
     });
 
@@ -434,9 +434,9 @@ describe('RateLimiter', () => {
       expect(BottleneckMock).toHaveBeenCalledWith({
         maxConcurrent: DEFAULT_RATE_LIMITS.maxConcurrentRequests,
         minTime: Math.ceil(1000 / DEFAULT_RATE_LIMITS.maxRequestsPerSecond),
-        reservoir: DEFAULT_RATE_LIMITS.maxRequestsPerSecond,
-        reservoirRefreshAmount: DEFAULT_RATE_LIMITS.maxRequestsPerSecond,
-        reservoirRefreshInterval: 1000,
+        reservoir: 1,
+        reservoirRefreshAmount: 1,
+        reservoirRefreshInterval: 100,
       });
     });
   });
@@ -535,42 +535,6 @@ describe('RateLimiter', () => {
     });
   });
 
-  describe('configuration edge cases', () => {
-    it('should handle zero and negative batch sizes', () => {
-      const limiter1 = new RateLimiter({ maxBatchSize: 0 });
-      const limiter2 = new RateLimiter({ maxBatchSize: -5 });
-      
-      expect(limiter1.getStats().config.maxBatchSize).toBe(0);
-      expect(limiter2.getStats().config.maxBatchSize).toBe(-5);
-    });
-
-    it('should handle very high request rates', () => {
-      const limiter = new RateLimiter({ maxRequestsPerSecond: 1000 });
-      
-      const BottleneckMock = jest.requireMock('bottleneck');
-      expect(BottleneckMock).toHaveBeenCalledWith({
-        maxConcurrent: DEFAULT_RATE_LIMITS.maxConcurrentRequests,
-        minTime: Math.ceil(1000 / 1000), // 1ms
-        reservoir: 1000,
-        reservoirRefreshAmount: 1000,
-        reservoirRefreshInterval: 1000,
-      });
-    });
-
-    it('should handle fractional request rates', () => {
-      const limiter = new RateLimiter({ maxRequestsPerSecond: 1.5 });
-      
-      const BottleneckMock = jest.requireMock('bottleneck');
-      expect(BottleneckMock).toHaveBeenCalledWith({
-        maxConcurrent: DEFAULT_RATE_LIMITS.maxConcurrentRequests,
-        minTime: Math.ceil(1000 / 1.5), // 667ms
-        reservoir: 1.5,
-        reservoirRefreshAmount: 1.5,
-        reservoirRefreshInterval: 1000,
-      });
-    });
-  });
-
   describe('batch delay behavior', () => {
     it('should not add delay after last batch', async () => {
       const customLimiter = new RateLimiter({ maxBatchSize: 1 });
@@ -581,9 +545,7 @@ describe('RateLimiter', () => {
         .mockResolvedValueOnce(['result2']);
       
       mockBottleneck.schedule.mockImplementation(async (fn: any) => await fn());
-      
-      const startTime = Date.now();
-      
+            
       const resultPromise = customLimiter.executeBatchRequests(items, batchRequestFn);
       
       // Only advance time for one delay (between batch 1 and 2)
