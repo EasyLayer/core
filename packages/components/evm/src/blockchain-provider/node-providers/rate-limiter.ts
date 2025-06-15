@@ -5,19 +5,11 @@ import type { RateLimits } from './interfaces';
 export const DEFAULT_RATE_LIMITS: Required<RateLimits> = {
   maxRequestsPerSecond: 12, // Slightly below QuickNode Free plan limit (15 RPS) to have buffer
   maxConcurrentRequests: 10, // Allow more concurrent requests
-  maxBatchSize: 25, // Increase batch size for better throughput
-};
-
-// Hardcoded retry configuration
-const RETRY_CONFIG = {
-  maxAttempts: 3,
-  initialDelay: 1000,
-  backoffMultiplier: 2,
-  maxDelay: 30000,
+  maxBatchSize: 25, // RPC batch size - how many items in one JSON-RPC batch call
 };
 
 // Hardcoded batch delay
-const BATCH_DELAY = 50; // ms
+const BATCH_DELAY = 50; // ms between batch requests
 
 export class RateLimiter {
   private limiter: Bottleneck;
@@ -42,34 +34,35 @@ export class RateLimiter {
   }
 
   /**
-   * Execute a request with rate limiting and retry logic
+   * Execute a single request with rate limiting (no retry)
    */
   async executeRequest<T>(requestFn: () => Promise<T>): Promise<T> {
-    return this.executeWithRetry(requestFn);
+    return await this.limiter.schedule(requestFn);
   }
 
   /**
-   * Execute multiple requests in batches with rate limiting
+   * Execute JSON-RPC batch requests with proper rate limiting
+   * Each batch = one HTTP request with multiple RPC calls inside
    */
-  async executeBatchRequests<T>(requestFns: Array<() => Promise<T>>): Promise<T[]> {
-    if (requestFns.length === 0) {
+  async executeBatchRequests<T>(items: any[], batchRequestFn: (batchItems: any[]) => Promise<T[]>): Promise<T[]> {
+    if (items.length === 0) {
       return [];
     }
 
-    // Split into batches
-    const batches = this.createBatches(requestFns, this.config.maxBatchSize);
+    // Split items into batches by maxBatchSize (this is JSON-RPC batch size)
+    const batches = this.createBatches(items, this.config.maxBatchSize);
     const results: T[] = [];
 
+    // Send batches SEQUENTIALLY with rate limiting
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
 
       try {
-        // Execute batch with rate limiting
-        const batchPromises = batch!.map((fn) => this.executeRequest(fn));
-        const batchResults = await Promise.all(batchPromises);
+        // One batch = one HTTP request through rate limiter
+        const batchResults = await this.executeRequest(() => batchRequestFn(batch!));
         results.push(...batchResults);
 
-        // Add delay between batches (except for the last batch)
+        // Delay between batches (except last one)
         if (i < batches.length - 1 && BATCH_DELAY > 0) {
           await this.delay(BATCH_DELAY);
         }
@@ -89,39 +82,35 @@ export class RateLimiter {
   }
 
   /**
-   * Execute request with retry logic
+   * Execute individual requests sequentially with rate limiting
+   * Used when there's no batching capability
    */
-  private async executeWithRetry<T>(requestFn: () => Promise<T>): Promise<T> {
-    let lastError: any;
+  async executeSequentialRequests<T>(requestFns: Array<() => Promise<T>>): Promise<T[]> {
+    if (requestFns.length === 0) {
+      return [];
+    }
 
-    for (let attempt = 1; attempt <= RETRY_CONFIG.maxAttempts; attempt++) {
+    const results: T[] = [];
+
+    // Send requests SEQUENTIALLY through rate limiter
+    for (const requestFn of requestFns) {
       try {
-        // Use Bottleneck to schedule the request
-        return await this.limiter.schedule(requestFn);
+        const result = await this.executeRequest(requestFn);
+        results.push(result);
       } catch (error: any) {
-        lastError = error;
-
-        // Don't retry if it's not a rate limit error and it's not the first attempt
-        if (!this.isRateLimitError(error) && attempt > 1) {
-          throw error;
+        if (this.isRateLimitError(error)) {
+          const rateLimitMessage =
+            `Rate limit exceeded during sequential request. ` +
+            `Progress: ${results.length}/${requestFns.length}. ` +
+            `Original error: ${error?.message || 'Unknown error'}. ` +
+            `Consider: 1) Reducing request rate, 2) Upgrading RPC plan.`;
+          throw new Error(rateLimitMessage);
         }
-
-        // Don't retry on the last attempt
-        if (attempt === RETRY_CONFIG.maxAttempts) {
-          break;
-        }
-
-        // Calculate delay with exponential backoff
-        const delay = Math.min(
-          RETRY_CONFIG.initialDelay * Math.pow(RETRY_CONFIG.backoffMultiplier, attempt - 1),
-          RETRY_CONFIG.maxDelay
-        );
-
-        await this.delay(delay);
+        throw error;
       }
     }
 
-    throw lastError;
+    return results;
   }
 
   /**
