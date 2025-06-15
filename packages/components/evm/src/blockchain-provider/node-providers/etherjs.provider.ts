@@ -53,11 +53,39 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
   public async healthcheck(): Promise<boolean> {
     try {
-      await this.rateLimiter.executeRequest(() => this._httpClient.getBlockNumber());
+      await this.rateLimiter.executeRequest(() => this.getActiveProvider().getBlockNumber());
       return true;
     } catch (error) {
       return false;
     }
+  }
+
+  /**
+   * Gets the active provider - WebSocket if available, otherwise HTTP
+   */
+  private getActiveProvider(): ethers.JsonRpcProvider {
+    if (this.isWebSocketConnected && this._wsClient) {
+      return this._wsClient;
+    }
+    return this._httpClient;
+  }
+
+  /**
+   * Executes a request with automatic WebSocket/HTTP fallback
+   */
+  private async executeWithFallback<T>(operation: (provider: ethers.JsonRpcProvider) => Promise<T>): Promise<T> {
+    // Try WebSocket first if available
+    if (this.isWebSocketConnected && this._wsClient) {
+      try {
+        return await operation(this._wsClient);
+      } catch (error) {
+        // Mark WebSocket as disconnected and fallback to HTTP
+        this.isWebSocketConnected = false;
+      }
+    }
+
+    // Fallback to HTTP
+    return await operation(this._httpClient);
   }
 
   /**
@@ -210,12 +238,14 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   // ===== BLOCK METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    return await this.rateLimiter.executeRequest(() => this._httpClient.getBlockNumber());
+    return await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((provider) => provider.getBlockNumber())
+    );
   }
 
   public async getOneBlockByHeight(blockNumber: number, fullTransactions: boolean = false): Promise<UniversalBlock> {
     const ethersBlock = await this.rateLimiter.executeRequest(() =>
-      this._httpClient.getBlock(blockNumber, fullTransactions)
+      this.executeWithFallback((provider) => provider.getBlock(blockNumber, fullTransactions))
     );
 
     if (!ethersBlock) {
@@ -226,7 +256,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getOneBlockHashByHeight(height: number): Promise<string> {
-    const block = await this.rateLimiter.executeRequest<UniversalBlock>(() => this._httpClient.getBlock(height, false));
+    const block = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
+    );
 
     if (!block) {
       throw new Error(`Block ${height} not found`);
@@ -236,7 +268,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getOneBlockByHash(hash: Hash, fullTransactions: boolean = false): Promise<UniversalBlock> {
-    const ethersBlock = await this.rateLimiter.executeRequest(() => this._httpClient.getBlock(hash, fullTransactions));
+    const ethersBlock = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((provider) => provider.getBlock(hash, fullTransactions))
+    );
 
     if (!ethersBlock) {
       throw new Error(`Block ${hash} not found`);
@@ -246,42 +280,67 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.getBlock(hash, fullTransactions));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const ethersBlocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    // EthersJS doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map(
+      (hash) => () => this.executeWithFallback((provider) => provider.getBlock(hash, fullTransactions))
+    );
+
+    const ethersBlocks = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return ethersBlocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    const requestFns = heights.map((height) => () => this._httpClient.getBlock(height, fullTransactions));
+    if (heights.length === 0) {
+      return [];
+    }
 
-    const ethersBlocks = await this.rateLimiter.executeBatchRequests(requestFns);
+    // EthersJS doesn't support native batch requests, use sequential execution
+    const requestFns = heights.map(
+      (height) => () => this.executeWithFallback((provider) => provider.getBlock(height, fullTransactions))
+    );
+
+    const ethersBlocks = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return ethersBlocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
+    if (heights.length === 0) {
+      return [];
+    }
+
     const genesisHeight = 0;
     const hasGenesis = heights.includes(genesisHeight);
 
     if (hasGenesis) {
       // Get statistics for the genesis block (in Ethereum, this is block 0)
-      const genesisBlock = await this.rateLimiter.executeRequest<UniversalBlock>(() =>
-        this._httpClient.getBlock(genesisHeight, false)
+      const genesisBlock = await this.rateLimiter.executeRequest(() =>
+        this.executeWithFallback<any>((provider) => provider.getBlock(genesisHeight, false))
       );
 
       const genesisStats = {
-        number: genesisBlock.blockNumber,
-        hash: genesisBlock.hash,
-        size: genesisBlock.size || 0,
+        number: genesisBlock!.number,
+        hash: genesisBlock!.hash,
+        size: genesisBlock!.size || 0,
       };
 
       // Process the remaining blocks, excluding genesis
       const filteredHeights = heights.filter((height) => height !== genesisHeight);
-      const requestFns = filteredHeights.map((height) => () => this._httpClient.getBlock(height, false));
 
-      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+      if (filteredHeights.length === 0) {
+        return [genesisStats];
+      }
+
+      const requestFns = filteredHeights.map(
+        (height) => () => this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
+      );
+
+      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
       const stats = blocks
         .filter((block) => block !== null)
         .map((block: any) => ({
@@ -293,9 +352,11 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [genesisStats, ...stats];
     } else {
       // Process all blocks equally
-      const requestFns = heights.map((height) => () => this._httpClient.getBlock(height, false));
+      const requestFns = heights.map(
+        (height) => () => this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
+      );
 
-      const blocks = await this.rateLimiter.executeBatchRequests(requestFns);
+      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
       return blocks
         .filter((block) => block !== null)
         .map((block: any) => ({
@@ -309,7 +370,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   // ===== TRANSACTION METHODS =====
 
   public async getOneTransactionByHash(hash: Hash): Promise<UniversalTransaction> {
-    const ethersTx = await this.rateLimiter.executeRequest(() => this._httpClient.getTransaction(hash));
+    const ethersTx = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((provider) => provider.getTransaction(hash))
+    );
 
     if (!ethersTx) {
       throw new Error(`Transaction ${hash} not found`);
@@ -319,15 +382,24 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.getTransaction(hash));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const ethersTransactions = await this.rateLimiter.executeBatchRequests(requestFns);
+    // EthersJS doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map(
+      (hash) => () => this.executeWithFallback((provider) => provider.getTransaction(hash))
+    );
+
+    const ethersTransactions = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return ethersTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeTransaction(tx));
   }
 
   public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
-    const ethersReceipt = await this.rateLimiter.executeRequest(() => this._httpClient.getTransactionReceipt(hash));
+    const ethersReceipt = await this.rateLimiter.executeRequest(() =>
+      this.executeWithFallback((provider) => provider.getTransactionReceipt(hash))
+    );
 
     if (!ethersReceipt) {
       throw new Error(`Transaction receipt ${hash} not found`);
@@ -338,9 +410,16 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
-    const requestFns = hashes.map((hash) => () => this._httpClient.getTransactionReceipt(hash));
+    if (hashes.length === 0) {
+      return [];
+    }
 
-    const ethersReceipts = await this.rateLimiter.executeBatchRequests(requestFns);
+    // EthersJS doesn't support native batch requests, use sequential execution
+    const requestFns = hashes.map(
+      (hash) => () => this.executeWithFallback((provider) => provider.getTransactionReceipt(hash))
+    );
+
+    const ethersReceipts = await this.rateLimiter.executeSequentialRequests(requestFns);
 
     return ethersReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeReceipt(receipt));
   }

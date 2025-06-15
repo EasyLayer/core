@@ -5,6 +5,87 @@ describe('Web3jsProvider Normalization', () => {
   let provider: Web3jsProvider;
   let mockNetworkConfig: NetworkConfig;
 
+  // Mock factories for dynamic test data generation
+  const createMockWeb3Block = (overrides: any = {}) => ({
+    hash: '0xabc123',
+    parentHash: '0xdef456',
+    number: 12345n, // BigInt in v4
+    nonce: '0x0000000000000000',
+    sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
+    logsBloom: '0x00000000000000000000000000000000',
+    transactionsRoot: '0x789abc',
+    stateRoot: '0xstate123',
+    receiptsRoot: '0xreceipts456',
+    miner: '0xminer789',
+    difficulty: 1000000n, // BigInt in v4
+    totalDifficulty: 5000000n, // BigInt in v4
+    extraData: '0x',
+    size: 1024n, // BigInt in v4
+    gasLimit: 30000000n, // BigInt in v4
+    gasUsed: 15000000n, // BigInt in v4
+    timestamp: 1640995200n, // BigInt in v4
+    uncles: [],
+    baseFeePerGas: 20000000000n, // BigInt in v4
+    blobGasUsed: 131072n, // BigInt in v4
+    excessBlobGas: 0n, // BigInt in v4
+    parentBeaconBlockRoot: '0xbeacon123',
+    transactions: [],
+    ...overrides
+  });
+
+  const createMockWeb3Transaction = (overrides: any = {}) => ({
+    hash: '0xtx123',
+    nonce: 42n, // BigInt in v4
+    from: '0xfrom123',
+    to: '0xto456',
+    value: 1000000000000000000n, // BigInt in v4
+    gas: 21000n, // BigInt in v4
+    input: '0x',
+    blockHash: '0xblock123',
+    blockNumber: 12345n, // BigInt in v4
+    transactionIndex: 0n, // BigInt in v4
+    gasPrice: 20000000000n, // BigInt in v4
+    chainId: 1n, // BigInt in v4
+    v: 27n, // BigInt in v4
+    r: '0xr123',
+    s: '0xs456',
+    type: 0n, // BigInt in v4
+    ...overrides
+  });
+
+  const createMockWeb3Receipt = (overrides: any = {}) => ({
+    transactionHash: '0xtx123',
+    transactionIndex: 0n, // BigInt in v4
+    blockHash: '0xblock123',
+    blockNumber: 12345n, // BigInt in v4
+    from: '0xfrom123',
+    to: '0xto456',
+    cumulativeGasUsed: 21000n, // BigInt in v4
+    gasUsed: 21000n, // BigInt in v4
+    contractAddress: null,
+    logs: [],
+    logsBloom: '0x00000000000000000000000000000000',
+    status: true,
+    type: 2n, // BigInt in v4
+    effectiveGasPrice: 25000000000n, // BigInt in v4
+    blobGasUsed: 131072n, // BigInt in v4
+    blobGasPrice: 1000000000n, // BigInt in v4
+    ...overrides
+  });
+
+  const createMockWeb3Log = (overrides: any = {}) => ({
+    address: '0xcontract123',
+    topics: ['0xtopic1', '0xtopic2'],
+    data: '0xlogdata',
+    blockNumber: 12345n, // BigInt in v4
+    transactionHash: '0xtx123',
+    transactionIndex: 0n, // BigInt in v4
+    blockHash: '0xblock123',
+    logIndex: 0n, // BigInt in v4
+    removed: false,
+    ...overrides
+  });
+
   beforeEach(() => {
     mockNetworkConfig = {
       chainId: 1,
@@ -17,40 +98,15 @@ describe('Web3jsProvider Normalization', () => {
     };
 
     provider = new Web3jsProvider({
-        uniqName: 'w',
-        httpUrl: 'http://localhost:8545',
-        network: mockNetworkConfig,
+      uniqName: 'w',
+      httpUrl: 'http://localhost:8545',
+      network: mockNetworkConfig,
     });
   });
 
   describe('normalizeBlock', () => {
     it('should normalize web3 block with BigInt values', () => {
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 12345n, // BigInt in v4
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        difficulty: 1000000n, // BigInt in v4
-        totalDifficulty: 5000000n, // BigInt in v4
-        extraData: '0x',
-        size: 1024n, // BigInt in v4
-        gasLimit: 30000000n, // BigInt in v4
-        gasUsed: 15000000n, // BigInt in v4
-        timestamp: 1640995200n, // BigInt in v4
-        uncles: [],
-        baseFeePerGas: 20000000000n, // BigInt in v4
-        blobGasUsed: 131072n, // BigInt in v4
-        excessBlobGas: 0n, // BigInt in v4
-        parentBeaconBlockRoot: '0xbeacon123',
-        transactions: [],
-      };
-
+      const web3Block = createMockWeb3Block();
       const result = provider['normalizeBlock'](web3Block);
 
       expect(result).toEqual({
@@ -83,72 +139,35 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should handle blockNumber field preference over number', () => {
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        blockNumber: 12345n, // BigInt in v4
+      const web3Block = createMockWeb3Block({
+        blockNumber: 12345n,
         number: 67890n, // Should prefer blockNumber over number
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        extraData: '0x',
-      };
+      });
 
       const result = provider['normalizeBlock'](web3Block);
-
       expect(result.blockNumber).toBe(12345);
     });
 
     it('should fallback to number field when blockNumber is missing', () => {
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 67890n, // BigInt in v4
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        extraData: '0x',
-      };
+      const web3Block = createMockWeb3Block({
+        blockNumber: undefined,
+        number: 67890n,
+      });
 
       const result = provider['normalizeBlock'](web3Block);
-
       expect(result.blockNumber).toBe(67890);
     });
 
     it('should handle missing optional fields with defaults', () => {
-      const minimalBlock = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 12345n, // BigInt in v4
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        extraData: '0x',
-      };
+      const minimalBlock = createMockWeb3Block({
+        difficulty: undefined,
+        totalDifficulty: undefined,
+        size: undefined,
+        baseFeePerGas: undefined,
+        blobGasUsed: undefined,
+        excessBlobGas: undefined,
+        parentBeaconBlockRoot: undefined,
+      });
 
       const result = provider['normalizeBlock'](minimalBlock);
 
@@ -160,33 +179,13 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should normalize transactions in block when full objects provided', () => {
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 12345n,
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        extraData: '0x',
-        transactions: [{
-          hash: '0xtx123',
-          nonce: 42n, // BigInt in v4
-          from: '0xfrom123',
-          to: '0xto456',
-          value: 1000000000000000000n, // BigInt in v4
-          gas: 21000n, // BigInt in v4
-          input: '0x',
-          type: 2n, // BigInt in v4
-        }],
-      };
+      const mockTx = createMockWeb3Transaction({
+        type: 2n,
+      });
+
+      const web3Block = createMockWeb3Block({
+        transactions: [mockTx],
+      });
 
       const result = provider['normalizeBlock'](web3Block);
 
@@ -196,52 +195,39 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should handle transactions as hashes when not hydrated', () => {
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 12345n,
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        extraData: '0x',
+      const web3Block = createMockWeb3Block({
         transactions: ['0xtx123', '0xtx456'], // String hashes when not hydrated
-      };
+      });
+
+      const result = provider['normalizeBlock'](web3Block);
+      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+    });
+
+    it('should handle withdrawals in block', () => {
+      const withdrawals = [
+        {
+          index: '0x1',
+          validatorIndex: '0x2',
+          address: '0xvalidator1',
+          amount: '0x3b9aca00',
+        },
+      ];
+
+      const web3Block = createMockWeb3Block({
+        withdrawals,
+        withdrawalsRoot: '0xwithdrawalsroot123',
+      });
 
       const result = provider['normalizeBlock'](web3Block);
 
-      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+      expect(result.withdrawals).toEqual(withdrawals);
+      expect(result.withdrawalsRoot).toBe('0xwithdrawalsroot123');
     });
   });
 
   describe('normalizeTransaction', () => {
     it('should normalize Legacy transaction (type 0) with BigInt values', () => {
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: 42n, // BigInt in v4
-        from: '0xfrom123',
-        to: '0xto456',
-        value: 1000000000000000000n, // BigInt in v4
-        gas: 21000n, // BigInt in v4
-        input: '0x',
-        blockHash: '0xblock123',
-        blockNumber: 12345n, // BigInt in v4
-        transactionIndex: 0n, // BigInt in v4
-        gasPrice: 20000000000n, // BigInt in v4
-        chainId: 1n, // BigInt in v4
-        v: 27n, // BigInt in v4
-        r: '0xr123',
-        s: '0xs456',
-        type: 0n, // BigInt in v4
-      };
-
+      const web3Tx = createMockWeb3Transaction();
       const result = provider['normalizeTransaction'](web3Tx);
 
       expect(result).toEqual({
@@ -270,26 +256,14 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should normalize EIP-1559 transaction (type 2) with BigInt values', () => {
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: 42n,
-        from: '0xfrom123',
-        to: '0xto456',
-        value: 1000000000000000000n,
-        gas: 21000n,
-        input: '0x',
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        transactionIndex: 0n,
-        chainId: 1n,
-        maxFeePerGas: 30000000000n, // BigInt in v4
-        maxPriorityFeePerGas: 2000000000n, // BigInt in v4
+      const web3Tx = createMockWeb3Transaction({
+        gasPrice: undefined,
+        maxFeePerGas: 30000000000n,
+        maxPriorityFeePerGas: 2000000000n,
         v: 0n,
-        r: '0xr123',
-        s: '0xs456',
         type: 2n,
         accessList: [],
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
 
@@ -301,27 +275,17 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should normalize Blob transaction (type 3) with BigInt values', () => {
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: 42n,
-        from: '0xfrom123',
-        to: '0xto456',
+      const web3Tx = createMockWeb3Transaction({
         value: 0n,
-        gas: 21000n,
         input: '0xblobdata',
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        transactionIndex: 0n,
-        chainId: 1n,
+        gasPrice: undefined,
         maxFeePerGas: 30000000000n,
         maxPriorityFeePerGas: 2000000000n,
-        maxFeePerBlobGas: 1000000000n, // BigInt in v4
+        maxFeePerBlobGas: 1000000000n,
         blobVersionedHashes: ['0xblob1', '0xblob2'],
         v: 0n,
-        r: '0xr123',
-        s: '0xs456',
         type: 3n,
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
 
@@ -330,25 +294,16 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.blobVersionedHashes).toEqual(['0xblob1', '0xblob2']);
     });
 
-    it('should handle BigInt conversion', () => {
-      const web3Tx = {
-        hash: '0xtx123',
+    it('should handle BigInt conversion for large values', () => {
+      const web3Tx = createMockWeb3Transaction({
         nonce: 999n,
-        from: '0xfrom123',
-        to: '0xto456',
         value: 999999999999999999999999n, // Very large BigInt
         gas: 100000n,
-        input: '0x',
-        blockHash: '0xblock123',
         blockNumber: 999999n,
         transactionIndex: 55n,
         gasPrice: 50000000000n,
         chainId: 137n, // Polygon
-        v: 27n,
-        r: '0xr123',
-        s: '0xs456',
-        type: 0n,
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
 
@@ -362,20 +317,12 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should handle missing fields with defaults', () => {
-      const web3Tx = {
-        hash: '0xtx123',
+      const web3Tx = createMockWeb3Transaction({
         nonce: undefined,
-        from: '0xfrom123',
-        to: '0xto456',
         value: undefined,
-        gas: 21000n,
         input: undefined,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        transactionIndex: 0n,
-        chainId: 1n,
         type: undefined,
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
 
@@ -384,29 +331,63 @@ describe('Web3jsProvider Normalization', () => {
       expect(result.input).toBe('0x');
       expect(result.type).toBe('0');
     });
+
+    it('should handle gasLimit field mapping', () => {
+      const web3Tx = createMockWeb3Transaction({
+        gas: undefined,
+        gasLimit: 25000n,
+      });
+
+      const result = provider['normalizeTransaction'](web3Tx);
+      expect(result.gas).toBe(25000);
+    });
+
+    it('should handle zero BigInt values correctly', () => {
+      const web3Tx = createMockWeb3Transaction({
+        nonce: 0n,
+        value: 0n,
+        gasPrice: 0n,
+        chainId: 0n,
+        blockNumber: 0n,
+        transactionIndex: 0n,
+      });
+
+      const result = provider['normalizeTransaction'](web3Tx);
+
+      expect(result.nonce).toBe(0);
+      expect(result.value).toBe('0');
+      expect(result.blockNumber).toBe(0);
+      expect(result.transactionIndex).toBe(0);
+      expect(result.gasPrice).toBe('0');
+      expect(result.chainId).toBe(0);
+    });
+
+    it('should handle null and undefined values with BigInt fallbacks', () => {
+      const web3Tx = createMockWeb3Transaction({
+        nonce: null,
+        to: null,
+        value: null,
+        input: null,
+        gasPrice: null,
+        v: null,
+        r: null,
+        s: null,
+        type: null,
+      });
+
+      const result = provider['normalizeTransaction'](web3Tx);
+
+      expect(result.nonce).toBe(0);
+      expect(result.to).toBeNull();
+      expect(result.value).toBe('0');
+      expect(result.input).toBe('0x');
+      expect(result.type).toBe('0');
+    });
   });
 
   describe('normalizeReceipt', () => {
     it('should normalize web3 transaction receipt with BigInt values', () => {
-      const web3Receipt = {
-        transactionHash: '0xtx123',
-        transactionIndex: 0n, // BigInt in v4
-        blockHash: '0xblock123',
-        blockNumber: 12345n, // BigInt in v4
-        from: '0xfrom123',
-        to: '0xto456',
-        cumulativeGasUsed: 21000n, // BigInt in v4
-        gasUsed: 21000n, // BigInt in v4
-        contractAddress: null,
-        logs: [],
-        logsBloom: '0x00000000000000000000000000000000',
-        status: true,
-        type: 2n, // BigInt in v4
-        effectiveGasPrice: 25000000000n, // BigInt in v4
-        blobGasUsed: 131072n, // BigInt in v4
-        blobGasPrice: 1000000000n, // BigInt in v4
-      };
-
+      const web3Receipt = createMockWeb3Receipt();
       const result = provider['normalizeReceipt'](web3Receipt);
 
       expect(result).toEqual({
@@ -430,57 +411,23 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should handle failed transaction status', () => {
-      const web3Receipt = {
-        transactionHash: '0xtx123',
-        transactionIndex: 0n,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        from: '0xfrom123',
-        to: '0xto456',
-        cumulativeGasUsed: 21000n,
-        gasUsed: 21000n,
-        contractAddress: null,
-        logs: [],
-        logsBloom: '0x00000000000000000000000000000000',
+      const web3Receipt = createMockWeb3Receipt({
         status: false, // Failed transaction
         type: 0n,
         effectiveGasPrice: 20000000000n,
-      };
+        blobGasUsed: undefined,
+        blobGasPrice: undefined,
+      });
 
       const result = provider['normalizeReceipt'](web3Receipt);
-
       expect(result.status).toBe('0x0');
     });
 
     it('should normalize logs in receipt with BigInt values', () => {
-      const web3Receipt = {
-        transactionHash: '0xtx123',
-        transactionIndex: 0n,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        from: '0xfrom123',
-        to: '0xto456',
-        cumulativeGasUsed: 21000n,
-        gasUsed: 21000n,
-        contractAddress: null,
-        logs: [
-          {
-            address: '0xcontract123',
-            topics: ['0xtopic1', '0xtopic2'],
-            data: '0xlogdata',
-            blockNumber: 12345n, // BigInt in v4
-            transactionHash: '0xtx123',
-            transactionIndex: 0n, // BigInt in v4
-            blockHash: '0xblock123',
-            logIndex: 0n, // BigInt in v4
-            removed: false,
-          },
-        ],
-        logsBloom: '0x00000000000000000000000000000000',
-        status: true,
-        type: 2n,
-        effectiveGasPrice: 25000000000n,
-      };
+      const mockLog = createMockWeb3Log();
+      const web3Receipt = createMockWeb3Receipt({
+        logs: [mockLog],
+      });
 
       const result = provider['normalizeReceipt'](web3Receipt);
 
@@ -499,28 +446,42 @@ describe('Web3jsProvider Normalization', () => {
     });
 
     it('should handle large BigInt gas values', () => {
-      const web3Receipt = {
-        transactionHash: '0xtx123',
-        transactionIndex: 0n,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        from: '0xfrom123',
-        to: '0xto456',
+      const web3Receipt = createMockWeb3Receipt({
         cumulativeGasUsed: 999999999n, // Large BigInt
         gasUsed: 500000000n, // Large BigInt
-        contractAddress: null,
-        logs: [],
-        logsBloom: '0x00000000000000000000000000000000',
-        status: true,
-        type: 2n,
         effectiveGasPrice: 100000000000n, // 100 gwei as BigInt
-      };
+      });
 
       const result = provider['normalizeReceipt'](web3Receipt);
 
       expect(result.cumulativeGasUsed).toBe(999999999);
       expect(result.gasUsed).toBe(500000000);
       expect(result.effectiveGasPrice).toBe(100000000000);
+    });
+
+    it('should handle missing blob gas fields gracefully', () => {
+      const web3Receipt = createMockWeb3Receipt({
+        type: 0n,
+        blobGasUsed: undefined,
+        blobGasPrice: undefined,
+      });
+
+      const result = provider['normalizeReceipt'](web3Receipt);
+
+      expect(result.blobGasUsed).toBeUndefined();
+      expect(result.blobGasPrice).toBeUndefined();
+    });
+
+    it('should handle contract creation receipts', () => {
+      const web3Receipt = createMockWeb3Receipt({
+        to: null,
+        contractAddress: '0xnewcontract123',
+      });
+
+      const result = provider['normalizeReceipt'](web3Receipt);
+
+      expect(result.to).toBeNull();
+      expect(result.contractAddress).toBe('0xnewcontract123');
     });
   });
 
@@ -537,163 +498,25 @@ describe('Web3jsProvider Normalization', () => {
         },
       ];
 
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: 42n,
-        from: '0xfrom123',
-        to: '0xto456',
-        value: 1000000000000000000n,
-        gas: 21000n,
-        input: '0x',
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        transactionIndex: 0n,
-        chainId: 1n,
-        maxFeePerGas: 30000000000n,
-        maxPriorityFeePerGas: 2000000000n,
+      const web3Tx = createMockWeb3Transaction({
         type: 1n,
         accessList,
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
-
       expect(result.accessList).toEqual(accessList);
     });
 
-    it('should handle withdrawals in block', () => {
-      const withdrawals = [
-        {
-          index: '0x1',
-          validatorIndex: '0x2',
-          address: '0xvalidator1',
-          amount: '0x3b9aca00',
-        },
-      ];
-
-      const web3Block = {
-        hash: '0xabc123',
-        parentHash: '0xdef456',
-        number: 12345n,
-        nonce: '0x0000000000000000',
-        sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
-        logsBloom: '0x00000000000000000000000000000000',
-        transactionsRoot: '0x789abc',
-        stateRoot: '0xstate123',
-        receiptsRoot: '0xreceipts456',
-        miner: '0xminer789',
-        gasLimit: 30000000n,
-        gasUsed: 15000000n,
-        timestamp: 1640995200n,
-        uncles: [],
-        extraData: '0x',
-        withdrawals,
-        withdrawalsRoot: '0xwithdrawalsroot123',
-        transactions: [],
-      };
-
-      const result = provider['normalizeBlock'](web3Block);
-
-      expect(result.withdrawals).toEqual(withdrawals);
-      expect(result.withdrawalsRoot).toBe('0xwithdrawalsroot123');
-    });
-
-    it('should handle zero BigInt values correctly', () => {
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: 0n,
-        from: '0xfrom123',
-        to: '0xto456',
-        value: 0n,
-        gas: 21000n,
-        input: '0x',
-        blockHash: '0xblock123',
-        blockNumber: 0n,
-        transactionIndex: 0n,
-        gasPrice: 0n,
-        chainId: 0n,
-        type: 0n,
-      };
-
-      const result = provider['normalizeTransaction'](web3Tx);
-
-      expect(result.nonce).toBe(0);
-      expect(result.value).toBe('0');
-      expect(result.blockNumber).toBe(0);
-      expect(result.transactionIndex).toBe(0);
-      expect(result.gasPrice).toBe('0');
-      expect(result.chainId).toBe(0);
-    });
-
-    it('should handle missing blob gas fields gracefully', () => {
-      const web3Receipt = {
-        transactionHash: '0xtx123',
-        transactionIndex: 0n,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        from: '0xfrom123',
-        to: '0xto456',
-        cumulativeGasUsed: 21000n,
-        gasUsed: 21000n,
-        contractAddress: null,
-        logs: [],
-        logsBloom: '0x00000000000000000000000000000000',
-        status: true,
-        type: 0n,
-        effectiveGasPrice: 20000000000n,
-        // Missing blobGasUsed and blobGasPrice
-      };
-
-      const result = provider['normalizeReceipt'](web3Receipt);
-
-      expect(result.blobGasUsed).toBeUndefined();
-      expect(result.blobGasPrice).toBeUndefined();
-    });
-
-    it('should handle null and undefined values with BigInt fallbacks', () => {
-      const web3Tx = {
-        hash: '0xtx123',
-        nonce: null,
-        from: '0xfrom123',
-        to: null,
-        value: null,
-        gas: 21000n,
-        input: null,
-        blockHash: '0xblock123',
-        blockNumber: 12345n,
-        transactionIndex: 0n,
-        gasPrice: null,
-        chainId: 1n,
-        v: null,
-        r: null,
-        s: null,
-        type: null,
-      };
-
-      const result = provider['normalizeTransaction'](web3Tx);
-
-      expect(result.nonce).toBe(0);
-      expect(result.to).toBeNull();
-      expect(result.value).toBe('0');
-      expect(result.input).toBe('0x');
-      expect(result.type).toBe('0');
-    });
-
     it('should handle very large BigInt numbers', () => {
-      const web3Tx = {
-        hash: '0xtx123',
+      const web3Tx = createMockWeb3Transaction({
         nonce: 99999999999999999999n, // Very large BigInt
-        from: '0xfrom123',
-        to: '0xto456',
         value: 123456789012345678901234567890n, // Extremely large BigInt
         gas: 99999999n,
-        input: '0x',
-        blockHash: '0xblock123',
         blockNumber: 99999999999n,
         transactionIndex: 99999n,
         gasPrice: 999999999999999999999n, // Very large BigInt
         chainId: 999999n,
-        type: 0n,
-      };
+      });
 
       const result = provider['normalizeTransaction'](web3Tx);
 
@@ -704,6 +527,82 @@ describe('Web3jsProvider Normalization', () => {
       expect(typeof result.chainId).toBe('number');
       expect(result.value).toBe('123456789012345678901234567890');
       expect(result.gasPrice).toBe('999999999999999999999');
+    });
+
+    it('should handle complex log structure with BigInt fields', () => {
+      const complexLog = createMockWeb3Log({
+        topics: ['0xtopic1', '0xtopic2', '0xtopic3', '0xtopic4'],
+        data: '0x' + 'a'.repeat(128), // 64 bytes of data
+        logIndex: 5n,
+        removed: true,
+      });
+
+      const web3Receipt = createMockWeb3Receipt({
+        logs: [complexLog],
+      });
+
+      const result = provider['normalizeReceipt'](web3Receipt);
+
+      expect(result.logs[0]!.topics).toHaveLength(4);
+      expect(result.logs[0]!.logIndex).toBe(5);
+      expect(result.logs[0]!.removed).toBe(true);
+    });
+
+    it('should handle mixed transaction types in block', () => {
+      const legacyTx = createMockWeb3Transaction({
+        hash: '0xtx1',
+        type: 0n,
+        gasPrice: 20000000000n,
+        maxFeePerGas: undefined,
+      });
+
+      const eip1559Tx = createMockWeb3Transaction({
+        hash: '0xtx2',
+        type: 2n,
+        gasPrice: undefined,
+        maxFeePerGas: 30000000000n,
+        maxPriorityFeePerGas: 2000000000n,
+      });
+
+      const web3Block = createMockWeb3Block({
+        transactions: [legacyTx, eip1559Tx],
+      });
+
+      const result = provider['normalizeBlock'](web3Block);
+
+      expect(result.transactions).toHaveLength(2);
+      expect(result.transactions![0]!.type).toBe('0');
+      expect(result.transactions![0]!.gasPrice).toBe('20000000000');
+      expect(result.transactions![1]!.type).toBe('2');
+      expect(result.transactions![1]!.maxFeePerGas).toBe('30000000000');
+    });
+
+    it('should handle empty arrays and null values', () => {
+      const web3Block = createMockWeb3Block({
+        transactions: [],
+        uncles: [],
+        withdrawals: null,
+      });
+
+      const result = provider['normalizeBlock'](web3Block);
+
+      expect(result.transactions).toEqual([]);
+      expect(result.uncles).toEqual([]);
+      expect(result.withdrawals).toBeNull();
+    });
+
+    it('should handle undefined blockNumber and transactionIndex in pending transactions', () => {
+      const pendingTx = createMockWeb3Transaction({
+        blockHash: null,
+        blockNumber: undefined,
+        transactionIndex: undefined,
+      });
+
+      const result = provider['normalizeTransaction'](pendingTx);
+
+      expect(result.blockHash).toBeNull();
+      expect(result.blockNumber).toBeUndefined();
+      expect(result.transactionIndex).toBeUndefined();
     });
   });
 });
