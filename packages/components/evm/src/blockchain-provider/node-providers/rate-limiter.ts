@@ -16,9 +16,9 @@ import type { RateLimits } from './interfaces';
  * - Batch helps with network efficiency but doesn't reduce API credit usage
  */
 export const DEFAULT_RATE_LIMITS: Required<RateLimits> = {
-  maxRequestsPerSecond: 12, // For parallel individual requests (stay under 15 RPS)
-  maxConcurrentRequests: 12, // Allow parallel processing for individual requests
-  maxBatchSize: 50, // Large batch size for batch requests (sent 1 per second)
+  maxRequestsPerSecond: 10, // For parallel individual requests (stay under 15 RPS)
+  maxConcurrentRequests: 10, // Allow parallel processing for individual requests
+  maxBatchSize: 10, // Large batch size for batch requests (sent 1 per second)
 };
 
 export class RateLimiter {
@@ -92,8 +92,8 @@ export class RateLimiter {
    * - This allows efficient bulk operations while respecting rate limits
    *
    * Example: 100 transaction hashes
-   * - Batch 1: 50 RPC calls → sent → wait 1 second
-   * - Batch 2: 50 RPC calls → sent
+   * - Batch 1: 8 RPC calls → sent → wait 1 second
+   * - Batch 2: 8 RPC calls → sent
    * Total: ~1 second for 100 calls using batching
    */
   async executeBatchRequests<T>(items: any[], batchRequestFn: (batchItems: any[]) => Promise<T[]>): Promise<T[]> {
