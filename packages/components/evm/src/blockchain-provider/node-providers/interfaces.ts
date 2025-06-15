@@ -3,7 +3,6 @@ export type Hash = `0x${string}`;
 export const enum NodeProviderTypes {
   ETHERJS = 'ethersjs',
   WEB3JS = 'web3js',
-  JSON_RPC = 'jsonrpc',
 }
 
 export interface RateLimits {
