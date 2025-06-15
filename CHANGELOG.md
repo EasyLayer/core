@@ -1,3 +1,9 @@
+## <small>0.7.4 (2025-06-15)</small>
+
+* refactor: fixed rate limiter for base params; fixed connection providers mamanger logic; ([104f99a](https://github.com/EasyLayer/core/commit/104f99a))
+
+
+
 ## <small>0.7.3 (2025-06-15)</small>
 
 * refactor: fixed rate limiter for batch requests; ([44ea1b9](https://github.com/EasyLayer/core/commit/44ea1b9))
