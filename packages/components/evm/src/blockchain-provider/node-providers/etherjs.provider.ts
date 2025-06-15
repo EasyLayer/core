@@ -107,7 +107,18 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     let response: Response;
     if (this.isWebSocketConnected && this._wsClient && this._wsClient.websocket?.readyState === WebSocket.OPEN) {
       // For WebSocket, we need to implement the batch manually
-      return Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
+      const results = await Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
+      // Filter out null/undefined results and handle errors
+      const processedResults = results.map((result: any) => {
+        if (result === null || result === undefined) {
+          return null;
+        }
+        if (result && result.error) {
+          throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
+        }
+        return result;
+      });
+      return Array.isArray(processedResults) ? processedResults : [];
     } else {
       // Use HTTP for batch requests
       response = await fetch(this.httpUrl, {
@@ -124,12 +135,18 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       }
 
       const results = await response.json();
-      return results.map((result: any) => {
+      // Handle both array and single response cases
+      const resultsArray = Array.isArray(results) ? results : [results];
+      const processedResults = resultsArray.map((result: any) => {
+        if (result === null || result === undefined) {
+          return null;
+        }
         if (result.error) {
           throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
         }
         return result.result;
       });
+      return Array.isArray(processedResults) ? processedResults : [];
     }
   }
 
@@ -523,18 +540,33 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    // Create batch function for direct JSON-RPC batch calls
     const batchRequestFn = async (batchHashes: string[]): Promise<UniversalBlock[]> => {
       const calls = batchHashes.map((hash) => ({
         method: 'eth_getBlockByHash',
         params: [hash, fullTransactions],
       }));
 
-      const rawBlocks = await this.directBatchRpcCall(calls);
-      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeEthersBlock(block));
+      try {
+        const rawBlocks = await this.directBatchRpcCall(calls);
+        // Ensure rawBlocks is an array
+        if (!Array.isArray(rawBlocks)) {
+          throw new Error('directBatchRpcCall did not return an array');
+        }
+        return rawBlocks
+          .filter((block) => block !== null && block !== undefined && !block.error)
+          .map((block) => {
+            try {
+              return this.normalizeEthersBlock(block);
+            } catch (normalizeError) {
+              return null;
+            }
+          })
+          .filter((block): block is UniversalBlock => block !== null);
+      } catch (batchError) {
+        throw batchError;
+      }
     };
 
-    // Use rate limiter for batch requests
     return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
@@ -543,18 +575,33 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    // Create batch function for direct JSON-RPC batch calls
     const batchRequestFn = async (batchHeights: number[]): Promise<UniversalBlock[]> => {
       const calls = batchHeights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, fullTransactions],
       }));
 
-      const rawBlocks = await this.directBatchRpcCall(calls);
-      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeEthersBlock(block));
+      try {
+        const rawBlocks = await this.directBatchRpcCall(calls);
+        // Ensure rawBlocks is an array
+        if (!Array.isArray(rawBlocks)) {
+          throw new Error('directBatchRpcCall did not return an array');
+        }
+        return rawBlocks
+          .filter((block) => block !== null && block !== undefined && !block.error)
+          .map((block) => {
+            try {
+              return this.normalizeEthersBlock(block);
+            } catch (normalizeError) {
+              return null;
+            }
+          })
+          .filter((block): block is UniversalBlock => block !== null);
+      } catch (batchError) {
+        throw batchError;
+      }
     };
 
-    // Use rate limiter for batch requests
     return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
@@ -563,21 +610,35 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    // Create batch function for direct JSON-RPC batch calls
     const batchRequestFn = async (batchHeights: number[]): Promise<any[]> => {
       const calls = batchHeights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, false],
       }));
 
-      const rawBlocks = await this.directBatchRpcCall(calls);
-      return rawBlocks
-        .filter((block) => block !== null)
-        .map((block: any) => ({
-          number: parseInt(block.number || block.blockNumber, 16),
-          hash: block.hash,
-          size: parseInt(block.size, 16),
-        }));
+      try {
+        const rawBlocks = await this.directBatchRpcCall(calls);
+        // Ensure rawBlocks is an array
+        if (!Array.isArray(rawBlocks)) {
+          throw new Error('directBatchRpcCall did not return an array');
+        }
+        return rawBlocks
+          .filter((block) => block !== null && block !== undefined && !block.error)
+          .map((block: any) => {
+            try {
+              return {
+                number: parseInt(block.number || block.blockNumber, 16),
+                hash: block.hash,
+                size: parseInt(block.size, 16),
+              };
+            } catch (parseError) {
+              return null;
+            }
+          })
+          .filter((stat): stat is any => stat !== null);
+      } catch (batchError) {
+        throw batchError;
+      }
     };
 
     return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
@@ -609,8 +670,25 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
         params: [hash],
       }));
 
-      const rawTransactions = await this.directBatchRpcCall(calls);
-      return rawTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeRawTransaction(tx));
+      try {
+        const rawTransactions = await this.directBatchRpcCall(calls);
+        // Ensure rawTransactions is an array
+        if (!Array.isArray(rawTransactions)) {
+          throw new Error('directBatchRpcCall did not return an array');
+        }
+        return rawTransactions
+          .filter((tx) => tx !== null && tx !== undefined && !tx.error)
+          .map((tx) => {
+            try {
+              return this.normalizeRawTransaction(tx);
+            } catch (normalizeError) {
+              return null;
+            }
+          })
+          .filter((tx): tx is UniversalTransaction => tx !== null);
+      } catch (batchError) {
+        throw batchError;
+      }
     };
 
     return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
@@ -640,8 +718,25 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
         params: [hash],
       }));
 
-      const rawReceipts = await this.directBatchRpcCall(calls);
-      return rawReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeRawReceipt(receipt));
+      try {
+        const rawReceipts = await this.directBatchRpcCall(calls);
+        // Ensure rawReceipts is an array
+        if (!Array.isArray(rawReceipts)) {
+          throw new Error('directBatchRpcCall did not return an array');
+        }
+        return rawReceipts
+          .filter((receipt) => receipt !== null && receipt !== undefined && !receipt.error)
+          .map((receipt) => {
+            try {
+              return this.normalizeRawReceipt(receipt);
+            } catch (normalizeError) {
+              return null;
+            }
+          })
+          .filter((receipt): receipt is UniversalTransactionReceipt => receipt !== null);
+      } catch (batchError) {
+        throw batchError;
+      }
     };
 
     return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);

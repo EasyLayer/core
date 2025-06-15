@@ -2,14 +2,15 @@ import Bottleneck from 'bottleneck';
 import type { RateLimits } from './interfaces';
 
 // Default rate limit configuration based on QuickNode Free plan (15 RPS)
+// QuickNode counts batch requests as 1 HTTP request regardless of batch size
 export const DEFAULT_RATE_LIMITS: Required<RateLimits> = {
-  maxRequestsPerSecond: 12, // Slightly below QuickNode Free plan limit (15 RPS) to have buffer
-  maxConcurrentRequests: 10, // Allow more concurrent requests
-  maxBatchSize: 25, // RPC batch size - how many items in one JSON-RPC batch call
+  maxRequestsPerSecond: 10, // Conservative buffer below 15 RPS limit
+  maxConcurrentRequests: 1, // Sequential requests only to avoid burst
+  maxBatchSize: 50, // Batch size - QuickNode counts entire batch as 1 request
 };
 
-// Hardcoded batch delay
-const BATCH_DELAY = 50; // ms between batch requests
+// Delay between batch requests for extra safety
+const BATCH_DELAY = 100; // ms between batch requests
 
 export class RateLimiter {
   private limiter: Bottleneck;
@@ -23,13 +24,13 @@ export class RateLimiter {
       maxBatchSize: config.maxBatchSize ?? DEFAULT_RATE_LIMITS.maxBatchSize,
     };
 
-    // Configure Bottleneck
+    // Configure Bottleneck for strict sequential processing
     this.limiter = new Bottleneck({
       maxConcurrent: this.config.maxConcurrentRequests,
-      minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond), // Convert RPS to minTime
-      reservoir: this.config.maxRequestsPerSecond, // Start with full reservoir
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond, // Refill amount
-      reservoirRefreshInterval: 1000, // Refill every second
+      minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond), // Minimum time between requests
+      reservoir: 1, // Start with 1 available request
+      reservoirRefreshAmount: 1, // Refill 1 request at a time
+      reservoirRefreshInterval: Math.ceil(1000 / this.config.maxRequestsPerSecond), // Refill interval
     });
   }
 
@@ -62,7 +63,7 @@ export class RateLimiter {
         const batchResults = await this.executeRequest(() => batchRequestFn(batch!));
         results.push(...batchResults);
 
-        // Delay between batches (except last one)
+        // Delay between batches (except last one) for extra safety
         if (i < batches.length - 1 && BATCH_DELAY > 0) {
           await this.delay(BATCH_DELAY);
         }
@@ -195,9 +196,9 @@ export class RateLimiter {
     this.limiter = new Bottleneck({
       maxConcurrent: this.config.maxConcurrentRequests,
       minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond),
-      reservoir: this.config.maxRequestsPerSecond,
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond,
-      reservoirRefreshInterval: 1000,
+      reservoir: 1,
+      reservoirRefreshAmount: 1,
+      reservoirRefreshInterval: Math.ceil(1000 / this.config.maxRequestsPerSecond),
     });
   }
 
@@ -209,9 +210,9 @@ export class RateLimiter {
     this.limiter = new Bottleneck({
       maxConcurrent: this.config.maxConcurrentRequests,
       minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond),
-      reservoir: this.config.maxRequestsPerSecond,
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond,
-      reservoirRefreshInterval: 1000,
+      reservoir: 1,
+      reservoirRefreshAmount: 1,
+      reservoirRefreshInterval: Math.ceil(1000 / this.config.maxRequestsPerSecond),
     });
   }
 }
