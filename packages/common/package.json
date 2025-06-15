@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "0.6.19",
+  "version": "0.6.20",
   "description": "",
   "type": "commonjs",
   "main": "./index.js",
