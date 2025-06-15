@@ -1,3 +1,9 @@
+## <small>0.7.5 (2025-06-15)</small>
+
+* refactor: fixed blocks loading batching and concurrency; ([2a6046c](https://github.com/EasyLayer/core/commit/2a6046c))
+
+
+
 ## <small>0.7.4 (2025-06-15)</small>
 
 * refactor: fixed rate limiter for base params; fixed connection providers mamanger logic; ([104f99a](https://github.com/EasyLayer/core/commit/104f99a))
