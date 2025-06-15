@@ -24,6 +24,10 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   private isWebSocketConnected = false;
   private network: NetworkConfig;
   private rateLimiter: RateLimiter;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private requestId = 1;
 
   constructor(options: Web3jsProviderOptions) {
     super(options);
@@ -31,7 +35,6 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     this.httpUrl = url.toString();
     this._httpClient = new Web3(new Web3.providers.HttpProvider(this.httpUrl));
     this.wsUrl = options.wsUrl;
-
     this.network = options.network;
 
     // Initialize rate limiter with network config
@@ -91,6 +94,71 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   /**
+   * Makes direct JSON-RPC batch call for better performance
+   */
+  private async directBatchRpcCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    const payload = calls.map((call) => ({
+      jsonrpc: '2.0',
+      method: call.method,
+      params: call.params,
+      id: this.requestId++,
+    }));
+
+    // Use WebSocket if available, otherwise HTTP
+    if (this.isWebSocketConnected && this._wsClient) {
+      const wsProvider = this._wsClient.currentProvider;
+      if (wsProvider && typeof wsProvider.send === 'function') {
+        // Use Web3.js batch request capabilities
+        return new Promise((resolve, reject) => {
+          const batch = new this._wsClient.BatchRequest();
+          const results: any[] = [];
+          let completedCount = 0;
+
+          calls.forEach((call, index) => {
+            batch.add(
+              this._wsClient.eth[call.method.replace('eth_', 'get')](...call.params, (error: any, result: any) => {
+                if (error) {
+                  reject(error);
+                  return;
+                }
+                results[index] = result;
+                completedCount++;
+                if (completedCount === calls.length) {
+                  resolve(results);
+                }
+              })
+            );
+          });
+
+          batch.execute();
+        });
+      }
+    }
+
+    // Fallback to HTTP batch request
+    const response = await fetch(this.httpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const results = await response.json();
+    return results.map((result: any) => {
+      if (result.error) {
+        throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
+      }
+      return result.result;
+    });
+  }
+
+  /**
    * Checks if WebSocket connection is healthy
    */
   public async healthcheckWebSocket(): Promise<boolean> {
@@ -99,6 +167,13 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     }
 
     try {
+      // Check if WebSocket provider is still connected
+      const provider = this._wsClient.currentProvider;
+      if (provider && provider.connection && provider.connection.readyState !== WebSocket.OPEN) {
+        this.isWebSocketConnected = false;
+        return false;
+      }
+
       // Simple check - try to get block number via WebSocket
       await this._wsClient.eth.getBlockNumber();
       return true;
@@ -114,6 +189,18 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       throw new Error('Cannot connect to the Web3js node');
     }
 
+    // Validate chainId after connection
+    try {
+      const connectedChainId = await this._httpClient.eth.getChainId();
+      const expectedChainId = this.network.chainId;
+
+      if (Number(connectedChainId) !== expectedChainId) {
+        throw new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${connectedChainId}`);
+      }
+    } catch (error) {
+      throw new Error(`Chain validation failed: ${error}`);
+    }
+
     // Connect WebSocket if URL is provided
     if (this.wsUrl) {
       await this.connectWebSocket();
@@ -121,19 +208,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   }
 
   public async disconnect(): Promise<void> {
-    this.isWebSocketConnected = false;
-
-    if (this._wsClient) {
-      const provider = this._wsClient.currentProvider;
-      if (provider && typeof provider.disconnect === 'function') {
-        try {
-          provider.disconnect(1000, 'Client disconnecting');
-        } catch (error) {
-          // Ignore disconnection errors
-        }
-      }
-      this._wsClient = undefined;
-    }
+    await this.disconnectWebSocket();
   }
 
   /**
@@ -141,24 +216,92 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
    * This method is called by ConnectionManager when WebSocket health check fails
    */
   public async reconnectWebSocket(): Promise<void> {
-    // Disconnect existing WebSocket first
-    if (this._wsClient) {
-      const provider = this._wsClient.currentProvider;
-      if (provider && typeof provider.disconnect === 'function') {
-        try {
-          provider.disconnect(1000, 'Reconnecting');
-        } catch (error) {
-          // Ignore disconnection errors
-        }
-      }
-      this._wsClient = undefined;
-      this.isWebSocketConnected = false;
-    }
+    try {
+      // First, safely disconnect existing WebSocket
+      await this.disconnectWebSocket();
 
-    // Establish new WebSocket connection
-    if (this.wsUrl) {
-      await this.connectWebSocket();
+      // Add a small delay before reconnecting to avoid rapid reconnection attempts
+      await new Promise((resolve) => setTimeout(resolve, this.reconnectDelay));
+
+      // Check if we haven't exceeded max reconnection attempts
+      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        throw new Error(`Max reconnection attempts (${this.maxReconnectAttempts}) exceeded`);
+      }
+
+      // Increment reconnection attempts counter
+      this.reconnectAttempts++;
+
+      // Establish new WebSocket connection
+      if (this.wsUrl) {
+        await this.connectWebSocket();
+      } else {
+        throw new Error('WebSocket URL not available for reconnection');
+      }
+    } catch (error) {
+      // Exponential backoff for reconnection delay
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Max 30 seconds
+
+      throw error;
     }
+  }
+
+  /**
+   * Safely disconnects WebSocket connection
+   */
+  private async disconnectWebSocket(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      // Mark WebSocket as disconnected immediately
+      this.isWebSocketConnected = false;
+
+      if (this._wsClient) {
+        const provider = this._wsClient.currentProvider;
+
+        // Set up one-time close handler for cleanup
+        const handleClose = () => {
+          this._wsClient = undefined;
+          resolve();
+        };
+
+        if (provider && typeof provider.disconnect === 'function') {
+          try {
+            // Add temporary close listener
+            provider.on('close', handleClose);
+
+            // Attempt graceful close
+            provider.disconnect(1000, 'Client disconnecting');
+          } catch (error) {
+            // Force cleanup on error
+            provider.removeListener('close', handleClose);
+            this._wsClient = undefined;
+            resolve();
+          }
+
+          // Timeout to prevent hanging on close
+          setTimeout(() => {
+            if (this._wsClient) {
+              provider.removeListener('close', handleClose);
+              this._wsClient = undefined;
+              resolve();
+            }
+          }, 5000);
+        } else {
+          // No proper disconnect method
+          this._wsClient = undefined;
+          resolve();
+        }
+      } else {
+        // No WebSocket to disconnect
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * Resets reconnection state after successful connection
+   */
+  private resetReconnectionState(): void {
+    this.reconnectAttempts = 0;
+    this.reconnectDelay = 1000; // Reset to initial delay
   }
 
   private async connectWebSocket(): Promise<void> {
@@ -167,72 +310,242 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     }
 
     return new Promise<void>((resolve, reject) => {
-      const wsProviderOptions: any = {
-        reconnect: {
-          auto: false, // ConnectionManager handles reconnection
-          delay: 1000,
-          maxAttempts: 1,
-        },
-      };
+      let isResolved = false;
+      let timeoutId: NodeJS.Timeout;
 
-      const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl!, wsProviderOptions);
-      this._wsClient = new Web3(wsProvider);
+      try {
+        const wsProviderOptions: any = {
+          reconnect: {
+            auto: false, // ConnectionManager handles reconnection
+            delay: 1000,
+            maxAttempts: 1,
+          },
+        };
 
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('WebSocket connection timeout'));
-      }, 10000);
+        const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl!, wsProviderOptions);
+        this._wsClient = new Web3(wsProvider);
 
-      const handleOpen = async () => {
-        try {
-          // Validate chainId after connection (Web3.js doesn't do this automatically)
-          const connectedChainId = await this._wsClient.eth.getChainId();
-          const expectedChainId = this.network.chainId;
-
-          if (Number(connectedChainId) !== expectedChainId) {
-            this.isWebSocketConnected = false;
-            clearTimeout(timeout);
+        timeoutId = setTimeout(() => {
+          if (!isResolved) {
+            isResolved = true;
             cleanup();
-            reject(new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${connectedChainId}`));
-            return;
+            reject(new Error('WebSocket connection timeout'));
           }
+        }, 10000);
 
-          this.isWebSocketConnected = true;
-          clearTimeout(timeout);
-          cleanup();
-          resolve();
-        } catch (error) {
+        const handleOpen = async () => {
+          if (isResolved) return;
+
+          try {
+            // Small delay for stabilization
+            await new Promise((resolve) => setTimeout(resolve, 100));
+
+            // Validate chainId after connection (Web3.js doesn't do this automatically)
+            const connectedChainId = await this._wsClient.eth.getChainId();
+            const expectedChainId = this.network.chainId;
+
+            if (Number(connectedChainId) !== expectedChainId) {
+              if (!isResolved) {
+                isResolved = true;
+                this.isWebSocketConnected = false;
+                clearTimeout(timeoutId);
+                cleanup();
+                reject(new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${connectedChainId}`));
+              }
+              return;
+            }
+
+            if (!isResolved) {
+              isResolved = true;
+              this.isWebSocketConnected = true;
+              this.resetReconnectionState();
+              clearTimeout(timeoutId);
+              cleanup();
+              resolve();
+            }
+          } catch (error) {
+            if (!isResolved) {
+              isResolved = true;
+              this.isWebSocketConnected = false;
+              clearTimeout(timeoutId);
+              cleanup();
+              reject(new Error(`WebSocket validation error: ${error}`));
+            }
+          }
+        };
+
+        const handleError = (error: any) => {
+          if (!isResolved) {
+            isResolved = true;
+            this.isWebSocketConnected = false;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(new Error(`WebSocket connection error: ${error.message || error}`));
+          }
+        };
+
+        const handleClose = (event: CloseEvent) => {
           this.isWebSocketConnected = false;
-          clearTimeout(timeout);
-          cleanup();
-          reject(new Error(`WebSocket validation error: ${error}`));
-        }
-      };
 
-      const handleError = (error: any) => {
+          // If connection closed during connection setup
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(new Error(`WebSocket closed during connection: ${event.code} ${event.reason || 'Unknown reason'}`));
+          }
+        };
+
+        const cleanup = () => {
+          wsProvider.removeListener('connect', handleOpen);
+          wsProvider.removeListener('error', handleError);
+          wsProvider.removeListener('close', handleClose);
+          wsProvider.removeListener('end', handleClose);
+        };
+
+        wsProvider.on('connect', handleOpen);
+        wsProvider.on('error', handleError);
+        wsProvider.on('close', handleClose);
+        wsProvider.on('end', handleClose);
+      } catch (error) {
+        isResolved = true;
         this.isWebSocketConnected = false;
-        clearTimeout(timeout);
-        cleanup();
-        reject(new Error(`WebSocket connection error: ${error.message || error}`));
-      };
-
-      const handleClose = () => {
-        this.isWebSocketConnected = false;
-        // Don't reject here - ConnectionManager will handle reconnection
-      };
-
-      const cleanup = () => {
-        wsProvider.removeListener('connect', handleOpen);
-        wsProvider.removeListener('error', handleError);
-        wsProvider.removeListener('close', handleClose);
-        wsProvider.removeListener('end', handleClose);
-      };
-
-      wsProvider.on('connect', handleOpen);
-      wsProvider.on('error', handleError);
-      wsProvider.on('close', handleClose);
-      wsProvider.on('end', handleClose);
+        reject(error);
+      }
     });
+  }
+
+  // ===== SUBSCRIPTION METHODS =====
+
+  /**
+   * Subscribes to new block events via WebSocket
+   * Returns a subscription object with unsubscribe method
+   */
+  public subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    let subscription: any = null;
+
+    // Use Web3.js native block subscription
+    this._wsClient.eth
+      .subscribe('newBlockHeaders')
+      .then((sub: any) => {
+        subscription = sub;
+
+        sub.on('data', (blockHeader: any) => {
+          callback(Number(blockHeader.number));
+        });
+
+        sub.on('error', (error: any) => {
+          // console.error('Web3.js block subscription error:', error);
+          return;
+        });
+      })
+      .catch((error: any) => {
+        throw error;
+      });
+
+    return {
+      unsubscribe: () => {
+        if (subscription) {
+          subscription.unsubscribe((error: any, success: boolean) => {
+            // if (error) {
+            //   console.warn('Error unsubscribing from Web3.js blocks:', error);
+            // }
+          });
+        }
+      },
+    };
+  }
+
+  /**
+   * Subscribes to new pending transactions via WebSocket
+   */
+  public subscribeToPendingTransactions(callback: (txHash: string) => void): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    let subscription: any = null;
+
+    // Use Web3.js native pending transaction subscription
+    this._wsClient.eth
+      .subscribe('pendingTransactions')
+      .then((sub: any) => {
+        subscription = sub;
+
+        sub.on('data', (txHash: string) => {
+          callback(txHash);
+        });
+
+        sub.on('error', (error: any) => {
+          // console.error('Web3.js pending transactions subscription error:', error);
+          return;
+        });
+      })
+      .catch((error: any) => {
+        throw error;
+      });
+
+    return {
+      unsubscribe: () => {
+        if (subscription) {
+          subscription.unsubscribe((error: any, success: boolean) => {
+            // if (error) {
+            //   console.warn('Error unsubscribing from Web3.js pending transactions:', error);
+            // }
+          });
+        }
+      },
+    };
+  }
+
+  /**
+   * Subscribes to contract logs via WebSocket
+   */
+  public subscribeToLogs(
+    options: {
+      address?: string | string[];
+      topics?: (string | string[] | null)[];
+    },
+    callback: (log: any) => void
+  ): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    let subscription: any = null;
+
+    // Use Web3.js native logs subscription
+    this._wsClient.eth
+      .subscribe('logs', options)
+      .then((sub: any) => {
+        subscription = sub;
+
+        sub.on('data', callback);
+
+        sub.on('error', (error: any) => {
+          // console.error('Web3.js logs subscription error:', error);
+          return;
+        });
+      })
+      .catch((error: any) => {
+        throw error;
+      });
+
+    return {
+      unsubscribe: () => {
+        if (subscription) {
+          subscription.unsubscribe((error: any, success: boolean) => {
+            // if (error) {
+            //   console.warn('Error unsubscribing from Web3.js logs:', error);
+            // }
+          });
+        }
+      },
+    };
   }
 
   // ===== BLOCK METHODS =====
@@ -280,31 +593,25 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     return this.normalizeBlock(web3Block);
   }
 
+  // Use batch RPC for multiple blocks
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // Web3.js doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map(
-      (hash) => () => this.executeWithFallback((web3) => web3.eth.getBlock(hash, fullTransactions))
-    );
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalBlock[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getBlockByHash',
+        params: [hash, fullTransactions],
+      }));
 
-    const web3Blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+    };
 
-    return web3Blocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
-  }
-
-  public async getManyHashesByHeights(heights: number[]): Promise<string[]> {
-    if (heights.length === 0) {
-      return [];
-    }
-
-    // Web3.js doesn't support native batch requests, use sequential execution
-    const requestFns = heights.map((height) => () => this.executeWithFallback((web3) => web3.eth.getBlock(height)));
-
-    const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
-    return blocks.map((block: any) => block.hash).filter((hash): hash is string => !!hash);
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
@@ -312,14 +619,19 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    // Web3.js doesn't support native batch requests, use sequential execution
-    const requestFns = heights.map(
-      (height) => () => this.executeWithFallback((web3) => web3.eth.getBlock(height, fullTransactions))
-    );
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<UniversalBlock[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, fullTransactions],
+      }));
 
-    const web3Blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeRawBlock(block));
+    };
 
-    return web3Blocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
@@ -327,57 +639,24 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    const genesisHeight = 0;
-    const hasGenesis = heights.includes(genesisHeight);
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<any[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, false],
+      }));
 
-    if (hasGenesis) {
-      // Get statistics for the genesis block
-      const genesisBlock = await this.rateLimiter.executeRequest(() =>
-        this.executeWithFallback<any>((web3) => web3.eth.getBlock(genesisHeight, false))
-      );
-
-      const genesisStats = {
-        number: Number(genesisBlock.blockNumber || genesisBlock.number),
-        hash: genesisBlock.hash,
-        size: Number(genesisBlock.size) || 0,
-      };
-
-      // Process the remaining blocks, excluding genesis
-      const filteredHeights = heights.filter((height) => height !== genesisHeight);
-
-      if (filteredHeights.length === 0) {
-        return [genesisStats];
-      }
-
-      const requestFns = filteredHeights.map(
-        (height) => () => this.executeWithFallback<any>((web3) => web3.eth.getBlock(height, false))
-      );
-
-      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
-      const stats = blocks
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks
         .filter((block) => block !== null)
         .map((block: any) => ({
-          number: Number(block.number),
+          number: parseInt(block.number || block.blockNumber, 16),
           hash: block.hash,
-          size: Number(block.size) || 0,
+          size: parseInt(block.size, 16),
         }));
+    };
 
-      return [genesisStats, ...stats];
-    } else {
-      // Process all blocks equally
-      const requestFns = heights.map(
-        (height) => () => this.executeWithFallback<any>((web3) => web3.eth.getBlock(height, false))
-      );
-
-      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
-      return blocks
-        .filter((block) => block !== null)
-        .map((block: any) => ({
-          number: Number(block.number),
-          hash: block.hash,
-          size: Number(block.size) || 0,
-        }));
-    }
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   // ===== TRANSACTION METHODS =====
@@ -394,17 +673,23 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     return this.normalizeTransaction(web3Tx);
   }
 
+  // Use batch RPC for multiple transactions
   public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // Web3.js doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map((hash) => () => this.executeWithFallback((web3) => web3.eth.getTransaction(hash)));
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransaction[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionByHash',
+        params: [hash],
+      }));
 
-    const web3Transactions = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawTransactions = await this.directBatchRpcCall(calls);
+      return rawTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeRawTransaction(tx));
+    };
 
-    return web3Transactions.filter((tx) => tx !== null).map((tx) => this.normalizeTransaction(tx));
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
@@ -416,79 +701,38 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       throw new Error(`Transaction receipt ${hash} not found`);
     }
 
-    // Normalize web3 receipt to UniversalTransactionReceipt
     return this.normalizeReceipt(web3Receipt);
   }
 
+  // Use batch RPC for multiple receipts
   public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // Web3.js doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map(
-      (hash) => () => this.executeWithFallback((web3) => web3.eth.getTransactionReceipt(hash))
-    );
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransactionReceipt[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionReceipt',
+        params: [hash],
+      }));
 
-    const web3Receipts = await this.rateLimiter.executeSequentialRequests(requestFns);
-
-    return web3Receipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeReceipt(receipt));
-  }
-
-  /**
-   * Normalizes web3.js v4 transaction receipt to UniversalTransactionReceipt
-   * Handles BigInt values that Web3.js v4 returns
-   */
-  normalizeReceipt(web3Receipt: any): UniversalTransactionReceipt {
-    return {
-      transactionHash: web3Receipt.transactionHash,
-      // Convert BigInt transactionIndex to number
-      transactionIndex: Number(web3Receipt.transactionIndex),
-      blockHash: web3Receipt.blockHash,
-      // Convert BigInt blockNumber to number
-      blockNumber: Number(web3Receipt.blockNumber),
-      from: web3Receipt.from,
-      to: web3Receipt.to,
-      // Convert BigInt gas values to numbers
-      cumulativeGasUsed: Number(web3Receipt.cumulativeGasUsed),
-      gasUsed: Number(web3Receipt.gasUsed),
-      contractAddress: web3Receipt.contractAddress,
-      logs:
-        web3Receipt.logs?.map((log: any) => ({
-          address: log.address,
-          topics: log.topics,
-          data: log.data,
-          // Convert BigInt blockNumber to number
-          blockNumber: Number(log.blockNumber),
-          transactionHash: log.transactionHash,
-          // Convert BigInt transactionIndex to number
-          transactionIndex: Number(log.transactionIndex),
-          blockHash: log.blockHash,
-          // Convert BigInt logIndex to number
-          logIndex: Number(log.logIndex),
-          removed: log.removed || false,
-        })) || [],
-      logsBloom: web3Receipt.logsBloom,
-      status: web3Receipt.status ? '0x1' : '0x0',
-      // Convert BigInt type to string
-      type: web3Receipt.type?.toString() || '0x0',
-      // Convert BigInt effectiveGasPrice to number
-      effectiveGasPrice: Number(web3Receipt.effectiveGasPrice || 0),
-      // Convert BigInt blob fields to strings
-      blobGasUsed: web3Receipt.blobGasUsed?.toString(),
-      blobGasPrice: web3Receipt.blobGasPrice?.toString(),
+      const rawReceipts = await this.directBatchRpcCall(calls);
+      return rawReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeRawReceipt(receipt));
     };
+
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
+
+  // ===== NORMALIZATION METHODS =====
 
   /**
    * Normalizes web3.js v4 block object to UniversalBlock format
    * Handles BigInt values and web3.js v4 specific field types
    */
-  normalizeBlock(web3Block: any): UniversalBlock {
+  private normalizeBlock(web3Block: any): UniversalBlock {
     return {
       hash: web3Block.hash,
       parentHash: web3Block.parentHash,
-      // Priority: blockNumber field first, then number field
       blockNumber: Number(web3Block.blockNumber || web3Block.number),
       nonce: web3Block.nonce,
       sha3Uncles: web3Block.sha3Uncles,
@@ -497,80 +741,211 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       stateRoot: web3Block.stateRoot,
       receiptsRoot: web3Block.receiptsRoot,
       miner: web3Block.miner,
-      // Convert BigInt to string for large numbers
       difficulty: web3Block.difficulty?.toString() || '0',
       totalDifficulty: web3Block.totalDifficulty?.toString() || '0',
       extraData: web3Block.extraData,
-      // Convert BigInt size to number
       size: Number(web3Block.size) || 0,
-      // Convert BigInt gas values to numbers
       gasLimit: Number(web3Block.gasLimit) || 0,
       gasUsed: Number(web3Block.gasUsed) || 0,
-      // Convert BigInt timestamp to number
       timestamp: Number(web3Block.timestamp) || 0,
       uncles: web3Block.uncles || [],
-      // EIP-1559 fields - convert BigInt to string
       baseFeePerGas: web3Block.baseFeePerGas?.toString(),
-      // Shanghai fork fields
       withdrawals: web3Block.withdrawals,
       withdrawalsRoot: web3Block.withdrawalsRoot,
-      // Cancun fork fields - convert BigInt to string
       blobGasUsed: web3Block.blobGasUsed?.toString(),
       excessBlobGas: web3Block.excessBlobGas?.toString(),
       parentBeaconBlockRoot: web3Block.parentBeaconBlockRoot,
-      // Normalize transactions if present
-      // In Web3.js v4, when hydrated=true, transactions are full objects
-      // When hydrated=false, transactions are string hashes
       transactions: web3Block.transactions?.map((tx: any) => {
-        // If transaction is a string (hash), return as is
         if (typeof tx === 'string') {
           return tx;
         }
-        // If transaction is an object, normalize it
         return this.normalizeTransaction(tx);
       }),
     };
   }
 
   /**
-   * Normalizes web3.js v4 transaction object to UniversalTransaction format
-   * Handles BigInt values that Web3.js v4 returns and ensures proper data conversion
+   * Normalizes raw JSON-RPC block response (used for batch calls)
    */
-  normalizeTransaction(web3Tx: any): UniversalTransaction {
+  private normalizeRawBlock(rawBlock: any): UniversalBlock {
+    return {
+      hash: rawBlock.hash,
+      parentHash: rawBlock.parentHash,
+      blockNumber: rawBlock.blockNumber
+        ? parseInt(rawBlock.blockNumber, 16)
+        : rawBlock.number
+          ? parseInt(rawBlock.number, 16)
+          : 0,
+      nonce: rawBlock.nonce,
+      sha3Uncles: rawBlock.sha3Uncles,
+      logsBloom: rawBlock.logsBloom,
+      transactionsRoot: rawBlock.transactionsRoot,
+      stateRoot: rawBlock.stateRoot,
+      receiptsRoot: rawBlock.receiptsRoot,
+      miner: rawBlock.miner,
+      difficulty: rawBlock.difficulty,
+      totalDifficulty: rawBlock.totalDifficulty,
+      extraData: rawBlock.extraData,
+      size: parseInt(rawBlock.size, 16),
+      gasLimit: parseInt(rawBlock.gasLimit, 16),
+      gasUsed: parseInt(rawBlock.gasUsed, 16),
+      timestamp: parseInt(rawBlock.timestamp, 16),
+      uncles: rawBlock.uncles || [],
+      baseFeePerGas: rawBlock.baseFeePerGas,
+      withdrawals: rawBlock.withdrawals,
+      withdrawalsRoot: rawBlock.withdrawalsRoot,
+      blobGasUsed: rawBlock.blobGasUsed,
+      excessBlobGas: rawBlock.excessBlobGas,
+      parentBeaconBlockRoot: rawBlock.parentBeaconBlockRoot,
+      transactions: rawBlock.transactions?.map((tx: any) =>
+        typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx)
+      ),
+    };
+  }
+
+  /**
+   * Normalizes web3.js v4 transaction object to UniversalTransaction format
+   */
+  private normalizeTransaction(web3Tx: any): UniversalTransaction {
     return {
       hash: web3Tx.hash,
-      // Convert BigInt nonce to number
       nonce: Number(web3Tx.nonce) || 0,
       from: web3Tx.from,
       to: web3Tx.to,
-      // Convert BigInt value to string for large numbers
       value: web3Tx.value?.toString() || '0',
-      // Convert BigInt gas to number (gas field, not gasLimit)
       gas: Number(web3Tx.gas || web3Tx.gasLimit) || 0,
       input: web3Tx.input || web3Tx.data || '0x',
       blockHash: web3Tx.blockHash,
-      // Convert BigInt blockNumber to number (handle undefined properly)
       blockNumber: web3Tx.blockNumber !== undefined ? Number(web3Tx.blockNumber) : undefined,
-      // Convert BigInt transactionIndex to number (handle undefined properly)
       transactionIndex: web3Tx.transactionIndex !== undefined ? Number(web3Tx.transactionIndex) : undefined,
-      // Convert BigInt gasPrice to string
       gasPrice: web3Tx.gasPrice?.toString(),
-      // Convert BigInt chainId to number (handle undefined properly)
       chainId: web3Tx.chainId !== undefined ? Number(web3Tx.chainId) : undefined,
-      // Signature fields - convert BigInt v to string
       v: web3Tx.v?.toString(),
       r: web3Tx.r,
       s: web3Tx.s,
-      // Convert BigInt type to string
       type: web3Tx.type?.toString() || '0',
-      // EIP-1559 fields - convert BigInt to string
       maxFeePerGas: web3Tx.maxFeePerGas?.toString(),
       maxPriorityFeePerGas: web3Tx.maxPriorityFeePerGas?.toString(),
-      // EIP-2930 access list
       accessList: web3Tx.accessList,
-      // EIP-4844 blob transaction fields - convert BigInt to string
       maxFeePerBlobGas: web3Tx.maxFeePerBlobGas?.toString(),
       blobVersionedHashes: web3Tx.blobVersionedHashes,
+    };
+  }
+
+  /**
+   * Normalizes raw JSON-RPC transaction response (used for batch calls)
+   */
+  private normalizeRawTransaction(rawTx: any): UniversalTransaction {
+    const parseHexSafely = (value: string | undefined, fieldName: string): number => {
+      if (!value) return 0;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value for ${fieldName}: ${value}`);
+      }
+      return parsed;
+    };
+
+    const parseHexOptional = (value: string | undefined): number | null => {
+      if (!value) return null;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value: ${value}`);
+      }
+      return parsed;
+    };
+
+    return {
+      hash: rawTx.hash,
+      nonce: parseHexSafely(rawTx.nonce, 'nonce'),
+      from: rawTx.from,
+      to: rawTx.to,
+      value: rawTx.value,
+      gas: parseHexSafely(rawTx.gas, 'gas'),
+      input: rawTx.input,
+      blockHash: rawTx.blockHash,
+      blockNumber: parseHexOptional(rawTx.blockNumber),
+      transactionIndex: parseHexOptional(rawTx.transactionIndex),
+      gasPrice: rawTx.gasPrice,
+      chainId: rawTx.chainId ? parseHexSafely(rawTx.chainId, 'chainId') : undefined,
+      v: rawTx.v,
+      r: rawTx.r,
+      s: rawTx.s,
+      type: rawTx.type || '0x0',
+      maxFeePerGas: rawTx.maxFeePerGas,
+      maxPriorityFeePerGas: rawTx.maxPriorityFeePerGas,
+      accessList: rawTx.accessList,
+      maxFeePerBlobGas: rawTx.maxFeePerBlobGas,
+      blobVersionedHashes: rawTx.blobVersionedHashes,
+    };
+  }
+
+  /**
+   * Normalizes web3.js v4 transaction receipt to UniversalTransactionReceipt
+   */
+  private normalizeReceipt(web3Receipt: any): UniversalTransactionReceipt {
+    return {
+      transactionHash: web3Receipt.transactionHash,
+      transactionIndex: Number(web3Receipt.transactionIndex),
+      blockHash: web3Receipt.blockHash,
+      blockNumber: Number(web3Receipt.blockNumber),
+      from: web3Receipt.from,
+      to: web3Receipt.to,
+      cumulativeGasUsed: Number(web3Receipt.cumulativeGasUsed),
+      gasUsed: Number(web3Receipt.gasUsed),
+      contractAddress: web3Receipt.contractAddress,
+      logs:
+        web3Receipt.logs?.map((log: any) => ({
+          address: log.address,
+          topics: log.topics,
+          data: log.data,
+          blockNumber: Number(log.blockNumber),
+          transactionHash: log.transactionHash,
+          transactionIndex: Number(log.transactionIndex),
+          blockHash: log.blockHash,
+          logIndex: Number(log.logIndex),
+          removed: log.removed || false,
+        })) || [],
+      logsBloom: web3Receipt.logsBloom,
+      status: web3Receipt.status ? '0x1' : '0x0',
+      type: web3Receipt.type?.toString() || '0x0',
+      effectiveGasPrice: Number(web3Receipt.effectiveGasPrice || 0),
+      blobGasUsed: web3Receipt.blobGasUsed?.toString(),
+      blobGasPrice: web3Receipt.blobGasPrice?.toString(),
+    };
+  }
+
+  /**
+   * Normalizes raw JSON-RPC receipt response (used for batch calls)
+   */
+  private normalizeRawReceipt(rawReceipt: any): UniversalTransactionReceipt {
+    return {
+      transactionHash: rawReceipt.transactionHash,
+      transactionIndex: parseInt(rawReceipt.transactionIndex, 16),
+      blockHash: rawReceipt.blockHash,
+      blockNumber: parseInt(rawReceipt.blockNumber, 16),
+      from: rawReceipt.from,
+      to: rawReceipt.to,
+      cumulativeGasUsed: parseInt(rawReceipt.cumulativeGasUsed, 16),
+      gasUsed: parseInt(rawReceipt.gasUsed, 16),
+      contractAddress: rawReceipt.contractAddress,
+      logs:
+        rawReceipt.logs?.map((log: any) => ({
+          address: log.address,
+          topics: log.topics,
+          data: log.data,
+          blockNumber: log.blockNumber ? parseInt(log.blockNumber, 16) : null,
+          transactionHash: log.transactionHash,
+          transactionIndex: log.transactionIndex ? parseInt(log.transactionIndex, 16) : null,
+          blockHash: log.blockHash,
+          logIndex: log.logIndex ? parseInt(log.logIndex, 16) : null,
+          removed: log.removed || false,
+        })) || [],
+      logsBloom: rawReceipt.logsBloom,
+      status: rawReceipt.status ? '0x1' : '0x0',
+      type: rawReceipt.type?.toString() || '0x0',
+      effectiveGasPrice: rawReceipt.effectiveGasPrice ? parseInt(rawReceipt.effectiveGasPrice, 16) : 0,
+      blobGasUsed: rawReceipt.blobGasUsed,
+      blobGasPrice: rawReceipt.blobGasPrice,
     };
   }
 }

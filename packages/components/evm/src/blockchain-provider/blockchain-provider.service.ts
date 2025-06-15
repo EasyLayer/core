@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
-import type { Hash, NetworkConfig, UniversalBlock, UniversalTransaction } from './node-providers';
+import type { Hash, NetworkConfig, UniversalBlock } from './node-providers';
 import { BlockchainNormalizer } from './normalizer';
 import { Block, Transaction, TransactionReceipt } from './components';
 import { BlockSizeCalculator } from './utils';
@@ -24,6 +24,54 @@ export class BlockchainProviderService {
     this.normalizer = new BlockchainNormalizer(this.networkConfig);
   }
 
+  /**
+   * Subscribes to contract logs via WebSocket using provider's native implementation
+   */
+  public subscribeToLogs(
+    options: {
+      address?: string | string[];
+      topics?: (string | string[] | null)[];
+    },
+    callback: (log: any) => void
+  ): Subscription {
+    let resolveSubscription!: () => void;
+    let rejectSubscription!: (error: Error) => void;
+
+    const subscriptionPromise = new Promise<void>((resolve, reject) => {
+      resolveSubscription = resolve;
+      rejectSubscription = reject;
+    }) as Subscription;
+
+    this._connectionManager
+      .getActiveProvider()
+      .then((provider) => {
+        if (!provider.wsClient) {
+          const err = new Error('Active provider does not support WebSocket connections');
+          rejectSubscription(err);
+          return;
+        }
+
+        try {
+          // Use provider's unified subscription method
+          const subscription = provider.subscribeToLogs(options, callback);
+
+          // Attach unsubscribe method
+          subscriptionPromise.unsubscribe = () => {
+            subscription.unsubscribe();
+            resolveSubscription();
+          };
+        } catch (error) {
+          rejectSubscription(error as Error);
+        }
+      })
+      .catch((error) => {
+        this.log.error('subscribeToLogs(): failed to get provider', { args: error });
+        rejectSubscription(error as Error);
+      });
+
+    return subscriptionPromise;
+  }
+
   get connectionManager() {
     return this._connectionManager;
   }
@@ -33,31 +81,16 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Subscribes to new block events via WebSocket. Returns a Subscription object,
-   * which is a Promise that will not resolve until `unsubscribe()` is called,
-   * or will reject if an error occurs while fetching or processing a block.
+   * Subscribes to new block events via WebSocket using provider's native implementation
    *
-   * @param callback - A function to be invoked whenever a new block is received.
-   *                   The block data is fetched (with full transactions) and normalized before calling this callback.
-   * @returns A Subscription (Promise<void> & { unsubscribe(): void }). Calling unsubscribe()
-   *          removes the WebSocket listener and resolves the promise, allowing callers to clean up.
-   *
-   * @example
-   * ```ts
-   * const subscription = blockchainProviderService.subscribeToNewBlocks((block) => {
-   *   console.log('Received new block:', block);
-   * });
-   *
-   * // Later, to stop listening:
-   * subscription.unsubscribe();
-   * await subscription; // resolves once the listener is removed
-   * ```
+   * @param callback - Function to be invoked whenever a new block is received
+   * @returns A Subscription (Promise<void> & { unsubscribe(): void })
    */
   public subscribeToNewBlocks(callback: (block: Block) => void): Subscription {
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
-    // Create the underlying promise, then cast it to Subscription so we can attach unsubscribe().
+    // Create the underlying promise
     const subscriptionPromise = new Promise<void>((resolve, reject) => {
       resolveSubscription = resolve;
       rejectSubscription = reject;
@@ -68,43 +101,79 @@ export class BlockchainProviderService {
       .getActiveProvider()
       .then((provider) => {
         if (!provider.wsClient) {
-          // If WebSocket client is not available, immediately reject the subscription promise
           const err = new Error('Active provider does not support WebSocket connections');
           rejectSubscription(err);
           return;
         }
 
-        // Define a listener that fires on each "block" event
-        const listener = async (blockNumber: number) => {
-          try {
-            // Get block with receipts using our simple method
-            const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
+        try {
+          // Use provider's unified subscription method
+          const subscription = provider.subscribeToNewBlocks(async (blockNumber: number) => {
+            try {
+              const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
+              callback(blockWithReceipts);
+            } catch (error) {
+              this.log.error('Error fetching block in subscription', { args: error });
+              rejectSubscription(error as Error);
+            }
+          });
 
-            // Invoke the user-provided callback with the normalized block data
-            callback(blockWithReceipts);
-          } catch (error) {
-            this.log.error('Error fetching block', { args: error });
-            // If fetching or processing the block fails, reject the subscription promise
-            rejectSubscription(error as Error);
-          }
-        };
-
-        // Register the listener for new block events
-        provider.wsClient.on('block', listener);
-
-        // Attach unsubscribe() to our subscriptionPromise to remove the listener and resolve the promise
-        subscriptionPromise.unsubscribe = () => {
-          provider.wsClient.off('block', listener);
-          resolveSubscription();
-        };
+          // Attach unsubscribe method
+          subscriptionPromise.unsubscribe = () => {
+            subscription.unsubscribe();
+            resolveSubscription();
+          };
+        } catch (error) {
+          rejectSubscription(error as Error);
+        }
       })
       .catch((error) => {
-        // If retrieving the active provider fails, reject the subscription promise
         this.log.error('subscribeToNewBlocks(): failed to get provider', { args: error });
         rejectSubscription(error as Error);
       });
 
-    // Return the Subscription (Promise<void> & { unsubscribe(): void })
+    return subscriptionPromise;
+  }
+
+  /**
+   * Subscribes to pending transactions via WebSocket using provider's native implementation
+   */
+  public subscribeToPendingTransactions(callback: (txHash: string) => void): Subscription {
+    let resolveSubscription!: () => void;
+    let rejectSubscription!: (error: Error) => void;
+
+    const subscriptionPromise = new Promise<void>((resolve, reject) => {
+      resolveSubscription = resolve;
+      rejectSubscription = reject;
+    }) as Subscription;
+
+    this._connectionManager
+      .getActiveProvider()
+      .then((provider) => {
+        if (!provider.wsClient) {
+          const err = new Error('Active provider does not support WebSocket connections');
+          rejectSubscription(err);
+          return;
+        }
+
+        try {
+          // Use provider's unified subscription method
+          const subscription = provider.subscribeToPendingTransactions(callback);
+
+          // Attach unsubscribe method
+          subscriptionPromise.unsubscribe = () => {
+            subscription.unsubscribe();
+            resolveSubscription();
+          };
+        } catch (error) {
+          rejectSubscription(error as Error);
+        }
+      })
+      .catch((error) => {
+        this.log.error('subscribeToPendingTransactions(): failed to get provider', { args: error });
+        rejectSubscription(error as Error);
+      });
+
     return subscriptionPromise;
   }
 
@@ -116,12 +185,15 @@ export class BlockchainProviderService {
     try {
       const provider = await this._connectionManager.getActiveProvider();
 
-      // Get block
+      // Get block with full transactions
       const rawBlock = await provider.getOneBlockByHeight(Number(height), fullTransactions);
 
-      // Get receipts for all transactions
+      // Get receipts for all transactions if they exist
       if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-        const txHashes = rawBlock.transactions.map((tx: any) => tx.hash);
+        // Extract transaction hashes
+        const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+
+        // Get all receipts in batch
         const rawReceipts = await provider.getManyTransactionReceipts(txHashes);
 
         // Add receipts to the raw block
@@ -144,14 +216,14 @@ export class BlockchainProviderService {
 
   /**
    * Gets multiple blocks with full transactions and receipts.
-   * Simple approach: get all blocks with transactions, then get all receipts, then combine.
+   * Optimized approach using batch calls for better performance.
    */
   public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
       const numericHeights = heights.map((h) => Number(h));
 
-      // Get all blocks
+      // Get all blocks with full transactions using batch calls
       const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
       // Collect all transaction hashes from all blocks
@@ -160,7 +232,7 @@ export class BlockchainProviderService {
 
       rawBlocks.forEach((rawBlock: UniversalBlock) => {
         if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-          const txHashes = rawBlock.transactions.map((tx: UniversalTransaction) => tx.hash);
+          const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
           blockTxMapping.set(rawBlock.blockNumber, txHashes);
           allTxHashes.push(...txHashes);
         } else {
@@ -168,7 +240,7 @@ export class BlockchainProviderService {
         }
       });
 
-      // Get all receipts at once
+      // Get all receipts at once using batch calls
       let allRawReceipts: any[] = [];
       if (allTxHashes.length > 0) {
         allRawReceipts = await provider.getManyTransactionReceipts(allTxHashes);
@@ -201,10 +273,6 @@ export class BlockchainProviderService {
   /**
    * Merges receipts into blocks that already have transactions loaded.
    * This method is optimized for memory efficiency by modifying blocks in place.
-   *
-   * @param blocks - Array of blocks with transactions but without receipts
-   * @param receipts - Array of transaction receipts to merge into blocks
-   * @returns Promise resolving to the same blocks array with receipts added and sizes recalculated
    */
   public async mergeReceiptsIntoBlocks(blocks: Block[], receipts: TransactionReceipt[]): Promise<Block[]> {
     try {
@@ -301,7 +369,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple normalized blocks by heights
+   * Gets multiple normalized blocks by heights using batch calls for better performance
    */
   public async getManyBlocksByHeights(heights: string[] | number[], fullTransactions?: boolean): Promise<Block[]> {
     try {
@@ -320,7 +388,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets block statistics by heights (returns raw data as stats don't need normalization)
+   * Gets block statistics by heights using batch calls
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<any> {
     try {
@@ -349,7 +417,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple normalized blocks by hashes
+   * Gets multiple normalized blocks by hashes using batch calls
    */
   public async getManyBlocksByHashes(hashes: string[] | Hash[], fullTransactions?: boolean): Promise<Block[]> {
     try {
@@ -381,7 +449,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple normalized transactions by hashes
+   * Gets multiple normalized transactions by hashes using batch calls
    */
   public async getManyTransactionsByHashes(hashes: string[] | Hash[]): Promise<Transaction[]> {
     try {
@@ -413,7 +481,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple normalized transaction receipts by hashes
+   * Gets multiple normalized transaction receipts by hashes using batch calls
    */
   public async getManyTransactionReceipts(hashes: string[] | Hash[]): Promise<TransactionReceipt[]> {
     try {

@@ -5,13 +5,10 @@ import type { Web3jsProviderOptions } from './web3js.provider';
 import { createWeb3jsProvider } from './web3js.provider';
 import type { EtherJSProviderOptions } from './etherjs.provider';
 import { createEtherJSProvider } from './etherjs.provider';
-import type { JsonRpcProviderOptions } from './json-rpc.provider';
-import { createJsonRpcProvider } from './json-rpc.provider';
 
 export type ProviderNodeOptions =
   | (EtherJSProviderOptions & NodeProviderTypeInterface)
-  | (Web3jsProviderOptions & NodeProviderTypeInterface)
-  | (JsonRpcProviderOptions & NodeProviderTypeInterface);
+  | (Web3jsProviderOptions & NodeProviderTypeInterface);
 
 export interface ProviderOptions<T extends ProviderNodeOptions = ProviderNodeOptions> {
   connection?: Omit<T, 'uniqName' | 'network'>; // TODO: think about uniqName
@@ -28,8 +25,6 @@ export function createProvider(options: ProviderNodeOptions): BaseNodeProvider<B
       return createEtherJSProvider(restOptions as EtherJSProviderOptions);
     case NodeProviderTypes.WEB3JS:
       return createWeb3jsProvider(restOptions as Web3jsProviderOptions);
-    case NodeProviderTypes.JSON_RPC:
-      return createJsonRpcProvider(restOptions as JsonRpcProviderOptions);
     default:
       throw new Error(`Unsupported provider type: ${type}`);
   }

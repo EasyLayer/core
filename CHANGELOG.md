@@ -1,3 +1,9 @@
+## 0.7.0 (2025-06-15)
+
+* refactor: removed json rpc node provider; ([b452e19](https://github.com/EasyLayer/core/commit/b452e19))
+
+
+
 ## <small>0.6.21 (2025-06-15)</small>
 
 * refactor: chnaged rate limiter logic to add correct batch loading; ([f568eb0](https://github.com/EasyLayer/core/commit/f568eb0))
