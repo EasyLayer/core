@@ -1,3 +1,9 @@
+## <small>0.7.1 (2025-06-15)</small>
+
+* infra: fixed release workflow; ([417ade9](https://github.com/EasyLayer/core/commit/417ade9))
+
+
+
 ## 0.7.0 (2025-06-15)
 
 * refactor: removed json rpc node provider; ([b452e19](https://github.com/EasyLayer/core/commit/b452e19))
