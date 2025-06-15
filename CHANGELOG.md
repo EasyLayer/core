@@ -1,3 +1,9 @@
+## <small>0.7.2 (2025-06-15)</small>
+
+* refactor: fixed rate limiter and batch requests; ([bbccf98](https://github.com/EasyLayer/core/commit/bbccf98))
+
+
+
 ## <small>0.7.1 (2025-06-15)</small>
 
 * infra: fixed release workflow; ([417ade9](https://github.com/EasyLayer/core/commit/417ade9))
