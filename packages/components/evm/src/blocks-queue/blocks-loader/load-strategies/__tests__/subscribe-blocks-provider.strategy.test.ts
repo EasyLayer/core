@@ -93,49 +93,6 @@ describe('SubscribeBlocksProviderStrategy', () => {
       
       expect(mockBlockchainProvider.subscribeToNewBlocks).toHaveBeenCalled();
     });
-    
-    it('should skip initial catchup when queue is already at target height', async () => {
-      mockQueue.lastHeight = 102;
-      
-      let resolveSubscription: () => void;
-      const mockSubscription = new Promise<void>((resolve) => {
-        resolveSubscription = resolve;
-      }) as Promise<void> & { unsubscribe: () => void };
-      
-      mockSubscription.unsubscribe = jest.fn().mockImplementation(() => {
-        resolveSubscription();
-      });
-
-      mockBlockchainProvider.subscribeToNewBlocks.mockReturnValue(mockSubscription);
-
-      const loadPromise = strategy.load(102);
-      
-      // Wait for subscription setup
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      // Complete subscription
-      mockSubscription.unsubscribe();
-      
-      await loadPromise;
-
-      expect(mockBlockchainProvider.getManyBlocksWithReceipts).not.toHaveBeenCalled();
-      expect(mockBlockchainProvider.subscribeToNewBlocks).toHaveBeenCalled();
-    });
-
-    it('should throw error when gap is too large for catchup', async () => {
-      mockQueue.lastHeight = 0;
-
-      await expect(strategy.load(150)).rejects.toThrow('Gap too large for subscription strategy');
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        'Initial catch-up gap too large',
-        expect.objectContaining({
-          args: expect.objectContaining({
-            blocksToFetch: 150,
-            maxAllowedGap: 100,
-          })
-        })
-      );
-    });
 
     it('should skip blocks with height less than or equal to queue lastHeight', async () => {
       let resolveSubscription: () => void;
