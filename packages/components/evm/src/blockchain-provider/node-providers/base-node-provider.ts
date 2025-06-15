@@ -48,7 +48,43 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method reconnectWebSocket() is not supported by this provider');
   }
 
-  // Transaction methods
+  // ===== SUBSCRIPTION METHODS =====
+
+  /**
+   * Subscribes to new block events via WebSocket
+   * Returns a subscription object with unsubscribe method
+   * Throws error by default for providers that don't support WebSocket subscriptions
+   */
+  subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
+    throw new Error('Method subscribeToNewBlocks() is not supported by this provider');
+  }
+
+  /**
+   * Subscribes to pending transactions via WebSocket
+   * Returns a subscription object with unsubscribe method
+   * Throws error by default for providers that don't support WebSocket subscriptions
+   */
+  subscribeToPendingTransactions(callback: (txHash: string) => void): { unsubscribe: () => void } {
+    throw new Error('Method subscribeToPendingTransactions() is not supported by this provider');
+  }
+
+  /**
+   * Subscribes to contract logs via WebSocket
+   * Returns a subscription object with unsubscribe method
+   * Throws error by default for providers that don't support WebSocket subscriptions
+   */
+  subscribeToLogs(
+    options: {
+      address?: string | string[];
+      topics?: (string | string[] | null)[];
+    },
+    callback: (log: any) => void
+  ): { unsubscribe: () => void } {
+    throw new Error('Method subscribeToLogs() is not supported by this provider');
+  }
+
+  // ===== TRANSACTION METHODS =====
+
   async sendTransaction(transaction: any): Promise<any> {
     throw new Error('Method sendTransaction() is not supported by this provider');
   }
@@ -69,7 +105,8 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getManyTransactionReceipts() is not supported by this provider');
   }
 
-  // Block methods
+  // ===== BLOCK METHODS =====
+
   async getBlockHeight(): Promise<number> {
     throw new Error('Method getBlockHeight() is not supported by this provider');
   }

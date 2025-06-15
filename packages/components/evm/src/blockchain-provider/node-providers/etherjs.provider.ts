@@ -23,6 +23,10 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   private network: NetworkConfig;
   private isWebSocketConnected = false;
   private rateLimiter: RateLimiter;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private requestId = 1;
 
   constructor(options: EtherJSProviderOptions) {
     super(options);
@@ -89,6 +93,47 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   }
 
   /**
+   * Makes direct JSON-RPC batch call for better performance
+   */
+  private async directBatchRpcCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    const payload = calls.map((call) => ({
+      jsonrpc: '2.0',
+      method: call.method,
+      params: call.params,
+      id: this.requestId++,
+    }));
+
+    // Use WebSocket if available, otherwise HTTP
+    let response: Response;
+    if (this.isWebSocketConnected && this._wsClient && this._wsClient.websocket?.readyState === WebSocket.OPEN) {
+      // For WebSocket, we need to implement the batch manually
+      return Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
+    } else {
+      // Use HTTP for batch requests
+      response = await fetch(this.httpUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const results = await response.json();
+      return results.map((result: any) => {
+        if (result.error) {
+          throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
+        }
+        return result.result;
+      });
+    }
+  }
+
+  /**
    * Checks if WebSocket connection is healthy
    */
   public async healthcheckWebSocket(): Promise<boolean> {
@@ -98,7 +143,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
     try {
       // Check if WebSocket is still connected
-      if (this._wsClient.websocket?.readyState !== this._wsClient.websocket?.OPEN) {
+      if (this._wsClient.websocket?.readyState !== WebSocket.OPEN) {
         this.isWebSocketConnected = false;
         return false;
       }
@@ -118,22 +163,26 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       throw new Error('Cannot connect to the node');
     }
 
+    // Validate chainId after connection
+    try {
+      const connectedChainId = await this._httpClient.send('eth_chainId', []);
+      const expectedChainId = this.network.chainId;
+      const parsedChainId = parseInt(connectedChainId, 16);
+
+      if (parsedChainId !== expectedChainId) {
+        throw new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${parsedChainId}`);
+      }
+    } catch (error) {
+      throw new Error(`Chain validation failed: ${error}`);
+    }
+
     if (this.wsUrl) {
       await this.connectWebSocket();
     }
   }
 
   public async disconnect(): Promise<void> {
-    this.isWebSocketConnected = false;
-
-    if (this._wsClient) {
-      try {
-        this._wsClient.destroy();
-      } catch (error) {
-        // Ignore destruction errors
-      }
-      this._wsClient = undefined;
-    }
+    await this.disconnectWebSocket();
   }
 
   /**
@@ -141,21 +190,84 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
    * This method is called by ConnectionManager when WebSocket health check fails
    */
   public async reconnectWebSocket(): Promise<void> {
-    // Disconnect existing WebSocket first
-    if (this._wsClient) {
-      try {
-        this._wsClient.destroy();
-      } catch (error) {
-        // Ignore destruction errors
-      }
-      this._wsClient = undefined;
-      this.isWebSocketConnected = false;
-    }
+    try {
+      // First, safely disconnect existing WebSocket
+      await this.disconnectWebSocket();
 
-    // Establish new WebSocket connection
-    if (this.wsUrl) {
-      await this.connectWebSocket();
+      // Add a small delay before reconnecting to avoid rapid reconnection attempts
+      await new Promise((resolve) => setTimeout(resolve, this.reconnectDelay));
+
+      // Check if we haven't exceeded max reconnection attempts
+      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        throw new Error(`Max reconnection attempts (${this.maxReconnectAttempts}) exceeded`);
+      }
+
+      // Increment reconnection attempts counter
+      this.reconnectAttempts++;
+
+      // Establish new WebSocket connection
+      if (this.wsUrl) {
+        await this.connectWebSocket();
+      } else {
+        throw new Error('WebSocket URL not available for reconnection');
+      }
+    } catch (error) {
+      // Exponential backoff for reconnection delay
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Max 30 seconds
+
+      throw error;
     }
+  }
+
+  /**
+   * Safely disconnects WebSocket connection
+   */
+  private async disconnectWebSocket(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      // Mark WebSocket as disconnected immediately
+      this.isWebSocketConnected = false;
+
+      if (this._wsClient) {
+        // Set up one-time close handler for cleanup
+        const handleClose = () => {
+          this._wsClient = undefined;
+          resolve();
+        };
+
+        // Add temporary close listener
+        this._wsClient.websocket?.addEventListener('close', handleClose, { once: true });
+
+        try {
+          // Attempt graceful close using ethers destroy method
+          this._wsClient.destroy();
+        } catch (error) {
+          // Force cleanup on error
+          this._wsClient.websocket?.removeEventListener('close', handleClose);
+          this._wsClient = undefined;
+          resolve();
+        }
+
+        // Timeout to prevent hanging on close
+        setTimeout(() => {
+          if (this._wsClient) {
+            this._wsClient.websocket?.removeEventListener('close', handleClose);
+            this._wsClient = undefined;
+            resolve();
+          }
+        }, 5000);
+      } else {
+        // No WebSocket to disconnect
+        resolve();
+      }
+    });
+  }
+
+  /**
+   * Resets reconnection state after successful connection
+   */
+  private resetReconnectionState(): void {
+    this.reconnectAttempts = 0;
+    this.reconnectDelay = 1000; // Reset to initial delay
   }
 
   private async connectWebSocket(): Promise<void> {
@@ -164,75 +276,201 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     }
 
     return new Promise<void>((resolve, reject) => {
+      let isResolved = false;
+      let timeoutId: NodeJS.Timeout;
+
       try {
         // Use chainId from networkConfig for better compatibility
-        // Priority: explicit network name > chainId > auto-detect (undefined)
         const networkIdentifier = this.network.chainId;
         this._wsClient = new ethers.WebSocketProvider(this.wsUrl!, networkIdentifier);
 
-        const timeout = setTimeout(() => {
-          cleanup();
-          reject(new Error('WebSocket connection timeout'));
+        timeoutId = setTimeout(() => {
+          if (!isResolved) {
+            isResolved = true;
+            cleanup();
+            reject(new Error('WebSocket connection timeout'));
+          }
         }, 10000);
 
-        const handleOpen = () => {
-          this.isWebSocketConnected = true;
-          clearTimeout(timeout);
-          cleanup();
-          resolve();
+        const handleOpen = async () => {
+          if (isResolved) return;
+
+          try {
+            // Small delay for stabilization
+            await new Promise((resolve) => setTimeout(resolve, 100));
+
+            // Validate chainId after WebSocket connection
+            const connectedChainId = await this._wsClient!.send('eth_chainId', []);
+            const expectedChainId = this.network.chainId;
+            const parsedChainId = parseInt(connectedChainId, 16);
+
+            if (parsedChainId !== expectedChainId) {
+              if (!isResolved) {
+                isResolved = true;
+                this.isWebSocketConnected = false;
+                clearTimeout(timeoutId);
+                cleanup();
+                reject(new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${parsedChainId}`));
+              }
+              return;
+            }
+
+            if (!isResolved) {
+              isResolved = true;
+              this.isWebSocketConnected = true;
+              this.resetReconnectionState();
+              clearTimeout(timeoutId);
+              cleanup();
+              resolve();
+            }
+          } catch (error) {
+            if (!isResolved) {
+              isResolved = true;
+              this.isWebSocketConnected = false;
+              clearTimeout(timeoutId);
+              cleanup();
+              reject(new Error(`WebSocket validation error: ${error}`));
+            }
+          }
         };
 
         const handleError = (error: any) => {
-          this.isWebSocketConnected = false;
-          clearTimeout(timeout);
-          cleanup();
-          reject(new Error(`WebSocket connection error: ${error.message || error}`));
+          if (!isResolved) {
+            isResolved = true;
+            this.isWebSocketConnected = false;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(new Error(`WebSocket connection error: ${error.message || error}`));
+          }
         };
 
-        const handleClose = () => {
+        const handleClose = (event: CloseEvent) => {
           this.isWebSocketConnected = false;
-          // Don't reject here - ConnectionManager will handle reconnection
+
+          // If connection closed during connection setup
+          if (!isResolved) {
+            isResolved = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(new Error(`WebSocket closed during connection: ${event.code} ${event.reason}`));
+          }
         };
 
         const cleanup = () => {
           if (this._wsClient?.websocket) {
-            this._wsClient.websocket.removeListener('open', handleOpen);
-            this._wsClient.websocket.removeListener('error', handleError);
-            this._wsClient.websocket.removeListener('close', handleClose);
+            this._wsClient.websocket.removeEventListener('open', handleOpen);
+            this._wsClient.websocket.removeEventListener('error', handleError);
+            this._wsClient.websocket.removeEventListener('close', handleClose);
           }
         };
 
         // Check if websocket is already open
-        if (this._wsClient.websocket?.readyState === this._wsClient.websocket?.OPEN) {
+        if (this._wsClient.websocket?.readyState === WebSocket.OPEN) {
           this.isWebSocketConnected = true;
-          clearTimeout(timeout);
+          clearTimeout(timeoutId);
           resolve();
           return;
         }
 
         // Set up event listeners
         if (this._wsClient.websocket) {
-          this._wsClient.websocket.on('open', handleOpen);
-          this._wsClient.websocket.on('error', handleError);
-          this._wsClient.websocket.on('close', handleClose);
+          this._wsClient.websocket.addEventListener('open', handleOpen);
+          this._wsClient.websocket.addEventListener('error', handleError);
+          this._wsClient.websocket.addEventListener('close', handleClose);
         } else {
           // If websocket is not immediately available, wait a bit and check again
           setTimeout(() => {
             if (this._wsClient?.websocket) {
-              this._wsClient.websocket.on('open', handleOpen);
-              this._wsClient.websocket.on('error', handleError);
-              this._wsClient.websocket.on('close', handleClose);
+              this._wsClient.websocket.addEventListener('open', handleOpen);
+              this._wsClient.websocket.addEventListener('error', handleError);
+              this._wsClient.websocket.addEventListener('close', handleClose);
             } else {
-              clearTimeout(timeout);
+              clearTimeout(timeoutId);
               reject(new Error('WebSocket not available'));
             }
           }, 100);
         }
       } catch (error) {
+        isResolved = true;
         this.isWebSocketConnected = false;
         reject(error);
       }
     });
+  }
+
+  // ===== SUBSCRIPTION METHODS =====
+
+  /**
+   * Subscribes to new block events via WebSocket
+   * Returns a subscription object with unsubscribe method
+   */
+  public subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    // Use ethers.js native block subscription
+    this._wsClient.on('block', callback);
+
+    return {
+      unsubscribe: () => {
+        if (this._wsClient) {
+          this._wsClient.off('block', callback);
+        }
+      },
+    };
+  }
+
+  /**
+   * Subscribes to new pending transactions via WebSocket
+   */
+  public subscribeToPendingTransactions(callback: (txHash: string) => void): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    // Use ethers.js native pending transaction subscription
+    this._wsClient.on('pending', callback);
+
+    return {
+      unsubscribe: () => {
+        if (this._wsClient) {
+          this._wsClient.off('pending', callback);
+        }
+      },
+    };
+  }
+
+  /**
+   * Subscribes to contract logs via WebSocket
+   */
+  public subscribeToLogs(
+    options: {
+      address?: string | string[];
+      topics?: (string | string[] | null)[];
+    },
+    callback: (log: any) => void
+  ): { unsubscribe: () => void } {
+    if (!this.isWebSocketConnected || !this._wsClient) {
+      throw new Error('WebSocket connection is not available for subscriptions');
+    }
+
+    // Create ethers.js filter
+    const filter = {
+      address: options.address,
+      topics: options.topics,
+    };
+
+    // Use ethers.js native log subscription
+    this._wsClient.on(filter, callback);
+
+    return {
+      unsubscribe: () => {
+        if (this._wsClient) {
+          this._wsClient.off(filter, callback);
+        }
+      },
+    };
   }
 
   // ===== BLOCK METHODS =====
@@ -279,19 +517,25 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     return this.normalizeBlock(ethersBlock);
   }
 
+  // Use batch RPC for multiple blocks
   public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // EthersJS doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map(
-      (hash) => () => this.executeWithFallback((provider) => provider.getBlock(hash, fullTransactions))
-    );
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalBlock[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getBlockByHash',
+        params: [hash, fullTransactions],
+      }));
 
-    const ethersBlocks = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeEthersBlock(block));
+    };
 
-    return ethersBlocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
@@ -299,14 +543,19 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    // EthersJS doesn't support native batch requests, use sequential execution
-    const requestFns = heights.map(
-      (height) => () => this.executeWithFallback((provider) => provider.getBlock(height, fullTransactions))
-    );
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<UniversalBlock[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, fullTransactions],
+      }));
 
-    const ethersBlocks = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks.filter((block) => block !== null).map((block) => this.normalizeEthersBlock(block));
+    };
 
-    return ethersBlocks.filter((block) => block !== null).map((block) => this.normalizeBlock(block));
+    // Use rate limiter for batch requests
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
@@ -314,57 +563,24 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    const genesisHeight = 0;
-    const hasGenesis = heights.includes(genesisHeight);
+    // Create batch function for direct JSON-RPC batch calls
+    const batchRequestFn = async (batchHeights: number[]): Promise<any[]> => {
+      const calls = batchHeights.map((height) => ({
+        method: 'eth_getBlockByNumber',
+        params: [`0x${height.toString(16)}`, false],
+      }));
 
-    if (hasGenesis) {
-      // Get statistics for the genesis block (in Ethereum, this is block 0)
-      const genesisBlock = await this.rateLimiter.executeRequest(() =>
-        this.executeWithFallback<any>((provider) => provider.getBlock(genesisHeight, false))
-      );
-
-      const genesisStats = {
-        number: genesisBlock!.number,
-        hash: genesisBlock!.hash,
-        size: genesisBlock!.size || 0,
-      };
-
-      // Process the remaining blocks, excluding genesis
-      const filteredHeights = heights.filter((height) => height !== genesisHeight);
-
-      if (filteredHeights.length === 0) {
-        return [genesisStats];
-      }
-
-      const requestFns = filteredHeights.map(
-        (height) => () => this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
-      );
-
-      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
-      const stats = blocks
+      const rawBlocks = await this.directBatchRpcCall(calls);
+      return rawBlocks
         .filter((block) => block !== null)
         .map((block: any) => ({
-          number: block.number,
+          number: parseInt(block.number || block.blockNumber, 16),
           hash: block.hash,
-          size: block.size || 0,
+          size: parseInt(block.size, 16),
         }));
+    };
 
-      return [genesisStats, ...stats];
-    } else {
-      // Process all blocks equally
-      const requestFns = heights.map(
-        (height) => () => this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
-      );
-
-      const blocks = await this.rateLimiter.executeSequentialRequests(requestFns);
-      return blocks
-        .filter((block) => block !== null)
-        .map((block: any) => ({
-          number: block.number,
-          hash: block.hash,
-          size: block.size || 0,
-        }));
-    }
+    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
   }
 
   // ===== TRANSACTION METHODS =====
@@ -381,19 +597,23 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     return this.normalizeTransaction(ethersTx);
   }
 
+  // Use batch RPC for multiple transactions
   public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // EthersJS doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map(
-      (hash) => () => this.executeWithFallback((provider) => provider.getTransaction(hash))
-    );
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransaction[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionByHash',
+        params: [hash],
+      }));
 
-    const ethersTransactions = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawTransactions = await this.directBatchRpcCall(calls);
+      return rawTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeRawTransaction(tx));
+    };
 
-    return ethersTransactions.filter((tx) => tx !== null).map((tx) => this.normalizeTransaction(tx));
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
@@ -405,38 +625,40 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       throw new Error(`Transaction receipt ${hash} not found`);
     }
 
-    // Normalize ethers receipt to UniversalTransactionReceipt
     return this.normalizeReceipt(ethersReceipt);
   }
 
+  // Use batch RPC for multiple receipts
   public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
     if (hashes.length === 0) {
       return [];
     }
 
-    // EthersJS doesn't support native batch requests, use sequential execution
-    const requestFns = hashes.map(
-      (hash) => () => this.executeWithFallback((provider) => provider.getTransactionReceipt(hash))
-    );
+    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransactionReceipt[]> => {
+      const calls = batchHashes.map((hash) => ({
+        method: 'eth_getTransactionReceipt',
+        params: [hash],
+      }));
 
-    const ethersReceipts = await this.rateLimiter.executeSequentialRequests(requestFns);
+      const rawReceipts = await this.directBatchRpcCall(calls);
+      return rawReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeRawReceipt(receipt));
+    };
 
-    return ethersReceipts.filter((receipt) => receipt !== null).map((receipt) => this.normalizeReceipt(receipt));
+    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
+
+  // ===== NORMALIZATION METHODS =====
 
   /**
    * Normalizes ethers.js Block object to UniversalBlock format
-   * Handles BigInt values and ethers-specific field naming
    */
   private normalizeBlock(ethersBlock: any): UniversalBlock {
     // In ethers v6, full transactions are in prefetchedTransactions
     let transactions;
 
     if (ethersBlock.prefetchedTransactions && ethersBlock.prefetchedTransactions.length > 0) {
-      // If there are prefetchedTransactions - these are full transaction objects
       transactions = ethersBlock.prefetchedTransactions.map((tx: any) => this.normalizeTransaction(tx));
     } else if (ethersBlock.transactions) {
-      // Otherwise, they are just transaction hashes
       transactions = ethersBlock.transactions;
     }
 
@@ -451,42 +673,65 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       stateRoot: ethersBlock.stateRoot,
       receiptsRoot: ethersBlock.receiptsRoot,
       miner: ethersBlock.miner,
-
-      // Convert BigInt to string for difficulty values
       difficulty: ethersBlock.difficulty?.toString() || '0',
       totalDifficulty: ethersBlock.totalDifficulty?.toString() || '0',
-
       extraData: ethersBlock.extraData,
       size: ethersBlock.size || 0,
-
-      // Convert BigInt to number for gas values
       gasLimit: Number(ethersBlock.gasLimit) || 0,
       gasUsed: Number(ethersBlock.gasUsed) || 0,
-
       timestamp: ethersBlock.timestamp || 0,
       uncles: ethersBlock.uncles || [],
-
-      // EIP-1559 fields - convert BigInt to string
       baseFeePerGas: ethersBlock.baseFeePerGas?.toString(),
-
-      // Shanghai fork fields
       withdrawals: ethersBlock.withdrawals,
       withdrawalsRoot: ethersBlock.withdrawalsRoot,
-
-      // Cancun fork fields - convert BigInt to string
       blobGasUsed: ethersBlock.blobGasUsed?.toString(),
       excessBlobGas: ethersBlock.excessBlobGas?.toString(),
       parentBeaconBlockRoot: ethersBlock.parentBeaconBlockRoot,
-
       transactions,
+    };
+  }
 
-      // receipts will be added by the fetching methods
+  /**
+   * Normalizes raw JSON-RPC block response (used for batch calls)
+   */
+  private normalizeEthersBlock(rawBlock: any): UniversalBlock {
+    return {
+      hash: rawBlock.hash,
+      parentHash: rawBlock.parentHash,
+      blockNumber: rawBlock.blockNumber
+        ? parseInt(rawBlock.blockNumber, 16)
+        : rawBlock.number
+          ? parseInt(rawBlock.number, 16)
+          : 0,
+      nonce: rawBlock.nonce,
+      sha3Uncles: rawBlock.sha3Uncles,
+      logsBloom: rawBlock.logsBloom,
+      transactionsRoot: rawBlock.transactionsRoot,
+      stateRoot: rawBlock.stateRoot,
+      receiptsRoot: rawBlock.receiptsRoot,
+      miner: rawBlock.miner,
+      difficulty: rawBlock.difficulty,
+      totalDifficulty: rawBlock.totalDifficulty,
+      extraData: rawBlock.extraData,
+      size: parseInt(rawBlock.size, 16),
+      gasLimit: parseInt(rawBlock.gasLimit, 16),
+      gasUsed: parseInt(rawBlock.gasUsed, 16),
+      timestamp: parseInt(rawBlock.timestamp, 16),
+      uncles: rawBlock.uncles || [],
+      baseFeePerGas: rawBlock.baseFeePerGas,
+      withdrawals: rawBlock.withdrawals,
+      withdrawalsRoot: rawBlock.withdrawalsRoot,
+      blobGasUsed: rawBlock.blobGasUsed,
+      excessBlobGas: rawBlock.excessBlobGas,
+      parentBeaconBlockRoot: rawBlock.parentBeaconBlockRoot,
+      transactions: rawBlock.transactions?.map((tx: any) =>
+        typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx)
+      ),
     };
   }
 
   /**
    * Normalizes ethers.js TransactionResponse to UniversalTransaction format
-   * Handles BigInt values, signature extraction, and field mapping
    */
   private normalizeTransaction(ethersTx: any): UniversalTransaction {
     return {
@@ -494,44 +739,70 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       nonce: ethersTx.nonce || 0,
       from: ethersTx.from,
       to: ethersTx.to,
-
-      // Convert BigInt value to string
       value: ethersTx.value?.toString() || '0',
-
-      // Convert BigInt gasLimit to number for gas field
       gas: Number(ethersTx.gasLimit) || 0,
-
       input: ethersTx.data || ethersTx.input || '0x',
       blockHash: ethersTx.blockHash,
       blockNumber: ethersTx.blockNumber,
-
-      // Handle both transactionIndex and index fields
       transactionIndex: ethersTx.transactionIndex ?? ethersTx.index,
-
-      // Convert BigInt gasPrice to string
       gasPrice: ethersTx.gasPrice?.toString(),
-
-      // Convert BigInt chainId to number
       chainId: ethersTx.chainId ? Number(ethersTx.chainId) : undefined,
-
-      // Extract signature fields from signature object or direct fields
       v: ethersTx.signature?.v?.toString() || ethersTx.v?.toString(),
       r: ethersTx.signature?.r || ethersTx.r,
       s: ethersTx.signature?.s || ethersTx.s,
-
-      // Convert transaction type to string
       type: ethersTx.type?.toString() || '0',
-
-      // EIP-1559 fields - convert BigInt to string
       maxFeePerGas: ethersTx.maxFeePerGas?.toString(),
       maxPriorityFeePerGas: ethersTx.maxPriorityFeePerGas?.toString(),
-
-      // EIP-2930 access list
       accessList: ethersTx.accessList,
-
-      // EIP-4844 blob transaction fields - convert BigInt to string
       maxFeePerBlobGas: ethersTx.maxFeePerBlobGas?.toString(),
       blobVersionedHashes: ethersTx.blobVersionedHashes,
+    };
+  }
+
+  /**
+   * Normalizes raw JSON-RPC transaction response (used for batch calls)
+   */
+  private normalizeRawTransaction(rawTx: any): UniversalTransaction {
+    const parseHexSafely = (value: string | undefined, fieldName: string): number => {
+      if (!value) return 0;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value for ${fieldName}: ${value}`);
+      }
+      return parsed;
+    };
+
+    const parseHexOptional = (value: string | undefined): number | null => {
+      if (!value) return null;
+      const parsed = parseInt(value, 16);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid hex value: ${value}`);
+      }
+      return parsed;
+    };
+
+    return {
+      hash: rawTx.hash,
+      nonce: parseHexSafely(rawTx.nonce, 'nonce'),
+      from: rawTx.from,
+      to: rawTx.to,
+      value: rawTx.value,
+      gas: parseHexSafely(rawTx.gas, 'gas'),
+      input: rawTx.input,
+      blockHash: rawTx.blockHash,
+      blockNumber: parseHexOptional(rawTx.blockNumber),
+      transactionIndex: parseHexOptional(rawTx.transactionIndex),
+      gasPrice: rawTx.gasPrice,
+      chainId: rawTx.chainId ? parseHexSafely(rawTx.chainId, 'chainId') : undefined,
+      v: rawTx.v,
+      r: rawTx.r,
+      s: rawTx.s,
+      type: rawTx.type || '0x0',
+      maxFeePerGas: rawTx.maxFeePerGas,
+      maxPriorityFeePerGas: rawTx.maxPriorityFeePerGas,
+      accessList: rawTx.accessList,
+      maxFeePerBlobGas: rawTx.maxFeePerBlobGas,
+      blobVersionedHashes: rawTx.blobVersionedHashes,
     };
   }
 
@@ -546,11 +817,8 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       blockNumber: ethersReceipt.blockNumber,
       from: ethersReceipt.from,
       to: ethersReceipt.to,
-
-      // Convert BigInt values to numbers
       cumulativeGasUsed: Number(ethersReceipt.cumulativeGasUsed),
       gasUsed: Number(ethersReceipt.gasUsed),
-
       contractAddress: ethersReceipt.contractAddress,
       logs:
         ethersReceipt.logs?.map((log: any) => ({
@@ -567,13 +835,44 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       logsBloom: ethersReceipt.logsBloom,
       status: ethersReceipt.status === 1 ? '0x1' : '0x0',
       type: ethersReceipt.type?.toString() || '0x0',
-
-      // Convert BigInt effectiveGasPrice to number
       effectiveGasPrice: Number(ethersReceipt.effectiveGasPrice || 0),
-
-      // Convert BigInt blob fields to strings
       blobGasUsed: ethersReceipt.blobGasUsed?.toString(),
       blobGasPrice: ethersReceipt.blobGasPrice?.toString(),
+    };
+  }
+
+  /**
+   * Normalizes raw JSON-RPC receipt response (used for batch calls)
+   */
+  private normalizeRawReceipt(rawReceipt: any): UniversalTransactionReceipt {
+    return {
+      transactionHash: rawReceipt.transactionHash,
+      transactionIndex: parseInt(rawReceipt.transactionIndex, 16),
+      blockHash: rawReceipt.blockHash,
+      blockNumber: parseInt(rawReceipt.blockNumber, 16),
+      from: rawReceipt.from,
+      to: rawReceipt.to,
+      cumulativeGasUsed: parseInt(rawReceipt.cumulativeGasUsed, 16),
+      gasUsed: parseInt(rawReceipt.gasUsed, 16),
+      contractAddress: rawReceipt.contractAddress,
+      logs:
+        rawReceipt.logs?.map((log: any) => ({
+          address: log.address,
+          topics: log.topics,
+          data: log.data,
+          blockNumber: log.blockNumber ? parseInt(log.blockNumber, 16) : null,
+          transactionHash: log.transactionHash,
+          transactionIndex: log.transactionIndex ? parseInt(log.transactionIndex, 16) : null,
+          blockHash: log.blockHash,
+          logIndex: log.logIndex ? parseInt(log.logIndex, 16) : null,
+          removed: log.removed || false,
+        })) || [],
+      logsBloom: rawReceipt.logsBloom,
+      status: rawReceipt.status === '0x1' ? '0x1' : '0x0',
+      type: rawReceipt.type || '0x0',
+      effectiveGasPrice: rawReceipt.effectiveGasPrice ? parseInt(rawReceipt.effectiveGasPrice, 16) : 0,
+      blobGasUsed: rawReceipt.blobGasUsed,
+      blobGasPrice: rawReceipt.blobGasPrice,
     };
   }
 }
