@@ -128,7 +128,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     // If config is SUBSCRIBE but big height difference - use PULL
     if (currentNetworkHeight !== undefined) {
       const heightDifference = currentNetworkHeight - queue.lastHeight;
-      const threshold = this.config.strategyThreshold || 50;
+      const threshold = this.config.strategyThreshold || 20;
 
       if (heightDifference > threshold) {
         return this._strategies.get(StrategyNames.PULL)!;

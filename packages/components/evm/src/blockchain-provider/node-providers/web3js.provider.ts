@@ -48,7 +48,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
       network: this.network,
-      rateLimits: this.rateLimiter.getStats().config,
+      rateLimits: this.rateLimiter.getStats(),
     };
   }
 
@@ -707,6 +707,64 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     };
 
     return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
+  }
+
+  /**
+   * Gets all transaction receipts for a block using eth_getBlockReceipts
+   */
+  public async getBlockReceipts(blockNumber: number | string): Promise<UniversalTransactionReceipt[]> {
+    const blockId = typeof blockNumber === 'number' ? `0x${blockNumber.toString(16)}` : blockNumber;
+
+    const call = {
+      method: 'eth_getBlockReceipts',
+      params: [blockId],
+    };
+
+    try {
+      const rawReceipts = await this.rateLimiter.executeRequest(() =>
+        this.directBatchRpcCall([call]).then((results) => results[0])
+      );
+
+      if (!rawReceipts || !Array.isArray(rawReceipts)) {
+        return [];
+      }
+
+      return rawReceipts.map((receipt) => this.normalizeRawReceipt(receipt));
+    } catch (error) {
+      // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
+      throw new Error(`eth_getBlockReceipts failed: ${error}`);
+    }
+  }
+
+  /**
+   * Gets receipts for multiple blocks using batch eth_getBlockReceipts calls
+   */
+  public async getManyBlocksReceipts(blockNumbers: (number | string)[]): Promise<UniversalTransactionReceipt[][]> {
+    if (blockNumbers.length === 0) {
+      return [];
+    }
+
+    const batchRequestFn = async (batchBlockNumbers: (number | string)[]): Promise<UniversalTransactionReceipt[][]> => {
+      const calls = batchBlockNumbers.map((blockNumber) => ({
+        method: 'eth_getBlockReceipts',
+        params: [typeof blockNumber === 'number' ? `0x${blockNumber.toString(16)}` : blockNumber],
+      }));
+
+      try {
+        const rawBlocksReceipts = await this.directBatchRpcCall(calls);
+
+        return rawBlocksReceipts.map((rawReceipts) => {
+          if (!rawReceipts || !Array.isArray(rawReceipts)) {
+            return [];
+          }
+          return rawReceipts.map((receipt) => this.normalizeRawReceipt(receipt));
+        });
+      } catch (batchError) {
+        throw batchError;
+      }
+    };
+
+    return await this.rateLimiter.executeBatchRequests(blockNumbers, batchRequestFn);
   }
 
   // ===== TRANSACTION METHODS =====
