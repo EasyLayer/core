@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/cqrs-transport",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "",
   "private": true,
   "type": "commonjs",

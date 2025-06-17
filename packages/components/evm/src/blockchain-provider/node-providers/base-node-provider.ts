@@ -105,6 +105,21 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getManyTransactionReceipts() is not supported by this provider');
   }
 
+  /**
+   * Gets all transaction receipts for a block using eth_getBlockReceipts
+   * More efficient than getting receipts individually
+   */
+  async getBlockReceipts(blockNumber: number | string): Promise<UniversalTransactionReceipt[]> {
+    throw new Error('Method getBlockReceipts() is not supported by this provider');
+  }
+
+  /**
+   * Gets receipts for multiple blocks using batch eth_getBlockReceipts calls
+   */
+  async getManyBlocksReceipts(blockNumbers: (number | string)[]): Promise<UniversalTransactionReceipt[][]> {
+    throw new Error('Method getManyBlocksReceipts() is not supported by this provider');
+  }
+
   // ===== BLOCK METHODS =====
 
   async getBlockHeight(): Promise<number> {

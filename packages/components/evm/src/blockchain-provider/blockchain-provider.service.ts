@@ -24,6 +24,14 @@ export class BlockchainProviderService {
     this.normalizer = new BlockchainNormalizer(this.networkConfig);
   }
 
+  get connectionManager() {
+    return this._connectionManager;
+  }
+
+  get config() {
+    return this.networkConfig;
+  }
+
   /**
    * Subscribes to contract logs via WebSocket using provider's native implementation
    */
@@ -65,23 +73,16 @@ export class BlockchainProviderService {
         }
       })
       .catch((error) => {
-        this.log.error('subscribeToLogs(): failed to get provider', { args: error });
+        this.log.error('subscribeToLogs(): failed to get provider', { args: { error } });
         rejectSubscription(error as Error);
       });
 
     return subscriptionPromise;
   }
 
-  get connectionManager() {
-    return this._connectionManager;
-  }
-
-  get config() {
-    return this.networkConfig;
-  }
-
   /**
    * Subscribes to new block events via WebSocket using provider's native implementation
+   * Now uses eth_getBlockReceipts for better performance
    *
    * @param callback - Function to be invoked whenever a new block is received
    * @returns A Subscription (Promise<void> & { unsubscribe(): void })
@@ -110,10 +111,11 @@ export class BlockchainProviderService {
           // Use provider's unified subscription method
           const subscription = provider.subscribeToNewBlocks(async (blockNumber: number) => {
             try {
+              // Use optimized method with eth_getBlockReceipts
               const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
               callback(blockWithReceipts);
             } catch (error) {
-              this.log.error('Error fetching block in subscription', { args: error });
+              this.log.error('Error fetching block in subscription', { args: { error } });
               rejectSubscription(error as Error);
             }
           });
@@ -128,7 +130,7 @@ export class BlockchainProviderService {
         }
       })
       .catch((error) => {
-        this.log.error('subscribeToNewBlocks(): failed to get provider', { args: error });
+        this.log.error('subscribeToNewBlocks(): failed to get provider', { args: { error } });
         rejectSubscription(error as Error);
       });
 
@@ -170,7 +172,7 @@ export class BlockchainProviderService {
         }
       })
       .catch((error) => {
-        this.log.error('subscribeToPendingTransactions(): failed to get provider', { args: error });
+        this.log.error('subscribeToPendingTransactions(): failed to get provider', { args: { error } });
         rejectSubscription(error as Error);
       });
 
@@ -178,8 +180,8 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets a block with full transactions and all receipts.
-   * Simple approach: get block + transactions, then get receipts, then combine.
+   * Gets a block with full transactions and all receipts using eth_getBlockReceipts.
+   * Optimized approach: get block + transactions, then get all receipts with one call.
    */
   public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block> {
     try {
@@ -188,16 +190,22 @@ export class BlockchainProviderService {
       // Get block with full transactions
       const rawBlock = await provider.getOneBlockByHeight(Number(height), fullTransactions);
 
-      // Get receipts for all transactions if they exist
+      // Get all receipts using eth_getBlockReceipts (much more efficient!)
       if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-        // Extract transaction hashes
-        const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+        try {
+          // Use the new eth_getBlockReceipts method for better performance
+          const rawReceipts = await provider.getBlockReceipts(Number(height));
+          rawBlock.receipts = rawReceipts;
+        } catch (blockReceiptsError) {
+          this.log.warn('eth_getBlockReceipts failed, falling back to individual receipt fetching', {
+            args: { height, error: blockReceiptsError },
+          });
 
-        // Get all receipts in batch
-        const rawReceipts = await provider.getManyTransactionReceipts(txHashes);
-
-        // Add receipts to the raw block
-        rawBlock.receipts = rawReceipts;
+          // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
+          const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+          const rawReceipts = await provider.getManyTransactionReceipts(txHashes);
+          rawBlock.receipts = rawReceipts;
+        }
       } else {
         rawBlock.receipts = [];
       }
@@ -215,7 +223,7 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple blocks with full transactions and receipts.
+   * Gets multiple blocks with full transactions and receipts using eth_getBlockReceipts.
    * Optimized approach using batch calls for better performance.
    */
   public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
@@ -226,37 +234,51 @@ export class BlockchainProviderService {
       // Get all blocks with full transactions using batch calls
       const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
-      // Collect all transaction hashes from all blocks
-      const allTxHashes: string[] = [];
-      const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
+      try {
+        // Use the new eth_getBlockReceipts method for much better performance
+        const allBlocksReceipts = await provider.getManyBlocksReceipts(numericHeights);
 
-      rawBlocks.forEach((rawBlock: UniversalBlock) => {
-        if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-          const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
-          blockTxMapping.set(rawBlock.blockNumber, txHashes);
-          allTxHashes.push(...txHashes);
-        } else {
-          blockTxMapping.set(rawBlock.blockNumber, []);
+        // Map receipts back to blocks
+        rawBlocks.forEach((rawBlock, index) => {
+          rawBlock.receipts = allBlocksReceipts[index] || [];
+        });
+      } catch (blockReceiptsError) {
+        this.log.warn('getManyBlocksReceipts failed, falling back to individual receipt fetching', {
+          args: { heights, error: blockReceiptsError },
+        });
+
+        // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
+        const allTxHashes: string[] = [];
+        const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
+
+        rawBlocks.forEach((rawBlock: UniversalBlock) => {
+          if (rawBlock.transactions && rawBlock.transactions.length > 0) {
+            const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
+            blockTxMapping.set(rawBlock.blockNumber, txHashes);
+            allTxHashes.push(...txHashes);
+          } else {
+            blockTxMapping.set(rawBlock.blockNumber, []);
+          }
+        });
+
+        // Get all receipts at once using batch calls
+        let allRawReceipts: any[] = [];
+        if (allTxHashes.length > 0) {
+          allRawReceipts = await provider.getManyTransactionReceipts(allTxHashes);
         }
-      });
 
-      // Get all receipts at once using batch calls
-      let allRawReceipts: any[] = [];
-      if (allTxHashes.length > 0) {
-        allRawReceipts = await provider.getManyTransactionReceipts(allTxHashes);
+        // Map receipts back to blocks
+        let receiptIndex = 0;
+        rawBlocks.forEach((rawBlock) => {
+          const txHashes = blockTxMapping.get(rawBlock.blockNumber) || [];
+          if (txHashes.length > 0) {
+            rawBlock.receipts = allRawReceipts.slice(receiptIndex, receiptIndex + txHashes.length);
+            receiptIndex += txHashes.length;
+          } else {
+            rawBlock.receipts = [];
+          }
+        });
       }
-
-      // Map receipts back to blocks
-      let receiptIndex = 0;
-      rawBlocks.forEach((rawBlock) => {
-        const txHashes = blockTxMapping.get(rawBlock.blockNumber) || [];
-        if (txHashes.length > 0) {
-          rawBlock.receipts = allRawReceipts.slice(receiptIndex, receiptIndex + txHashes.length);
-          receiptIndex += txHashes.length;
-        } else {
-          rawBlock.receipts = [];
-        }
-      });
 
       // Normalize all blocks
       const normalizedBlocks = rawBlocks.map((rawBlock) => this.normalizer.normalizeBlock(rawBlock));
@@ -334,7 +356,7 @@ export class BlockchainProviderService {
       const height = await provider.getBlockHeight();
       return Number(height);
     } catch (error) {
-      this.log.error('getCurrentBlockHeight()', { args: error });
+      this.log.error('getCurrentBlockHeight()', { args: { error } });
       throw error;
     }
   }
@@ -347,7 +369,7 @@ export class BlockchainProviderService {
       const provider = await this._connectionManager.getActiveProvider();
       return await provider.getOneBlockHashByHeight(Number(height));
     } catch (error) {
-      this.log.error('getOneBlockHashByHeight()', { args: error });
+      this.log.error('getOneBlockHashByHeight()', { args: { error } });
       throw error;
     }
   }
@@ -363,7 +385,7 @@ export class BlockchainProviderService {
       // Normalize the block data
       return this.normalizer.normalizeBlock(rawBlock);
     } catch (error) {
-      this.log.error('getOneBlockByHeight()', { args: error });
+      this.log.error('getOneBlockByHeight()', { args: { error } });
       throw error;
     }
   }
@@ -382,7 +404,7 @@ export class BlockchainProviderService {
       // Normalize all blocks
       return rawBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
     } catch (error) {
-      this.log.error('getManyBlocksByHeights()', { args: error });
+      this.log.error('getManyBlocksByHeights()', { args: { error } });
       throw error;
     }
   }
@@ -395,7 +417,7 @@ export class BlockchainProviderService {
       const provider = await this._connectionManager.getActiveProvider();
       return await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
     } catch (error) {
-      this.log.error('getManyBlocksStatsByHeights()', { args: error });
+      this.log.error('getManyBlocksStatsByHeights()', { args: { error } });
       throw error;
     }
   }
@@ -411,7 +433,7 @@ export class BlockchainProviderService {
       // Normalize the block data
       return this.normalizer.normalizeBlock(rawBlock);
     } catch (error) {
-      this.log.error('getOneBlockByHash()', { args: error });
+      this.log.error('getOneBlockByHash()', { args: { error } });
       throw error;
     }
   }
@@ -427,7 +449,7 @@ export class BlockchainProviderService {
       // Filter out null blocks and normalize the rest
       return rawBlocks.filter((block: any) => block).map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
     } catch (error) {
-      this.log.error('getManyBlocksByHashes()', { args: error });
+      this.log.error('getManyBlocksByHashes()', { args: { error } });
       throw error;
     }
   }
@@ -443,7 +465,7 @@ export class BlockchainProviderService {
       // Normalize the transaction data
       return this.normalizer.normalizeTransaction(rawTransaction);
     } catch (error) {
-      this.log.error('getOneTransactionByHash()', { args: error });
+      this.log.error('getOneTransactionByHash()', { args: { error } });
       throw error;
     }
   }
@@ -459,7 +481,7 @@ export class BlockchainProviderService {
       // Normalize all transactions
       return rawTransactions.map((rawTx: any) => this.normalizer.normalizeTransaction(rawTx));
     } catch (error) {
-      this.log.error('getManyTransactionsByHashes()', { args: error });
+      this.log.error('getManyTransactionsByHashes()', { args: { error } });
       throw error;
     }
   }
@@ -475,7 +497,7 @@ export class BlockchainProviderService {
       // Normalize the receipt data
       return this.normalizer.normalizeTransactionReceipt(rawReceipt);
     } catch (error) {
-      this.log.error('getTransactionReceipt()', { args: error });
+      this.log.error('getTransactionReceipt()', { args: { error } });
       throw error;
     }
   }
@@ -491,7 +513,7 @@ export class BlockchainProviderService {
       // Normalize all receipts
       return rawReceipts.map((rawReceipt: any) => this.normalizer.normalizeTransactionReceipt(rawReceipt));
     } catch (error) {
-      this.log.error('getManyTransactionReceipts()', { args: error });
+      this.log.error('getManyTransactionReceipts()', { args: { error } });
       throw error;
     }
   }

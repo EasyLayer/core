@@ -87,7 +87,7 @@ export class RateLimiter {
         }
       } catch (error: any) {
         if (this.isRateLimitError(error)) {
-          throw new Error(`Rate limit exceeded: ${error?.message || 'Unknown error'}`);
+          throw new Error(`Rate limit exceeded`);
         }
         throw error;
       }
@@ -125,6 +125,8 @@ export class RateLimiter {
    * Create batches from array
    */
   private createBatches<T>(items: T[], batchSize: number): T[][] {
+    if (batchSize <= 0) return [];
+
     const batches: T[][] = [];
     for (let i = 0; i < items.length; i += batchSize) {
       batches.push(items.slice(i, i + batchSize));
@@ -156,7 +158,6 @@ export class RateLimiter {
       'calls per second',
       'quota exceeded',
       'throttled',
-      '15/second request limit',
       'rps limit',
     ];
 
@@ -172,25 +173,7 @@ export class RateLimiter {
    * Get rate limiter statistics
    */
   getStats() {
-    return {
-      individualRequests: {
-        running: this.limiter.running(),
-        queued: this.limiter.queued(),
-        estimatedRPS: this.config.maxRequestsPerSecond,
-      },
-      batchRequests: {
-        batchSize: this.config.maxBatchSize,
-        rpsUsagePerBatch: `${this.config.maxBatchSize}/15 (100% RPS utilization)`,
-        delayBetweenBatches: `${this.config.batchDelayMs}ms`,
-        processingType: 'Sequential (no queue needed)',
-      },
-      config: { ...this.config },
-      efficiency: {
-        quickNodeLimit: '15 RPS',
-        batchEfficiency: '100% utilization (15/15 RPS)',
-        delayStrategy: `Configurable ${this.config.batchDelayMs}ms between batches`,
-      },
-    };
+    return this.config;
   }
 
   /**

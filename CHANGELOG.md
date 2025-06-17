@@ -1,3 +1,9 @@
+## <small>0.7.6 (2025-06-17)</small>
+
+* refactor: added fetching receipts for entire block in one request; ([fc0daf6](https://github.com/EasyLayer/core/commit/fc0daf6))
+
+
+
 ## <small>0.7.5 (2025-06-15)</small>
 
 * refactor: fixed blocks loading batching and concurrency; ([2a6046c](https://github.com/EasyLayer/core/commit/2a6046c))
