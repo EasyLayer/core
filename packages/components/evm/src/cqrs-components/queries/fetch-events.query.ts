@@ -4,6 +4,7 @@ export interface IFetchEventsQuery {
   readonly modelIds: string[];
   readonly filter: Filter;
   readonly paging: PaginationDto;
+  readonly streaming?: boolean;
 }
 
 export class FetchEventsQuery {

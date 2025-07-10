@@ -2,131 +2,75 @@ import Bottleneck from 'bottleneck';
 import type { RateLimits } from './interfaces';
 
 /**
- * Proper QuickNode rate limiting strategy:
- * - Bottleneck: ONLY for parallel individual requests (handles concurrency + RPS)
- * - Batch requests: Simple sequential processing with await (no Bottleneck needed)
- * - maxBatchSize: 15 (100% of QuickNode 15 RPS limit for maximum efficiency)
- * - batchDelayMs: 1000ms delay between batches AND between concurrent requests
+ * Internal rate limiter for EVM providers
+ * All requests are executed as batches, even single requests
  */
-export const DEFAULT_RATE_LIMITS: Required<RateLimits> = {
-  maxRequestsPerSecond: 10,
-  maxConcurrentRequests: 8,
-  maxBatchSize: 15,
-  batchDelayMs: 1000,
-};
-
-export class RateLimiter {
+export class EvmRateLimiter {
   private limiter: Bottleneck;
   private config: Required<RateLimits>;
 
   constructor(config: RateLimits = {}) {
     this.config = {
-      maxRequestsPerSecond: config.maxRequestsPerSecond ?? DEFAULT_RATE_LIMITS.maxRequestsPerSecond,
-      maxConcurrentRequests: config.maxConcurrentRequests ?? DEFAULT_RATE_LIMITS.maxConcurrentRequests,
-      maxBatchSize: config.maxBatchSize ?? DEFAULT_RATE_LIMITS.maxBatchSize,
-      batchDelayMs: config.batchDelayMs ?? DEFAULT_RATE_LIMITS.batchDelayMs,
+      maxConcurrentRequests: config.maxConcurrentRequests ?? 1,
+      maxBatchSize: config.maxBatchSize ?? 15,
+      requestDelayMs: config.requestDelayMs ?? 1000,
     };
 
     this.limiter = new Bottleneck({
       maxConcurrent: this.config.maxConcurrentRequests,
-      minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond),
-      reservoir: this.config.maxRequestsPerSecond,
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond,
-      reservoirRefreshInterval: 1000,
+      minTime: this.config.requestDelayMs,
     });
   }
 
   /**
-   * Execute single request with rate limiting
+   * Execute all requests as batches
+   * Groups by method and splits into batches based on maxBatchSize
+   * Bottleneck handles all scheduling and concurrency
    */
-  async executeRequest<T>(requestFn: () => Promise<T>): Promise<T> {
-    return await this.limiter.schedule(requestFn);
-  }
+  async execute<T>(
+    requests: Array<{ method: string; params: any[] }>,
+    batchCall: (calls: typeof requests) => Promise<T[]>
+  ): Promise<T[]> {
+    if (requests.length === 0) return [];
 
-  /**
-   * Execute multiple individual requests in parallel
-   */
-  async executeParallelRequests<T>(requestFns: Array<() => Promise<T>>): Promise<T[]> {
-    if (requestFns.length === 0) {
-      return [];
-    }
+    // Group requests by method
+    const methodGroups = new Map<string, Array<{ params: any[]; index: number }>>();
 
-    const promises = requestFns.map((requestFn) => this.executeRequest(requestFn));
-    return await Promise.all(promises);
-  }
-
-  /**
-   * Execute batch requests with strict sequential processing
-   *
-   * Strategy:
-   * 1. Send batch (configurable size)
-   * 2. Wait for complete response
-   * 3. Wait configurable delay
-   * 4. Send next batch
-   */
-  async executeBatchRequests<T>(items: any[], batchRequestFn: (batchItems: any[]) => Promise<T[]>): Promise<T[]> {
-    if (items.length === 0) {
-      return [];
-    }
-
-    const batches = this.createBatches(items, this.config.maxBatchSize);
-    const results: T[] = [];
-
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-
-      try {
-        const batchResults = await batchRequestFn(batch!);
-
-        for (let j = 0; j < batchResults.length; j++) {
-          results.push(batchResults[j]!);
-        }
-
-        if (i < batches.length - 1) {
-          await this.delay(this.config.batchDelayMs);
-        }
-      } catch (error: any) {
-        if (this.isRateLimitError(error)) {
-          throw new Error(`Rate limit exceeded`);
-        }
-        throw error;
+    requests.forEach((request, index) => {
+      if (!methodGroups.has(request.method)) {
+        methodGroups.set(request.method, []);
       }
+      methodGroups.get(request.method)!.push({ params: request.params, index });
+    });
+
+    const results: T[] = new Array(requests.length);
+    const allBatches: Array<{ batch: Array<{ params: any[]; index: number }>; method: string }> = [];
+
+    // Collect all batches
+    for (const [method, items] of methodGroups) {
+      const batches = this.createBatches(items, this.config.maxBatchSize);
+      batches.forEach((batch) => {
+        allBatches.push({ batch, method });
+      });
+    }
+
+    // Execute all batches through bottleneck sequentially
+    for (const { batch, method } of allBatches) {
+      const batchCalls = batch.map((item) => ({ method, params: item.params }));
+      const batchResults = await this.limiter.schedule(() => batchCall(batchCalls));
+
+      batch.forEach((item, i) => {
+        results[item.index] = batchResults[i]!;
+      });
     }
 
     return results;
   }
 
   /**
-   * Execute individual requests sequentially
-   */
-  async executeSequentialRequests<T>(requestFns: Array<() => Promise<T>>): Promise<T[]> {
-    if (requestFns.length === 0) {
-      return [];
-    }
-
-    const results: T[] = [];
-
-    for (const requestFn of requestFns) {
-      try {
-        const result = await this.executeRequest(requestFn);
-        results.push(result);
-      } catch (error: any) {
-        if (this.isRateLimitError(error)) {
-          throw new Error(`Rate limit exceeded: ${error?.message || 'Unknown error'}`);
-        }
-        throw error;
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Create batches from array
+   * Split items into batches based on maxBatchSize
    */
   private createBatches<T>(items: T[], batchSize: number): T[][] {
-    if (batchSize <= 0) return [];
-
     const batches: T[][] = [];
     for (let i = 0; i < items.length; i += batchSize) {
       batches.push(items.slice(i, i + batchSize));
@@ -135,86 +79,9 @@ export class RateLimiter {
   }
 
   /**
-   * Delay helper
+   * Stop the bottleneck limiter
    */
-  private delay(ms: number): Promise<void> {
-    if (ms <= 0) return Promise.resolve();
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Check if error is rate limit related
-   */
-  private isRateLimitError(error: any): boolean {
-    if (!error) return false;
-
-    const errorMessage = (error.message || '').toString().toLowerCase();
-    const errorCode = error.code;
-
-    const rateMessages = [
-      'rate limit',
-      'request limit',
-      'too many requests',
-      'calls per second',
-      'quota exceeded',
-      'throttled',
-      'rps limit',
-    ];
-
-    const rateCodes = [-32007, 429, -32005, -32000];
-
-    const hasRateMessage = rateMessages.some((msg) => errorMessage.includes(msg));
-    const hasRateCode = errorCode !== undefined && rateCodes.includes(errorCode);
-
-    return hasRateMessage || hasRateCode;
-  }
-
-  /**
-   * Get rate limiter statistics
-   */
-  getStats() {
-    return this.config;
-  }
-
-  /**
-   * Update configuration
-   */
-  updateConfig(newConfig: Partial<RateLimits>): void {
-    if (newConfig.maxRequestsPerSecond !== undefined) {
-      this.config.maxRequestsPerSecond = newConfig.maxRequestsPerSecond;
-    }
-    if (newConfig.maxConcurrentRequests !== undefined) {
-      this.config.maxConcurrentRequests = newConfig.maxConcurrentRequests;
-    }
-    if (newConfig.maxBatchSize !== undefined) {
-      this.config.maxBatchSize = newConfig.maxBatchSize;
-    }
-    if (newConfig.batchDelayMs !== undefined) {
-      this.config.batchDelayMs = newConfig.batchDelayMs;
-    }
-
-    this.limiter.stop();
-    this.limiter = new Bottleneck({
-      maxConcurrent: this.config.maxConcurrentRequests,
-      minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond),
-      reservoir: this.config.maxRequestsPerSecond,
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond,
-      reservoirRefreshInterval: 1000,
-    });
-  }
-
-  /**
-   * Reset state
-   */
-  reset(): void {
-    this.limiter.stop();
-
-    this.limiter = new Bottleneck({
-      maxConcurrent: this.config.maxConcurrentRequests,
-      minTime: Math.ceil(1000 / this.config.maxRequestsPerSecond),
-      reservoir: this.config.maxRequestsPerSecond,
-      reservoirRefreshAmount: this.config.maxRequestsPerSecond,
-      reservoirRefreshInterval: 1000,
-    });
+  async stop(): Promise<void> {
+    await this.limiter.stop({ dropWaitingJobs: true });
   }
 }

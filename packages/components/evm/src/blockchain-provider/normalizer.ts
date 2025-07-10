@@ -22,10 +22,15 @@ export class BlockchainNormalizer {
    * Automatically calculates block size with and without receipts
    */
   normalizeBlock(rawBlock: UniversalBlock): Block {
+    // Ensure blockNumber is present - required for final Block interface
+    if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
+      throw new Error('Block is missing required blockNumber field');
+    }
+
     const block: Block = {
       hash: rawBlock.hash,
       parentHash: rawBlock.parentHash,
-      blockNumber: rawBlock.blockNumber,
+      blockNumber: rawBlock.blockNumber, // Now guaranteed to be present
       nonce: rawBlock.nonce,
       sha3Uncles: rawBlock.sha3Uncles,
       logsBloom: rawBlock.logsBloom,
@@ -163,6 +168,11 @@ export class BlockchainNormalizer {
    * Normalizes a raw transaction receipt from any provider
    */
   normalizeTransactionReceipt(rawReceipt: UniversalTransactionReceipt): TransactionReceipt {
+    // Ensure blockNumber is present - required for final TransactionReceipt interface
+    if (rawReceipt.blockNumber === undefined || rawReceipt.blockNumber === null) {
+      throw new Error('TransactionReceipt is missing required blockNumber field');
+    }
+
     const receipt: TransactionReceipt = {
       transactionHash: rawReceipt.transactionHash,
       transactionIndex: rawReceipt.transactionIndex,

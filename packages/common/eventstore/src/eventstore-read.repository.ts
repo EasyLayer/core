@@ -130,6 +130,111 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     return events;
   }
 
+  public async *streamEventsForOneAggregate(
+    aggregateId: string,
+    options: FindEventsOptions = {}
+  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+    const { version, blockHeight, status, limit, offset } = options;
+    const repo = this.getRepository(aggregateId);
+
+    if (this.isSqlite) {
+      // For SQLite - use batch streaming
+      yield* this.streamEventsInBatches(aggregateId, options);
+    } else {
+      // For other DBs - use native streaming
+      const qb = repo
+        .createQueryBuilder('e')
+        .where('e.version > :version', { version: version ?? 0 })
+        .addOrderBy('e.version', 'ASC');
+
+      if (blockHeight != null) {
+        qb.andWhere('e.blockHeight <= :bh', { bh: blockHeight });
+      }
+      if (status != null) {
+        qb.andWhere('e.status = :status', { status });
+      }
+      if (offset != null) {
+        qb.skip(offset);
+      }
+      if (limit != null) {
+        qb.take(limit);
+      }
+
+      const stream: Readable = await qb.stream();
+
+      try {
+        for await (const raw of stream) {
+          yield deserialize(aggregateId, raw).event;
+        }
+      } finally {
+        stream.destroy();
+      }
+    }
+  }
+
+  public async *streamEventsForManyAggregates(
+    aggregateIds: string[],
+    options: FindEventsOptions = {}
+  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+    // Stream from each aggregate sequentially to maintain order
+    for (const aggregateId of aggregateIds) {
+      yield* this.streamEventsForOneAggregate(aggregateId, options);
+    }
+  }
+
+  private async *streamEventsInBatches(
+    aggregateId: string,
+    options: FindEventsOptions,
+    batchSize = 5000
+  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+    const { version, blockHeight, status, limit, offset } = options;
+    const repo = this.getRepository(aggregateId);
+
+    let currentOffset = offset ?? 0;
+    let remainingLimit = limit;
+    let hasMore = true;
+
+    while (hasMore) {
+      const currentBatchSize = remainingLimit ? Math.min(batchSize, remainingLimit) : batchSize;
+
+      const qb = repo
+        .createQueryBuilder('e')
+        .where('e.version > :version', { version: version ?? 0 })
+        .addOrderBy('e.version', 'ASC')
+        .skip(currentOffset)
+        .take(currentBatchSize);
+
+      if (blockHeight != null) {
+        qb.andWhere('e.blockHeight <= :bh', { bh: blockHeight });
+      }
+      if (status != null) {
+        qb.andWhere('e.status = :status', { status });
+      }
+
+      const rawEvents = await qb.getMany();
+
+      if (rawEvents.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Yield events one by one
+      for (const raw of rawEvents) {
+        yield deserialize(aggregateId, raw).event;
+      }
+
+      currentOffset += rawEvents.length;
+      if (remainingLimit) {
+        remainingLimit -= rawEvents.length;
+        if (remainingLimit <= 0) hasMore = false;
+      }
+
+      if (rawEvents.length < currentBatchSize) {
+        hasMore = false;
+      }
+    }
+  }
+
   public async getOneSnapshotByHeight<K extends T>(model: K, blockHeight: number): Promise<SnapshotParameters> {
     const { aggregateId } = model;
     if (!aggregateId) {
@@ -171,6 +276,9 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   private async applyEvents<K extends T>(model: K, toHeight: number) {
     const args = { model, blockHeight: toHeight };
     if (this.isSqlite) {
+      this.log.warn('Using SQLite - may consume more memory for large datasets', {
+        args: { aggregateId: model.aggregateId },
+      });
       await this._applyEventsInBatches(args);
     } else {
       await this._applyEventsStreamToAggregate(args);
@@ -224,7 +332,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     model,
     blockHeight,
     lastVersion = 0,
-    batchSize = 1000,
+    batchSize = 5000,
   }: {
     model: T;
     blockHeight?: number;

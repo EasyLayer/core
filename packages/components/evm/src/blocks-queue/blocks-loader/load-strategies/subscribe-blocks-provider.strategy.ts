@@ -4,29 +4,6 @@ import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from '../load-strategies';
 import type { BlocksQueue } from '../../blocks-queue';
 
-/**
- * Subscription-based blocks loading strategy that sets up WebSocket subscription to new blocks.
- *
- * This strategy performs initial catch-up to sync with the current network height before
- * establishing the subscription to ensure no blocks are missed during the setup phase.
- *
- * The strategy:
- * 1. Performs initial catch-up from queue.lastHeight to currentNetworkHeight
- * 2. Sets up WebSocket subscription for new incoming blocks
- * 3. Filters and enqueues blocks based on queue state and termination conditions
- *
- * @example
- * ```typescript
- * const strategy = new SubscribeBlocksProviderStrategy(
- *   logger,
- *   blockchainProvider,
- *   queue,
- *   config
- * );
- *
- * await strategy.load(12345); // Catch up to height 12345 then subscribe
- * ```
- */
 export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.SUBSCRIBE;
 

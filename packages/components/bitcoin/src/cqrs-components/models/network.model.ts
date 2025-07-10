@@ -99,31 +99,35 @@ export class Network extends AggregateRoot {
       throw new Error('Reorganisation failed: reached genesis without fork point');
     }
 
+    // Get both blocks at once
     const localBlock = this.chain.findBlockByHeight(reorgHeight);
-    const oldBlock = await service.getOneBlockByHeight(reorgHeight);
+    const remoteBlock = await service.getBasicBlockByHeight(reorgHeight);
 
-    const isForkPoint =
-      oldBlock != null &&
-      localBlock != null &&
-      oldBlock.hash === localBlock.hash &&
-      oldBlock.previousblockhash === localBlock.previousblockhash;
+    // Handle all possible null/undefined combinations
+    const hasLocal = localBlock != null; // covers both null and undefined
+    const hasRemote = remoteBlock != null; // covers both null and undefined
 
-    if (isForkPoint) {
-      // Match found
-      return await this.apply(
-        new BitcoinNetworkReorganizedEvent({
-          aggregateId: this.aggregateId,
-          blockHeight: reorgHeight,
-          requestId,
-          blocks,
-        })
-      );
+    // Case 1: Fork point found - both blocks exist and match
+    if (hasLocal && hasRemote) {
+      const isForkPoint =
+        remoteBlock.hash === localBlock.hash && remoteBlock.previousblockhash === localBlock.previousblockhash;
+
+      if (isForkPoint) {
+        return await this.apply(
+          new BitcoinNetworkReorganizedEvent({
+            aggregateId: this.aggregateId,
+            blockHeight: reorgHeight,
+            requestId,
+            blocks,
+          })
+        );
+      }
     }
 
-    // In other cases, we go down
-    const newBlocks = localBlock ? [...blocks, localBlock] : blocks;
+    // Case 2: Continue searching deeper
+    // Add local block to reorg list only if it exists
+    const newBlocks = hasLocal ? [...blocks, localBlock] : blocks;
 
-    // Recursive call to the lower level
     return this.reorganisation({
       reorgHeight: reorgHeight - 1,
       requestId,

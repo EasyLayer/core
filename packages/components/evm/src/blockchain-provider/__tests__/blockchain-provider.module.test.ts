@@ -10,7 +10,11 @@ describe('BlockchainProviderModule', () => {
 
   const moduleOptions: BlockchainProviderModuleOptions = {
     isGlobal: false,
-    network: {} as any,
+    network: {
+      nativeCurrencySymbol: 'ETH',
+      chainId: 9
+    } as any,
+    rateLimits: {},
     providers: [
       {
         connection: {
@@ -43,6 +47,4 @@ describe('BlockchainProviderModule', () => {
     expect(connectionManager).toBeDefined();
     expect(connectionManager).toBeInstanceOf(ConnectionManager);
   });
-
-  // Add more tests for specific methods of the services if needed
 });

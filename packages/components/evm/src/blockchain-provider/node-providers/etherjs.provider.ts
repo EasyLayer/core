@@ -3,13 +3,22 @@ import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
 import type { Hash } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
-import { RateLimiter } from './rate-limiter';
-import type { UniversalBlock, UniversalTransaction, UniversalTransactionReceipt, NetworkConfig } from './interfaces';
+import { EvmRateLimiter } from './rate-limiter';
+import type {
+  UniversalBlockStats,
+  UniversalBlock,
+  UniversalTransaction,
+  UniversalTransactionReceipt,
+  NetworkConfig,
+} from './interfaces';
+import { BlockchainErrorHandler } from './errors';
 
 export interface EtherJSProviderOptions extends BaseNodeProviderOptions {
   httpUrl: string;
   wsUrl?: string;
   network: NetworkConfig;
+  /** Response timeout in milliseconds (default: 5000) */
+  responseTimeout?: number;
 }
 
 export const createEtherJSProvider = (options: EtherJSProviderOptions): EtherJSProvider => {
@@ -21,23 +30,35 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   private httpUrl: string;
   private wsUrl?: string;
   private network: NetworkConfig;
-  private isWebSocketConnected = false;
-  private rateLimiter: RateLimiter;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 1000;
+  private rateLimiter: EvmRateLimiter;
   private requestId = 1;
+  private responseTimeout: number;
 
   constructor(options: EtherJSProviderOptions) {
     super(options);
     const url = new URL(options.httpUrl);
     this.httpUrl = url.toString();
-    this._httpClient = new ethers.JsonRpcProvider(this.httpUrl);
     this.wsUrl = options.wsUrl;
     this.network = options.network;
+    this.responseTimeout = options.responseTimeout ?? 5000;
 
-    // Initialize rate limiter with network config
-    this.rateLimiter = new RateLimiter(options.rateLimits);
+    // Create ethers Network object from our NetworkConfig
+    const ethersNetwork = new ethers.Network(this.network.nativeCurrencySymbol, this.network.chainId);
+
+    // Create FetchRequest with timeout for HTTP provider
+    const fetchRequest = new ethers.FetchRequest(this.httpUrl);
+    fetchRequest.timeout = this.responseTimeout;
+
+    // Configure HTTP provider with network and FetchRequest
+    this._httpClient = new ethers.JsonRpcProvider(fetchRequest, ethersNetwork);
+
+    // Initialize WebSocket if URL provided
+    if (this.wsUrl) {
+      this._wsClient = new ethers.WebSocketProvider(this.wsUrl, ethersNetwork);
+    }
+
+    // Initialize rate limiter
+    this.rateLimiter = new EvmRateLimiter(options.rateLimits);
   }
 
   get connectionOptions() {
@@ -47,7 +68,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       httpUrl: this.httpUrl,
       wsUrl: this.wsUrl,
       network: this.network,
-      rateLimits: this.rateLimiter.getStats(),
+      rateLimits: this.rateLimits,
     };
   }
 
@@ -57,119 +78,29 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
   public async healthcheck(): Promise<boolean> {
     try {
-      await this.rateLimiter.executeRequest(() => this.getActiveProvider().getBlockNumber());
+      const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
+
+      // Try WebSocket first if available, fallback to HTTP
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
+
+      await this.rateLimiter.execute(requests, batchCall);
       return true;
     } catch (error) {
       return false;
     }
   }
 
-  /**
-   * Gets the active provider - WebSocket if available, otherwise HTTP
-   */
-  private getActiveProvider(): ethers.JsonRpcProvider {
-    if (this.isWebSocketConnected && this._wsClient) {
-      return this._wsClient;
-    }
-    return this._httpClient;
-  }
-
-  /**
-   * Executes a request with automatic WebSocket/HTTP fallback
-   */
-  private async executeWithFallback<T>(operation: (provider: ethers.JsonRpcProvider) => Promise<T>): Promise<T> {
-    // Try WebSocket first if available
-    if (this.isWebSocketConnected && this._wsClient) {
-      try {
-        return await operation(this._wsClient);
-      } catch (error) {
-        // Mark WebSocket as disconnected and fallback to HTTP
-        this.isWebSocketConnected = false;
-      }
-    }
-
-    // Fallback to HTTP
-    return await operation(this._httpClient);
-  }
-
-  /**
-   * Makes direct JSON-RPC batch call for better performance
-   */
-  private async directBatchRpcCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
-    const payload = calls.map((call) => ({
-      jsonrpc: '2.0',
-      method: call.method,
-      params: call.params,
-      id: this.requestId++,
-    }));
-
-    // Use WebSocket if available, otherwise HTTP
-    let response: Response;
-    if (this.isWebSocketConnected && this._wsClient && this._wsClient.websocket?.readyState === WebSocket.OPEN) {
-      // For WebSocket, we need to implement the batch manually
-      const results = await Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
-      // Filter out null/undefined results and handle errors
-      const processedResults = results.map((result: any) => {
-        if (result === null || result === undefined) {
-          return null;
-        }
-        if (result && result.error) {
-          throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
-        }
-        return result;
-      });
-      return Array.isArray(processedResults) ? processedResults : [];
-    } else {
-      // Use HTTP for batch requests
-      response = await fetch(this.httpUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(30000),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const results = await response.json();
-      // Handle both array and single response cases
-      const resultsArray = Array.isArray(results) ? results : [results];
-      const processedResults = resultsArray.map((result: any) => {
-        if (result === null || result === undefined) {
-          return null;
-        }
-        if (result.error) {
-          throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
-        }
-        return result.result;
-      });
-      return Array.isArray(processedResults) ? processedResults : [];
-    }
-  }
-
-  /**
-   * Checks if WebSocket connection is healthy
-   */
   public async healthcheckWebSocket(): Promise<boolean> {
-    if (!this._wsClient || !this.isWebSocketConnected) {
+    if (!this._wsClient) {
       return false;
     }
 
     try {
-      // Check if WebSocket is still connected
-      if (this._wsClient.websocket?.readyState !== WebSocket.OPEN) {
-        this.isWebSocketConnected = false;
-        return false;
-      }
-
-      // Try a simple operation to verify connection
       await this._wsClient.getBlockNumber();
       return true;
     } catch (error) {
-      this.isWebSocketConnected = false;
       return false;
     }
   }
@@ -192,670 +123,333 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     } catch (error) {
       throw new Error(`Chain validation failed: ${error}`);
     }
-
-    if (this.wsUrl) {
-      await this.connectWebSocket();
-    }
   }
 
   public async disconnect(): Promise<void> {
-    await this.disconnectWebSocket();
+    await this.rateLimiter.stop();
+    if (this._wsClient) {
+      this._wsClient.destroy();
+    }
   }
 
-  /**
-   * Reconnects WebSocket connection
-   * This method is called by ConnectionManager when WebSocket health check fails
-   */
   public async reconnectWebSocket(): Promise<void> {
-    try {
-      // First, safely disconnect existing WebSocket
-      await this.disconnectWebSocket();
-
-      // Add a small delay before reconnecting to avoid rapid reconnection attempts
-      await new Promise((resolve) => setTimeout(resolve, this.reconnectDelay));
-
-      // Check if we haven't exceeded max reconnection attempts
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        throw new Error(`Max reconnection attempts (${this.maxReconnectAttempts}) exceeded`);
-      }
-
-      // Increment reconnection attempts counter
-      this.reconnectAttempts++;
-
-      // Establish new WebSocket connection
-      if (this.wsUrl) {
-        await this.connectWebSocket();
-      } else {
-        throw new Error('WebSocket URL not available for reconnection');
-      }
-    } catch (error) {
-      // Exponential backoff for reconnection delay
-      this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Max 30 seconds
-
-      throw error;
-    }
-  }
-
-  /**
-   * Safely disconnects WebSocket connection
-   */
-  private async disconnectWebSocket(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      // Mark WebSocket as disconnected immediately
-      this.isWebSocketConnected = false;
-
-      if (this._wsClient) {
-        // Set up one-time close handler for cleanup
-        const handleClose = () => {
-          this._wsClient = undefined;
-          resolve();
-        };
-
-        // Add temporary close listener
-        this._wsClient.websocket?.addEventListener('close', handleClose, { once: true });
-
-        try {
-          // Attempt graceful close using ethers destroy method
-          this._wsClient.destroy();
-        } catch (error) {
-          // Force cleanup on error
-          this._wsClient.websocket?.removeEventListener('close', handleClose);
-          this._wsClient = undefined;
-          resolve();
-        }
-
-        // Timeout to prevent hanging on close
-        setTimeout(() => {
-          if (this._wsClient) {
-            this._wsClient.websocket?.removeEventListener('close', handleClose);
-            this._wsClient = undefined;
-            resolve();
-          }
-        }, 5000);
-      } else {
-        // No WebSocket to disconnect
-        resolve();
-      }
-    });
-  }
-
-  /**
-   * Resets reconnection state after successful connection
-   */
-  private resetReconnectionState(): void {
-    this.reconnectAttempts = 0;
-    this.reconnectDelay = 1000; // Reset to initial delay
-  }
-
-  private async connectWebSocket(): Promise<void> {
     if (!this.wsUrl) {
-      throw new Error('WebSocket URL not provided');
+      throw new Error('WebSocket URL not available for reconnection');
     }
 
-    return new Promise<void>((resolve, reject) => {
-      let isResolved = false;
-      let timeoutId: NodeJS.Timeout;
+    if (this._wsClient) {
+      this._wsClient.destroy();
+    }
 
-      try {
-        // Use chainId from networkConfig for better compatibility
-        const networkIdentifier = this.network.chainId;
-        this._wsClient = new ethers.WebSocketProvider(this.wsUrl!, networkIdentifier);
+    // Create ethers Network object from our NetworkConfig
+    const ethersNetwork = new ethers.Network(this.network.nativeCurrencySymbol, this.network.chainId);
 
-        timeoutId = setTimeout(() => {
-          if (!isResolved) {
-            isResolved = true;
-            cleanup();
-            reject(new Error('WebSocket connection timeout'));
-          }
-        }, 10000);
+    this._wsClient = new ethers.WebSocketProvider(this.wsUrl, ethersNetwork);
+  }
 
-        const handleOpen = async () => {
-          if (isResolved) return;
+  /**
+   * Batch RPC call method for multiple requests via HTTP
+   */
+  private async _batchRpcCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    const payload = calls.map((call) => ({
+      jsonrpc: '2.0',
+      method: call.method,
+      params: call.params,
+      id: this.requestId++,
+    }));
 
-          try {
-            // Small delay for stabilization
-            await new Promise((resolve) => setTimeout(resolve, 100));
+    const response = await fetch(this.httpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(this.responseTimeout),
+    });
 
-            // Validate chainId after WebSocket connection
-            const connectedChainId = await this._wsClient!.send('eth_chainId', []);
-            const expectedChainId = this.network.chainId;
-            const parsedChainId = parseInt(connectedChainId, 16);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
 
-            if (parsedChainId !== expectedChainId) {
-              if (!isResolved) {
-                isResolved = true;
-                this.isWebSocketConnected = false;
-                clearTimeout(timeoutId);
-                cleanup();
-                reject(new Error(`Chain ID mismatch: expected ${expectedChainId}, got ${parsedChainId}`));
-              }
-              return;
-            }
+    const results = await response.json();
+    const resultsArray = Array.isArray(results) ? results : [results];
 
-            if (!isResolved) {
-              isResolved = true;
-              this.isWebSocketConnected = true;
-              this.resetReconnectionState();
-              clearTimeout(timeoutId);
-              cleanup();
-              resolve();
-            }
-          } catch (error) {
-            if (!isResolved) {
-              isResolved = true;
-              this.isWebSocketConnected = false;
-              clearTimeout(timeoutId);
-              cleanup();
-              reject(new Error(`WebSocket validation error: ${error}`));
-            }
-          }
-        };
-
-        const handleError = (error: any) => {
-          if (!isResolved) {
-            isResolved = true;
-            this.isWebSocketConnected = false;
-            clearTimeout(timeoutId);
-            cleanup();
-            reject(new Error(`WebSocket connection error: ${error.message || error}`));
-          }
-        };
-
-        const handleClose = (event: CloseEvent) => {
-          this.isWebSocketConnected = false;
-
-          // If connection closed during connection setup
-          if (!isResolved) {
-            isResolved = true;
-            clearTimeout(timeoutId);
-            cleanup();
-            reject(new Error(`WebSocket closed during connection: ${event.code} ${event.reason}`));
-          }
-        };
-
-        const cleanup = () => {
-          if (this._wsClient?.websocket) {
-            this._wsClient.websocket.removeEventListener('open', handleOpen);
-            this._wsClient.websocket.removeEventListener('error', handleError);
-            this._wsClient.websocket.removeEventListener('close', handleClose);
-          }
-        };
-
-        // Check if websocket is already open
-        if (this._wsClient.websocket?.readyState === WebSocket.OPEN) {
-          this.isWebSocketConnected = true;
-          clearTimeout(timeoutId);
-          resolve();
-          return;
-        }
-
-        // Set up event listeners
-        if (this._wsClient.websocket) {
-          this._wsClient.websocket.addEventListener('open', handleOpen);
-          this._wsClient.websocket.addEventListener('error', handleError);
-          this._wsClient.websocket.addEventListener('close', handleClose);
-        } else {
-          // If websocket is not immediately available, wait a bit and check again
-          setTimeout(() => {
-            if (this._wsClient?.websocket) {
-              this._wsClient.websocket.addEventListener('open', handleOpen);
-              this._wsClient.websocket.addEventListener('error', handleError);
-              this._wsClient.websocket.addEventListener('close', handleClose);
-            } else {
-              clearTimeout(timeoutId);
-              reject(new Error('WebSocket not available'));
-            }
-          }, 100);
-        }
-      } catch (error) {
-        isResolved = true;
-        this.isWebSocketConnected = false;
-        reject(error);
+    return resultsArray.map((result: any) => {
+      if (result === null || result === undefined) {
+        // IMPORTANT: in error case return null - preserves order
+        return null;
       }
+      if (result.error) {
+        throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
+      }
+      return result.result;
     });
   }
 
-  // ===== SUBSCRIPTION METHODS =====
+  /**
+   * Batch WebSocket call method for multiple requests via WebSocket
+   */
+  private async _batchWsCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
+    if (!this._wsClient) {
+      throw new Error('WebSocket client not available');
+    }
+
+    const results = await Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
+
+    return results.map((result: any) => {
+      // IMPORTANT: in error case return null - preserves order
+      if (result === null || result === undefined) {
+        return null;
+      }
+      if (result && result.error) {
+        throw new Error(`JSON-RPC Error ${result.error.code}: ${result.error.message}`);
+      }
+      return result;
+    });
+  }
 
   /**
    * Subscribes to new block events via WebSocket
    * Returns a subscription object with unsubscribe method
    */
   public subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
-    if (!this.isWebSocketConnected || !this._wsClient) {
-      throw new Error('WebSocket connection is not available for subscriptions');
+    if (!this._wsClient) {
+      throw new Error('WebSocket not available for subscriptions');
     }
 
-    // Use ethers.js native block subscription
-    this._wsClient.on('block', callback);
+    try {
+      this._wsClient.on('block', callback);
 
-    return {
-      unsubscribe: () => {
-        if (this._wsClient) {
-          this._wsClient.off('block', callback);
-        }
-      },
-    };
-  }
-
-  /**
-   * Subscribes to new pending transactions via WebSocket
-   */
-  public subscribeToPendingTransactions(callback: (txHash: string) => void): { unsubscribe: () => void } {
-    if (!this.isWebSocketConnected || !this._wsClient) {
-      throw new Error('WebSocket connection is not available for subscriptions');
+      return {
+        unsubscribe: () => {
+          if (this._wsClient) {
+            this._wsClient.off('block', callback);
+          }
+        },
+      };
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'subscribeToNewBlocks', { provider: this.type, wsUrl: this.wsUrl });
     }
-
-    // Use ethers.js native pending transaction subscription
-    this._wsClient.on('pending', callback);
-
-    return {
-      unsubscribe: () => {
-        if (this._wsClient) {
-          this._wsClient.off('pending', callback);
-        }
-      },
-    };
-  }
-
-  /**
-   * Subscribes to contract logs via WebSocket
-   */
-  public subscribeToLogs(
-    options: {
-      address?: string | string[];
-      topics?: (string | string[] | null)[];
-    },
-    callback: (log: any) => void
-  ): { unsubscribe: () => void } {
-    if (!this.isWebSocketConnected || !this._wsClient) {
-      throw new Error('WebSocket connection is not available for subscriptions');
-    }
-
-    // Create ethers.js filter
-    const filter = {
-      address: options.address,
-      topics: options.topics,
-    };
-
-    // Use ethers.js native log subscription
-    this._wsClient.on(filter, callback);
-
-    return {
-      unsubscribe: () => {
-        if (this._wsClient) {
-          this._wsClient.off(filter, callback);
-        }
-      },
-    };
   }
 
   // ===== BLOCK METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    return await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback((provider) => provider.getBlockNumber())
-    );
-  }
+    try {
+      const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
 
-  public async getOneBlockByHeight(blockNumber: number, fullTransactions: boolean = false): Promise<UniversalBlock> {
-    const ethersBlock = await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback((provider) => provider.getBlock(blockNumber, fullTransactions))
-    );
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
 
-    if (!ethersBlock) {
-      throw new Error(`Block ${blockNumber} not found`);
+      const results = await this.rateLimiter.execute(requests, batchCall);
+      return parseInt(results[0], 16);
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'getBlockHeight', { provider: this.type, httpUrl: this.httpUrl });
     }
-
-    return this.normalizeBlock(ethersBlock);
   }
 
-  public async getOneBlockHashByHeight(height: number): Promise<string> {
-    const block = await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback<any>((provider) => provider.getBlock(height, false))
-    );
-
-    if (!block) {
-      throw new Error(`Block ${height} not found`);
-    }
-
-    return block.hash;
-  }
-
-  public async getOneBlockByHash(hash: Hash, fullTransactions: boolean = false): Promise<UniversalBlock> {
-    const ethersBlock = await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback((provider) => provider.getBlock(hash, fullTransactions))
-    );
-
-    if (!ethersBlock) {
-      throw new Error(`Block ${hash} not found`);
-    }
-
-    return this.normalizeBlock(ethersBlock);
-  }
-
-  // Use batch RPC for multiple blocks
-  public async getManyBlocksByHashes(hashes: string[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
-    if (hashes.length === 0) {
-      return [];
-    }
-
-    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalBlock[]> => {
-      const calls = batchHashes.map((hash) => ({
-        method: 'eth_getBlockByHash',
-        params: [hash, fullTransactions],
-      }));
-
-      try {
-        const rawBlocks = await this.directBatchRpcCall(calls);
-        // Ensure rawBlocks is an array
-        if (!Array.isArray(rawBlocks)) {
-          throw new Error('directBatchRpcCall did not return an array');
-        }
-        return rawBlocks
-          .filter((block) => block !== null && block !== undefined && !block.error)
-          .map((block) => {
-            try {
-              return this.normalizeEthersBlock(block);
-            } catch (normalizeError) {
-              return null;
-            }
-          })
-          .filter((block): block is UniversalBlock => block !== null);
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
-
-    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
-  }
-
-  public async getManyBlocksByHeights(heights: number[], fullTransactions: boolean = false): Promise<UniversalBlock[]> {
+  public async getManyBlocksByHeights(
+    heights: number[],
+    fullTransactions: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
     if (heights.length === 0) {
       return [];
     }
 
-    const batchRequestFn = async (batchHeights: number[]): Promise<UniversalBlock[]> => {
-      const calls = batchHeights.map((height) => ({
+    try {
+      const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, fullTransactions],
       }));
 
-      try {
-        const rawBlocks = await this.directBatchRpcCall(calls);
-        // Ensure rawBlocks is an array
-        if (!Array.isArray(rawBlocks)) {
-          throw new Error('directBatchRpcCall did not return an array');
-        }
-        return rawBlocks
-          .filter((block) => block !== null && block !== undefined && !block.error)
-          .map((block) => {
-            try {
-              return this.normalizeEthersBlock(block);
-            } catch (normalizeError) {
-              return null;
-            }
-          })
-          .filter((block): block is UniversalBlock => block !== null);
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
 
-    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
+      const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
+
+      // Preserve order: rawBlocks[i] corresponds to heights[i]
+      // Don't filter - return null for missing blocks
+      return rawBlocks.map((block, index) => {
+        if (block === null || block === undefined || block.error) {
+          return null;
+        }
+
+        const normalizedBlock = this.normalizeRawBlock(block);
+
+        // Guarantee blockNumber from known height
+        if (normalizedBlock.blockNumber === undefined || normalizedBlock.blockNumber === null) {
+          normalizedBlock.blockNumber = heights[index];
+        }
+
+        return normalizedBlock;
+      });
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHeights', {
+        provider: this.type,
+        totalHeights: heights.length,
+        fullTransactions,
+      });
+    }
   }
 
-  public async getManyBlocksStatsByHeights(heights: number[]): Promise<any[]> {
+  public async getManyBlocksByHashes(
+    hashes: string[],
+    fullTransactions: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
+    if (hashes.length === 0) {
+      return [];
+    }
+
+    try {
+      const requests = hashes.map((hash) => ({
+        method: 'eth_getBlockByHash',
+        params: [hash, fullTransactions],
+      }));
+
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
+
+      const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
+
+      // Preserve order: rawBlocks[i] corresponds to hashes[i]
+      // Don't filter - return null for missing blocks
+      return rawBlocks.map((block) => {
+        if (block === null || block === undefined || block.error) {
+          return null;
+        }
+        return this.normalizeRawBlock(block);
+      });
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHashes', {
+        provider: this.type,
+        totalHashes: hashes.length,
+        fullTransactions,
+      });
+    }
+  }
+
+  public async getManyBlocksStatsByHeights(heights: number[]): Promise<(UniversalBlockStats | null)[]> {
     if (heights.length === 0) {
       return [];
     }
 
-    const batchRequestFn = async (batchHeights: number[]): Promise<any[]> => {
-      const calls = batchHeights.map((height) => ({
+    try {
+      const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, false],
       }));
 
-      try {
-        const rawBlocks = await this.directBatchRpcCall(calls);
-        // Ensure rawBlocks is an array
-        if (!Array.isArray(rawBlocks)) {
-          throw new Error('directBatchRpcCall did not return an array');
-        }
-        return rawBlocks
-          .filter((block) => block !== null && block !== undefined && !block.error)
-          .map((block: any) => {
-            try {
-              return {
-                number: parseInt(block.number || block.blockNumber, 16),
-                hash: block.hash,
-                size: parseInt(block.size, 16),
-              };
-            } catch (parseError) {
-              return null;
-            }
-          })
-          .filter((stat): stat is any => stat !== null);
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
 
-    return await this.rateLimiter.executeBatchRequests(heights, batchRequestFn);
+      const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
+
+      // Preserve order: rawBlocks[i] corresponds to heights[i]
+      // Guarantee number since we know the heights
+      return rawBlocks.map((block, index) => {
+        if (block === null || block === undefined || block.error) {
+          return null;
+        }
+
+        const normalizedStats = this.normalizeBlockStats(block);
+
+        // Guarantee number from known height
+        if (normalizedStats.number === undefined || normalizedStats.number === null) {
+          normalizedStats.number = heights[index]!;
+        }
+
+        return normalizedStats;
+      });
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'getManyBlocksStatsByHeights', {
+        provider: this.type,
+        totalHeights: heights.length,
+      });
+    }
   }
 
-  /**
-   * Gets all transaction receipts for a block using eth_getBlockReceipts
-   */
-  public async getBlockReceipts(blockNumber: number | string): Promise<UniversalTransactionReceipt[]> {
-    const blockId = typeof blockNumber === 'number' ? `0x${blockNumber.toString(16)}` : blockNumber;
-
-    const call = {
-      method: 'eth_getBlockReceipts',
-      params: [blockId],
-    };
+  public async getManyBlocksReceipts(heights: number[]): Promise<UniversalTransactionReceipt[][]> {
+    if (heights.length === 0) {
+      return [];
+    }
 
     try {
-      const rawReceipts = await this.rateLimiter.executeRequest(() =>
-        this.directBatchRpcCall([call]).then((results) => results[0])
-      );
-
-      if (!rawReceipts || !Array.isArray(rawReceipts)) {
-        return [];
-      }
-
-      return rawReceipts.map((receipt) => this.normalizeRawReceipt(receipt));
-    } catch (error) {
-      // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
-      throw new Error(`eth_getBlockReceipts failed: ${error}`);
-    }
-  }
-
-  /**
-   * Gets receipts for multiple blocks using batch eth_getBlockReceipts calls
-   */
-  public async getManyBlocksReceipts(blockNumbers: (number | string)[]): Promise<UniversalTransactionReceipt[][]> {
-    if (blockNumbers.length === 0) {
-      return [];
-    }
-
-    const batchRequestFn = async (batchBlockNumbers: (number | string)[]): Promise<UniversalTransactionReceipt[][]> => {
-      const calls = batchBlockNumbers.map((blockNumber) => ({
+      const requests = heights.map((height) => ({
         method: 'eth_getBlockReceipts',
-        params: [typeof blockNumber === 'number' ? `0x${blockNumber.toString(16)}` : blockNumber],
+        params: [`0x${height.toString(16)}`],
       }));
 
-      try {
-        const rawBlocksReceipts = await this.directBatchRpcCall(calls);
+      const batchCall = this._wsClient
+        ? (calls: typeof requests) => this._batchWsCall(calls)
+        : (calls: typeof requests) => this._batchRpcCall(calls);
 
-        return rawBlocksReceipts.map((rawReceipts) => {
-          if (!rawReceipts || !Array.isArray(rawReceipts)) {
-            return [];
+      const rawBlocksReceipts = await this.rateLimiter.execute(requests, batchCall);
+
+      // Preserve order: rawBlocksReceipts[i] corresponds to heights[i]
+      // Guarantee blockNumber in each receipt since we know the block height
+      return rawBlocksReceipts.map((rawReceipts, index) => {
+        if (!rawReceipts || !Array.isArray(rawReceipts)) {
+          return [];
+        }
+
+        const blockHeight = heights[index];
+
+        return rawReceipts.map((receipt) => {
+          const normalizedReceipt = this.normalizeRawReceipt(receipt);
+
+          // Guarantee blockNumber in receipt from known block height
+          if (normalizedReceipt.blockNumber === undefined || normalizedReceipt.blockNumber === null) {
+            normalizedReceipt.blockNumber = blockHeight;
           }
-          return rawReceipts.map((receipt) => this.normalizeRawReceipt(receipt));
+
+          return normalizedReceipt;
         });
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
-
-    return await this.rateLimiter.executeBatchRequests(blockNumbers, batchRequestFn);
-  }
-
-  // ===== TRANSACTION METHODS =====
-
-  public async getOneTransactionByHash(hash: Hash): Promise<UniversalTransaction> {
-    const ethersTx = await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback((provider) => provider.getTransaction(hash))
-    );
-
-    if (!ethersTx) {
-      throw new Error(`Transaction ${hash} not found`);
+      });
+    } catch (error) {
+      BlockchainErrorHandler.handleError(error, 'getManyBlocksReceipts', {
+        provider: this.type,
+        totalBlocks: heights.length,
+      });
     }
-
-    return this.normalizeTransaction(ethersTx);
-  }
-
-  // Use batch RPC for multiple transactions
-  public async getManyTransactionsByHashes(hashes: Hash[]): Promise<UniversalTransaction[]> {
-    if (hashes.length === 0) {
-      return [];
-    }
-
-    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransaction[]> => {
-      const calls = batchHashes.map((hash) => ({
-        method: 'eth_getTransactionByHash',
-        params: [hash],
-      }));
-
-      try {
-        const rawTransactions = await this.directBatchRpcCall(calls);
-        // Ensure rawTransactions is an array
-        if (!Array.isArray(rawTransactions)) {
-          throw new Error('directBatchRpcCall did not return an array');
-        }
-        return rawTransactions
-          .filter((tx) => tx !== null && tx !== undefined && !tx.error)
-          .map((tx) => {
-            try {
-              return this.normalizeRawTransaction(tx);
-            } catch (normalizeError) {
-              return null;
-            }
-          })
-          .filter((tx): tx is UniversalTransaction => tx !== null);
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
-
-    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
-  }
-
-  public async getTransactionReceipt(hash: Hash): Promise<UniversalTransactionReceipt> {
-    const ethersReceipt = await this.rateLimiter.executeRequest(() =>
-      this.executeWithFallback((provider) => provider.getTransactionReceipt(hash))
-    );
-
-    if (!ethersReceipt) {
-      throw new Error(`Transaction receipt ${hash} not found`);
-    }
-
-    return this.normalizeReceipt(ethersReceipt);
-  }
-
-  // Use batch RPC for multiple receipts
-  public async getManyTransactionReceipts(hashes: Hash[]): Promise<UniversalTransactionReceipt[]> {
-    if (hashes.length === 0) {
-      return [];
-    }
-
-    const batchRequestFn = async (batchHashes: string[]): Promise<UniversalTransactionReceipt[]> => {
-      const calls = batchHashes.map((hash) => ({
-        method: 'eth_getTransactionReceipt',
-        params: [hash],
-      }));
-
-      try {
-        const rawReceipts = await this.directBatchRpcCall(calls);
-        // Ensure rawReceipts is an array
-        if (!Array.isArray(rawReceipts)) {
-          throw new Error('directBatchRpcCall did not return an array');
-        }
-        return rawReceipts
-          .filter((receipt) => receipt !== null && receipt !== undefined && !receipt.error)
-          .map((receipt) => {
-            try {
-              return this.normalizeRawReceipt(receipt);
-            } catch (normalizeError) {
-              return null;
-            }
-          })
-          .filter((receipt): receipt is UniversalTransactionReceipt => receipt !== null);
-      } catch (batchError) {
-        throw batchError;
-      }
-    };
-
-    return await this.rateLimiter.executeBatchRequests(hashes, batchRequestFn);
   }
 
   // ===== NORMALIZATION METHODS =====
 
   /**
-   * Normalizes ethers.js Block object to UniversalBlock format
+   * Normalizes block stats from raw block data
    */
-  private normalizeBlock(ethersBlock: any): UniversalBlock {
-    // In ethers v6, full transactions are in prefetchedTransactions
-    let transactions;
-
-    if (ethersBlock.prefetchedTransactions && ethersBlock.prefetchedTransactions.length > 0) {
-      transactions = ethersBlock.prefetchedTransactions.map((tx: any) => this.normalizeTransaction(tx));
-    } else if (ethersBlock.transactions) {
-      transactions = ethersBlock.transactions;
-    }
+  private normalizeBlockStats(rawBlock: any): UniversalBlockStats {
+    const gasLimit = parseInt(rawBlock.gasLimit, 16);
+    const gasUsed = parseInt(rawBlock.gasUsed, 16);
+    const gasUsedPercentage = gasLimit > 0 ? (gasUsed / gasLimit) * 100 : 0;
 
     return {
-      hash: ethersBlock.hash,
-      parentHash: ethersBlock.parentHash,
-      blockNumber: ethersBlock.number,
-      nonce: ethersBlock.nonce,
-      sha3Uncles: ethersBlock.sha3Uncles,
-      logsBloom: ethersBlock.logsBloom,
-      transactionsRoot: ethersBlock.transactionsRoot,
-      stateRoot: ethersBlock.stateRoot,
-      receiptsRoot: ethersBlock.receiptsRoot,
-      miner: ethersBlock.miner,
-      difficulty: ethersBlock.difficulty?.toString() || '0',
-      totalDifficulty: ethersBlock.totalDifficulty?.toString() || '0',
-      extraData: ethersBlock.extraData,
-      size: ethersBlock.size || 0,
-      gasLimit: Number(ethersBlock.gasLimit) || 0,
-      gasUsed: Number(ethersBlock.gasUsed) || 0,
-      timestamp: ethersBlock.timestamp || 0,
-      uncles: ethersBlock.uncles || [],
-      baseFeePerGas: ethersBlock.baseFeePerGas?.toString(),
-      withdrawals: ethersBlock.withdrawals,
-      withdrawalsRoot: ethersBlock.withdrawalsRoot,
-      blobGasUsed: ethersBlock.blobGasUsed?.toString(),
-      excessBlobGas: ethersBlock.excessBlobGas?.toString(),
-      parentBeaconBlockRoot: ethersBlock.parentBeaconBlockRoot,
-      transactions,
+      hash: rawBlock.hash,
+      number: parseInt(rawBlock.number || rawBlock.blockNumber, 16),
+      size: parseInt(rawBlock.size, 16),
+      gasLimit,
+      gasUsed,
+      gasUsedPercentage: Math.round(gasUsedPercentage * 100) / 100, // Round to 2 decimal places
+      timestamp: parseInt(rawBlock.timestamp, 16),
+      transactionCount: rawBlock.transactions?.length || 0,
+      baseFeePerGas: rawBlock.baseFeePerGas,
+      blobGasUsed: rawBlock.blobGasUsed,
+      excessBlobGas: rawBlock.excessBlobGas,
+      miner: rawBlock.miner,
+      difficulty: rawBlock.difficulty,
+      parentHash: rawBlock.parentHash,
+      unclesCount: rawBlock.uncles?.length || 0,
     };
   }
 
-  /**
-   * Normalizes raw JSON-RPC block response (used for batch calls)
-   */
-  private normalizeEthersBlock(rawBlock: any): UniversalBlock {
-    return {
+  private normalizeRawBlock(rawBlock: any): UniversalBlock {
+    const block: UniversalBlock = {
       hash: rawBlock.hash,
       parentHash: rawBlock.parentHash,
-      blockNumber: rawBlock.blockNumber
-        ? parseInt(rawBlock.blockNumber, 16)
-        : rawBlock.number
-          ? parseInt(rawBlock.number, 16)
-          : 0,
       nonce: rawBlock.nonce,
       sha3Uncles: rawBlock.sha3Uncles,
       logsBloom: rawBlock.logsBloom,
@@ -881,40 +475,17 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
         typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx)
       ),
     };
+
+    // Only set blockNumber if it exists in raw data
+    if (rawBlock.blockNumber !== undefined && rawBlock.blockNumber !== null) {
+      block.blockNumber = parseInt(rawBlock.blockNumber, 16);
+    } else if (rawBlock.number !== undefined && rawBlock.number !== null) {
+      block.blockNumber = parseInt(rawBlock.number, 16);
+    }
+
+    return block;
   }
 
-  /**
-   * Normalizes ethers.js TransactionResponse to UniversalTransaction format
-   */
-  private normalizeTransaction(ethersTx: any): UniversalTransaction {
-    return {
-      hash: ethersTx.hash,
-      nonce: ethersTx.nonce || 0,
-      from: ethersTx.from,
-      to: ethersTx.to,
-      value: ethersTx.value?.toString() || '0',
-      gas: Number(ethersTx.gasLimit) || 0,
-      input: ethersTx.data || ethersTx.input || '0x',
-      blockHash: ethersTx.blockHash,
-      blockNumber: ethersTx.blockNumber,
-      transactionIndex: ethersTx.transactionIndex ?? ethersTx.index,
-      gasPrice: ethersTx.gasPrice?.toString(),
-      chainId: ethersTx.chainId ? Number(ethersTx.chainId) : undefined,
-      v: ethersTx.signature?.v?.toString() || ethersTx.v?.toString(),
-      r: ethersTx.signature?.r || ethersTx.r,
-      s: ethersTx.signature?.s || ethersTx.s,
-      type: ethersTx.type?.toString() || '0',
-      maxFeePerGas: ethersTx.maxFeePerGas?.toString(),
-      maxPriorityFeePerGas: ethersTx.maxPriorityFeePerGas?.toString(),
-      accessList: ethersTx.accessList,
-      maxFeePerBlobGas: ethersTx.maxFeePerBlobGas?.toString(),
-      blobVersionedHashes: ethersTx.blobVersionedHashes,
-    };
-  }
-
-  /**
-   * Normalizes raw JSON-RPC transaction response (used for batch calls)
-   */
   private normalizeRawTransaction(rawTx: any): UniversalTransaction {
     const parseHexSafely = (value: string | undefined, fieldName: string): number => {
       if (!value) return 0;
@@ -959,44 +530,6 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     };
   }
 
-  /**
-   * Normalizes ethers.js transaction receipt to UniversalTransactionReceipt
-   */
-  private normalizeReceipt(ethersReceipt: any): UniversalTransactionReceipt {
-    return {
-      transactionHash: ethersReceipt.hash || ethersReceipt.transactionHash,
-      transactionIndex: ethersReceipt.transactionIndex ?? ethersReceipt.index,
-      blockHash: ethersReceipt.blockHash,
-      blockNumber: ethersReceipt.blockNumber,
-      from: ethersReceipt.from,
-      to: ethersReceipt.to,
-      cumulativeGasUsed: Number(ethersReceipt.cumulativeGasUsed),
-      gasUsed: Number(ethersReceipt.gasUsed),
-      contractAddress: ethersReceipt.contractAddress,
-      logs:
-        ethersReceipt.logs?.map((log: any) => ({
-          address: log.address,
-          topics: log.topics,
-          data: log.data,
-          blockNumber: log.blockNumber,
-          transactionHash: log.transactionHash,
-          transactionIndex: log.transactionIndex,
-          blockHash: log.blockHash,
-          logIndex: log.logIndex ?? log.index,
-          removed: log.removed || false,
-        })) || [],
-      logsBloom: ethersReceipt.logsBloom,
-      status: ethersReceipt.status === 1 ? '0x1' : '0x0',
-      type: ethersReceipt.type?.toString() || '0x0',
-      effectiveGasPrice: Number(ethersReceipt.effectiveGasPrice || 0),
-      blobGasUsed: ethersReceipt.blobGasUsed?.toString(),
-      blobGasPrice: ethersReceipt.blobGasPrice?.toString(),
-    };
-  }
-
-  /**
-   * Normalizes raw JSON-RPC receipt response (used for batch calls)
-   */
   private normalizeRawReceipt(rawReceipt: any): UniversalTransactionReceipt {
     return {
       transactionHash: rawReceipt.transactionHash,

@@ -89,7 +89,6 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       case StrategyNames.PULL:
         this._loadingStrategy = new PullNetworkProviderStrategy(this.log, this.blockchainProviderService, queue, {
           maxRequestBlocksBatchSize: this.config.queueLoaderRequestBlocksBatchSize,
-          concurrency: this.config.queueLoaderConcurrency,
           basePreloadCount: this.config.basePreloadCount,
         });
         break;
