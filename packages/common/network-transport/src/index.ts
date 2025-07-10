@@ -1,3 +1,4 @@
-export { NetworkTransportModule } from './network-transport.module';
-export type { NetworkTransportModuleOptions, TransportOptions } from './network-transport.module';
-export { ProducersManager } from './producers-manager';
+export * from './transport.module';
+export * from './transports';
+export * from './core';
+export * from './shared';

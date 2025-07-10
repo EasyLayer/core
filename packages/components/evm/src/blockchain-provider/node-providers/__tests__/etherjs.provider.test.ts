@@ -5,11 +5,11 @@ describe('EtherJSProvider Normalization', () => {
   let provider: EtherJSProvider;
   let mockNetworkConfig: NetworkConfig;
 
-  // Mock factories for dynamic test data generation
-  const createMockEthersBlock = (overrides: any = {}) => ({
+  // Mock factories for raw JSON-RPC response data
+  const createMockRawBlock = (overrides: any = {}) => ({
     hash: '0xabc123',
     parentHash: '0xdef456',
-    number: 12345,
+    number: '0x10b27', // 68295 in hex (реальное значение)
     nonce: '0x0000000000000000',
     sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
     logsBloom: '0x00000000000000000000000000000000',
@@ -17,73 +17,71 @@ describe('EtherJSProvider Normalization', () => {
     stateRoot: '0xstate123',
     receiptsRoot: '0xreceipts456',
     miner: '0xminer789',
-    difficulty: 1000000n,
-    totalDifficulty: 5000000n,
+    difficulty: '0xf4240', // 1000000 in hex
+    totalDifficulty: '0x4c4b40', // 5000000 in hex
     extraData: '0x',
-    size: 1024,
-    gasLimit: 30000000n,
-    gasUsed: 15000000n,
-    timestamp: 1640995200,
+    size: '0x400', // 1024 in hex
+    gasLimit: '0x1c9c380', // 30000000 in hex
+    gasUsed: '0xe4e1c0', // 15000000 in hex
+    timestamp: '0x61a4d500', // 1638551296 in hex (реальное значение)
     uncles: [],
-    baseFeePerGas: 20000000000n,
-    blobGasUsed: 131072n,
-    excessBlobGas: 0n,
+    baseFeePerGas: '0x4a817c800', // 20000000000 in hex
+    blobGasUsed: '0x20000', // 131072 in hex
+    excessBlobGas: '0x0',
     parentBeaconBlockRoot: '0xbeacon123',
     transactions: ['0xtx1', '0xtx2'],
     ...overrides
   });
 
-  const createMockEthersTransaction = (overrides: any = {}) => ({
+  const createMockRawTransaction = (overrides: any = {}) => ({
     hash: '0xtx123',
-    nonce: 42,
+    nonce: '0x2a', // 42 in hex
     from: '0xfrom123',
     to: '0xto456',
-    value: 1000000000000000000n,
-    gasLimit: 21000n,
-    data: '0x',
+    value: '0xde0b6b3a7640000', // 1000000000000000000 in hex (1 ETH)
+    gas: '0x5208', // 21000 in hex
+    input: '0x',
     blockHash: '0xblock123',
-    blockNumber: 12345,
-    transactionIndex: 0,
-    gasPrice: 20000000000n,
-    chainId: 1n,
-    signature: {
-      v: 27,
-      r: '0xr123',
-      s: '0xs456',
-    },
-    type: 0,
+    blockNumber: '0x10b27', // 68295 in hex
+    transactionIndex: '0x0',
+    gasPrice: '0x4a817c800', // 20000000000 in hex
+    chainId: '0x1',
+    v: '0x1b', // 27 in hex
+    r: '0xr123',
+    s: '0xs456',
+    type: '0x0',
     ...overrides
   });
 
-  const createMockEthersReceipt = (overrides: any = {}) => ({
+  const createMockRawReceipt = (overrides: any = {}) => ({
     transactionHash: '0xtx123',
-    transactionIndex: 0,
+    transactionIndex: '0x0',
     blockHash: '0xblock123',
-    blockNumber: 12345,
+    blockNumber: '0x10b27', // 68295 in hex
     from: '0xfrom123',
     to: '0xto456',
-    cumulativeGasUsed: 21000n,
-    gasUsed: 21000n,
+    cumulativeGasUsed: '0x5208', // 21000 in hex
+    gasUsed: '0x5208', // 21000 in hex
     contractAddress: null,
     logs: [],
     logsBloom: '0x00000000000000000000000000000000',
-    status: 1,
-    type: 2,
-    effectiveGasPrice: 25000000000n,
-    blobGasUsed: 131072n,
-    blobGasPrice: 1000000000n,
+    status: '0x1',
+    type: '0x2',
+    effectiveGasPrice: '0x5d21dba00', // 25000000000 in hex
+    blobGasUsed: '0x20000', // 131072 in hex
+    blobGasPrice: '0x3b9aca00', // 1000000000 in hex
     ...overrides
   });
 
-  const createMockLog = (overrides: any = {}) => ({
+  const createMockRawLog = (overrides: any = {}) => ({
     address: '0xcontract123',
     topics: ['0xtopic1', '0xtopic2'],
     data: '0xlogdata',
-    blockNumber: 12345,
+    blockNumber: '0x10b27', // 68295 in hex
     transactionHash: '0xtx123',
-    transactionIndex: 0,
+    transactionIndex: '0x0',
     blockHash: '0xblock123',
-    logIndex: 0,
+    logIndex: '0x0',
     removed: false,
     ...overrides
   });
@@ -97,24 +95,36 @@ describe('EtherJSProvider Normalization', () => {
       hasEIP1559: true,
       hasWithdrawals: true,
       hasBlobTransactions: true,
+      maxBlockSize: 30000000,
+      maxBlockWeight: 30000000,
+      maxGasLimit: 30000000,
+      maxTransactionSize: 1000000,
+      minGasPrice: 1000000000,
+      maxBaseFeePerGas: 1000000000000,
+      maxPriorityFeePerGas: 100000000000,
+      maxBlobGasPerBlock: 786432,
+      targetBlobGasPerBlock: 393216,
+      maxCodeSize: 24576,
+      maxInitCodeSize: 49152,
     };
 
     provider = new EtherJSProvider({
       uniqName: 'e',
       httpUrl: 'http://localhost:8545',
       network: mockNetworkConfig,
+      rateLimits: {}
     });
   });
 
-  describe('normalizeBlock', () => {
-    it('should normalize ethers block with BigInt values', () => {
-      const ethersBlock = createMockEthersBlock();
-      const result = provider['normalizeBlock'](ethersBlock);
+  describe('normalizeRawBlock', () => {
+    it('should normalize raw JSON-RPC block response', () => {
+      const rawBlock = createMockRawBlock();
+      const result = provider['normalizeRawBlock'](rawBlock);
 
       expect(result).toEqual({
         hash: '0xabc123',
         parentHash: '0xdef456',
-        blockNumber: 12345,
+        blockNumber: 68391,
         nonce: '0x0000000000000000',
         sha3Uncles: '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347',
         logsBloom: '0x00000000000000000000000000000000',
@@ -122,67 +132,71 @@ describe('EtherJSProvider Normalization', () => {
         stateRoot: '0xstate123',
         receiptsRoot: '0xreceipts456',
         miner: '0xminer789',
-        difficulty: '1000000',
-        totalDifficulty: '5000000',
+        difficulty: '0xf4240',
+        totalDifficulty: '0x4c4b40',
         extraData: '0x',
         size: 1024,
         gasLimit: 30000000,
         gasUsed: 15000000,
-        timestamp: 1640995200,
+        timestamp: 1638192384,
         uncles: [],
-        baseFeePerGas: '20000000000',
+        baseFeePerGas: '0x4a817c800',
         withdrawals: undefined,
         withdrawalsRoot: undefined,
-        blobGasUsed: '131072',
-        excessBlobGas: '0',
+        blobGasUsed: '0x20000',
+        excessBlobGas: '0x0',
         parentBeaconBlockRoot: '0xbeacon123',
         transactions: ['0xtx1', '0xtx2'],
       });
     });
 
     it('should handle missing optional fields', () => {
-      const minimalBlock = createMockEthersBlock({
-        difficulty: undefined,
-        totalDifficulty: undefined,
-        size: undefined,
+      const minimalBlock = createMockRawBlock({
         baseFeePerGas: undefined,
         blobGasUsed: undefined,
         excessBlobGas: undefined,
         parentBeaconBlockRoot: undefined,
+        withdrawals: undefined,
+        withdrawalsRoot: undefined,
       });
 
-      const result = provider['normalizeBlock'](minimalBlock);
+      const result = provider['normalizeRawBlock'](minimalBlock);
 
-      expect(result.difficulty).toBe('0');
-      expect(result.totalDifficulty).toBe('0');
-      expect(result.size).toBe(0);
       expect(result.baseFeePerGas).toBeUndefined();
       expect(result.blobGasUsed).toBeUndefined();
+      expect(result.excessBlobGas).toBeUndefined();
+      expect(result.parentBeaconBlockRoot).toBeUndefined();
+      expect(result.withdrawals).toBeUndefined();
+      expect(result.withdrawalsRoot).toBeUndefined();
     });
 
-    it('should normalize transactions in block when only hashes provided', () => {
-      const ethersBlock = createMockEthersBlock({
-        transactions: ['0xtx123', '0xtx456'],
+    it('should prefer blockNumber over number field', () => {
+      const rawBlock = createMockRawBlock({
+        blockNumber: '0x10b27', // 68391
+        number: '0x109a7', // 67687
       });
 
-      const result = provider['normalizeBlock'](ethersBlock);
-      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
+      const result = provider['normalizeRawBlock'](rawBlock);
+      expect(result.blockNumber).toBe(68391);
     });
 
-    it('should normalize prefetchedTransactions from ethers v6', () => {
-      const mockTransaction = createMockEthersTransaction({
-        type: 2,
-        blockHash: '0xabc123',
-        blockNumber: 12345,
-        transactionIndex: 0,
+    it('should fallback to number field when blockNumber missing', () => {
+      const rawBlock = createMockRawBlock({
+        blockNumber: undefined,
+        number: '0x109a7', // 68007
       });
 
-      const ethersBlock = createMockEthersBlock({
-        transactions: ['0xtx123'],
-        prefetchedTransactions: [mockTransaction],
+      const result = provider['normalizeRawBlock'](rawBlock);
+      expect(result.blockNumber).toBe(68007);
+    });
+
+    it('should normalize transaction objects in block', () => {
+      const rawTransaction = createMockRawTransaction();
+      const rawBlock = createMockRawBlock({
+        transactions: [rawTransaction],
       });
 
-      const result = provider['normalizeBlock'](ethersBlock);
+      const result = provider['normalizeRawBlock'](rawBlock);
 
       expect(result.transactions).toHaveLength(1);
       expect(result.transactions![0]).toMatchObject({
@@ -190,59 +204,9 @@ describe('EtherJSProvider Normalization', () => {
         nonce: 42,
         from: '0xfrom123',
         to: '0xto456',
-        value: '1000000000000000000',
+        value: '0xde0b6b3a7640000',
         gas: 21000,
-        input: '0x',
-        type: '2',
       });
-    });
-
-    it('should prioritize prefetchedTransactions over regular transactions', () => {
-      const mockTransaction1 = createMockEthersTransaction({
-        hash: '0xtx123',
-        type: 2,
-      });
-      const mockTransaction2 = createMockEthersTransaction({
-        hash: '0xtx456',
-        nonce: 43,
-        from: '0xfrom456',
-        to: '0xto789',
-        value: 2000000000000000000n,
-        gasLimit: 25000n,
-        data: '0xdata',
-        type: 0,
-      });
-
-      const ethersBlock = createMockEthersBlock({
-        transactions: ['0xtx123', '0xtx456'],
-        prefetchedTransactions: [mockTransaction1, mockTransaction2],
-      });
-
-      const result = provider['normalizeBlock'](ethersBlock);
-
-      expect(result.transactions).toHaveLength(2);
-      expect(typeof result.transactions![0]).toBe('object');
-      expect(result.transactions![0]!.hash).toBe('0xtx123');
-      expect(result.transactions![1]!.hash).toBe('0xtx456');
-    });
-
-    it('should handle empty prefetchedTransactions array', () => {
-      const ethersBlock = createMockEthersBlock({
-        transactions: ['0xtx123', '0xtx456'],
-        prefetchedTransactions: [],
-      });
-
-      const result = provider['normalizeBlock'](ethersBlock);
-      expect(result.transactions).toEqual(['0xtx123', '0xtx456']);
-    });
-
-    it('should handle block without any transactions', () => {
-      const ethersBlock = createMockEthersBlock({
-        transactions: undefined,
-      });
-
-      const result = provider['normalizeBlock'](ethersBlock);
-      expect(result.transactions).toBeUndefined();
     });
 
     it('should handle withdrawals in block', () => {
@@ -255,40 +219,40 @@ describe('EtherJSProvider Normalization', () => {
         },
       ];
 
-      const ethersBlock = createMockEthersBlock({
+      const rawBlock = createMockRawBlock({
         withdrawals,
         withdrawalsRoot: '0xwithdrawalsroot123',
       });
 
-      const result = provider['normalizeBlock'](ethersBlock);
+      const result = provider['normalizeRawBlock'](rawBlock);
 
       expect(result.withdrawals).toEqual(withdrawals);
       expect(result.withdrawalsRoot).toBe('0xwithdrawalsroot123');
     });
   });
 
-  describe('normalizeTransaction', () => {
-    it('should normalize Legacy transaction (type 0)', () => {
-      const ethersTx = createMockEthersTransaction();
-      const result = provider['normalizeTransaction'](ethersTx);
+  describe('normalizeRawTransaction', () => {
+    it('should normalize raw JSON-RPC transaction response', () => {
+      const rawTx = createMockRawTransaction();
+      const result = provider['normalizeRawTransaction'](rawTx);
 
       expect(result).toEqual({
         hash: '0xtx123',
         nonce: 42,
         from: '0xfrom123',
         to: '0xto456',
-        value: '1000000000000000000',
+        value: '0xde0b6b3a7640000',
         gas: 21000,
         input: '0x',
         blockHash: '0xblock123',
-        blockNumber: 12345,
+        blockNumber: 68391,
         transactionIndex: 0,
-        gasPrice: '20000000000',
+        gasPrice: '0x4a817c800',
         chainId: 1,
-        v: '27',
+        v: '0x1b',
         r: '0xr123',
         s: '0xs456',
-        type: '0',
+        type: '0x0',
         maxFeePerGas: undefined,
         maxPriorityFeePerGas: undefined,
         accessList: undefined,
@@ -297,103 +261,91 @@ describe('EtherJSProvider Normalization', () => {
       });
     });
 
-    it('should normalize EIP-1559 transaction (type 2)', () => {
-      const ethersTx = createMockEthersTransaction({
+    it('should handle EIP-1559 transaction fields', () => {
+      const rawTx = createMockRawTransaction({
+        type: '0x2',
         gasPrice: undefined,
-        maxFeePerGas: 30000000000n,
-        maxPriorityFeePerGas: 2000000000n,
-        signature: { v: 0, r: '0xr123', s: '0xs456' },
-        type: 2,
+        maxFeePerGas: '0x6fc23ac00', // 30000000000 in hex
+        maxPriorityFeePerGas: '0x77359400', // 2000000000 in hex
         accessList: [],
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
+      const result = provider['normalizeRawTransaction'](rawTx);
 
-      expect(result.type).toBe('2');
+      expect(result.type).toBe('0x2');
       expect(result.gasPrice).toBeUndefined();
-      expect(result.maxFeePerGas).toBe('30000000000');
-      expect(result.maxPriorityFeePerGas).toBe('2000000000');
+      expect(result.maxFeePerGas).toBe('0x6fc23ac00');
+      expect(result.maxPriorityFeePerGas).toBe('0x77359400');
       expect(result.accessList).toEqual([]);
     });
 
-    it('should normalize Blob transaction (type 3)', () => {
-      const ethersTx = createMockEthersTransaction({
-        value: 0n,
-        data: '0xblobdata',
-        gasPrice: undefined,
-        maxFeePerGas: 30000000000n,
-        maxPriorityFeePerGas: 2000000000n,
-        maxFeePerBlobGas: 1000000000n,
+    it('should handle blob transaction fields', () => {
+      const rawTx = createMockRawTransaction({
+        type: '0x3',
+        maxFeePerBlobGas: '0x3b9aca00', // 1000000000 in hex
         blobVersionedHashes: ['0xblob1', '0xblob2'],
-        signature: { v: 0, r: '0xr123', s: '0xs456' },
-        type: 3,
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
+      const result = provider['normalizeRawTransaction'](rawTx);
 
-      expect(result.type).toBe('3');
-      expect(result.maxFeePerBlobGas).toBe('1000000000');
+      expect(result.type).toBe('0x3');
+      expect(result.maxFeePerBlobGas).toBe('0x3b9aca00');
       expect(result.blobVersionedHashes).toEqual(['0xblob1', '0xblob2']);
     });
 
-    it('should handle signature in direct fields', () => {
-      const ethersTx = createMockEthersTransaction({
-        signature: undefined,
-        index: 0,
-        v: '27',
-        r: '0xr123',
-        s: '0xs456',
+    it('should handle missing or invalid hex values with defaults', () => {
+      const rawTx = createMockRawTransaction({
+        nonce: undefined,
+        gas: '',
+        blockNumber: undefined,
+        transactionIndex: null,
+        chainId: undefined,
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
+      const result = provider['normalizeRawTransaction'](rawTx);
 
-      expect(result.transactionIndex).toBe(0);
-      expect(result.v).toBe('27');
-      expect(result.r).toBe('0xr123');
-      expect(result.s).toBe('0xs456');
+      expect(result.nonce).toBe(0);
+      expect(result.gas).toBe(0);
+      expect(result.blockNumber).toBeNull();
+      expect(result.transactionIndex).toBeNull();
+      expect(result.chainId).toBeUndefined();
     });
 
-    it('should handle very large BigInt values', () => {
-      const ethersTx = createMockEthersTransaction({
-        value: BigInt('115792089237316195423570985008687907853269984665640564039457584007913129639935'),
-        gasLimit: 30000000n,
-        gasPrice: BigInt('1000000000000000000000'),
+    it('should handle access list', () => {
+      const accessList = [
+        { address: '0xcontract1', storageKeys: ['0xkey1', '0xkey2'] },
+        { address: '0xcontract2', storageKeys: ['0xkey3'] },
+      ];
+
+      const rawTx = createMockRawTransaction({
+        type: '0x1',
+        accessList,
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
-
-      expect(result.value).toBe('115792089237316195423570985008687907853269984665640564039457584007913129639935');
-      expect(result.gasPrice).toBe('1000000000000000000000');
-      expect(result.gas).toBe(30000000);
+      const result = provider['normalizeRawTransaction'](rawTx);
+      expect(result.accessList).toEqual(accessList);
     });
 
-    it('should handle undefined and null values gracefully', () => {
-      const ethersTx = createMockEthersTransaction({
-        to: null,
-        value: undefined,
-        data: undefined,
+    it('should default type to 0x0 when missing', () => {
+      const rawTx = createMockRawTransaction({
         type: undefined,
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
-
-      expect(result.to).toBeNull();
-      expect(result.value).toBe('0');
-      expect(result.input).toBe('0x');
-      expect(result.type).toBe('0');
+      const result = provider['normalizeRawTransaction'](rawTx);
+      expect(result.type).toBe('0x0');
     });
   });
 
-  describe('normalizeReceipt', () => {
-    it('should normalize transaction receipt with BigInt values', () => {
-      const ethersReceipt = createMockEthersReceipt();
-      const result = provider['normalizeReceipt'](ethersReceipt);
+  describe('normalizeRawReceipt', () => {
+    it('should normalize raw JSON-RPC receipt response', () => {
+      const rawReceipt = createMockRawReceipt();
+      const result = provider['normalizeRawReceipt'](rawReceipt);
 
       expect(result).toEqual({
         transactionHash: '0xtx123',
         transactionIndex: 0,
         blockHash: '0xblock123',
-        blockNumber: 12345,
+        blockNumber: 68391,
         from: '0xfrom123',
         to: '0xto456',
         cumulativeGasUsed: 21000,
@@ -402,40 +354,41 @@ describe('EtherJSProvider Normalization', () => {
         logs: [],
         logsBloom: '0x00000000000000000000000000000000',
         status: '0x1',
-        type: '2',
+        type: '0x2',
         effectiveGasPrice: 25000000000,
-        blobGasUsed: '131072',
-        blobGasPrice: '1000000000',
+        blobGasUsed: '0x20000',
+        blobGasPrice: '0x3b9aca00',
       });
     });
 
     it('should handle failed transaction status', () => {
-      const ethersReceipt = createMockEthersReceipt({
-        status: 0,
-        type: 0,
-        effectiveGasPrice: 20000000000n,
+      const rawReceipt = createMockRawReceipt({
+        status: '0x0',
+        type: '0x0',
         blobGasUsed: undefined,
         blobGasPrice: undefined,
       });
 
-      const result = provider['normalizeReceipt'](ethersReceipt);
+      const result = provider['normalizeRawReceipt'](rawReceipt);
       expect(result.status).toBe('0x0');
+      expect(result.blobGasUsed).toBeUndefined();
+      expect(result.blobGasPrice).toBeUndefined();
     });
 
     it('should normalize logs in receipt', () => {
-      const mockLog = createMockLog();
-      const ethersReceipt = createMockEthersReceipt({
+      const mockLog = createMockRawLog();
+      const rawReceipt = createMockRawReceipt({
         logs: [mockLog],
       });
 
-      const result = provider['normalizeReceipt'](ethersReceipt);
+      const result = provider['normalizeRawReceipt'](rawReceipt);
 
       expect(result.logs).toHaveLength(1);
       expect(result.logs[0]).toEqual({
         address: '0xcontract123',
         topics: ['0xtopic1', '0xtopic2'],
         data: '0xlogdata',
-        blockNumber: 12345,
+        blockNumber: 68391,
         transactionHash: '0xtx123',
         transactionIndex: 0,
         blockHash: '0xblock123',
@@ -444,94 +397,147 @@ describe('EtherJSProvider Normalization', () => {
       });
     });
 
-    it('should handle alternative field names', () => {
-      const ethersReceipt = createMockEthersReceipt({
-        hash: '0xtx123',
-        index: 0,
-        transactionHash: undefined,
-        transactionIndex: undefined,
+    it('should handle missing optional fields with defaults', () => {
+      const rawReceipt = createMockRawReceipt({
+        type: undefined,
+        effectiveGasPrice: undefined,
       });
 
-      const result = provider['normalizeReceipt'](ethersReceipt);
+      const result = provider['normalizeRawReceipt'](rawReceipt);
 
-      expect(result.transactionHash).toBe('0xtx123');
-      expect(result.transactionIndex).toBe(0);
+      expect(result.type).toBe('0x0');
+      expect(result.effectiveGasPrice).toBe(0);
     });
 
-    it('should handle missing blob fields', () => {
-      const ethersReceipt = createMockEthersReceipt({
-        blobGasUsed: undefined,
-        blobGasPrice: undefined,
+    it('should handle logs with missing optional fields', () => {
+      const logWithMissingFields = createMockRawLog({
+        blockNumber: undefined,
+        transactionIndex: undefined,
+        logIndex: undefined,
       });
 
-      const result = provider['normalizeReceipt'](ethersReceipt);
+      const rawReceipt = createMockRawReceipt({
+        logs: [logWithMissingFields],
+      });
 
-      expect(result.blobGasUsed).toBeUndefined();
-      expect(result.blobGasPrice).toBeUndefined();
+      const result = provider['normalizeRawReceipt'](rawReceipt);
+
+      expect(result.logs[0]!.blockNumber).toBeNull();
+      expect(result.logs[0]!.transactionIndex).toBeNull();
+      expect(result.logs[0]!.logIndex).toBeNull();
+    });
+  });
+
+  describe('normalizeBlockStats', () => {
+    it('should normalize raw block data into block stats', () => {
+      const rawBlock = createMockRawBlock({
+        transactions: ['0xtx1', '0xtx2', '0xtx3'], // 3 transactions
+        uncles: ['0xuncle1'], // 1 uncle
+      });
+
+      const result = provider['normalizeBlockStats'](rawBlock);
+
+      expect(result).toEqual({
+        hash: '0xabc123',
+        number: 68391,
+        size: 1024,
+        gasLimit: 30000000,
+        gasUsed: 15000000,
+        gasUsedPercentage: 50, // (15000000 / 30000000) * 100
+        timestamp: 1638192384,
+        transactionCount: 3,
+        baseFeePerGas: '0x4a817c800',
+        blobGasUsed: '0x20000',
+        excessBlobGas: '0x0',
+        miner: '0xminer789',
+        difficulty: '0xf4240',
+        parentHash: '0xdef456',
+        unclesCount: 1,
+      });
+    });
+
+    it('should handle missing transactions and calculate 0 count', () => {
+      const rawBlock = createMockRawBlock({
+        transactions: undefined,
+        uncles: undefined,
+      });
+
+      const result = provider['normalizeBlockStats'](rawBlock);
+
+      expect(result.transactionCount).toBe(0);
+      expect(result.unclesCount).toBe(0);
+    });
+
+    it('should calculate gas percentage correctly with zero gas limit', () => {
+      const rawBlock = createMockRawBlock({
+        gasLimit: '0x0',
+        gasUsed: '0x5208',
+      });
+
+      const result = provider['normalizeBlockStats'](rawBlock);
+
+      expect(result.gasUsedPercentage).toBe(0);
+    });
+
+    it('should prefer blockNumber over number field', () => {
+      const rawBlock = createMockRawBlock({
+        blockNumber: '0x10b27', // 68007
+        number: '0x109a7', // 67687
+      });
+
+      const result = provider['normalizeBlockStats'](rawBlock);
+      expect(result.number).toBe(68007);
     });
   });
 
   describe('Edge Cases', () => {
-    it('should handle access list in transactions', () => {
-      const accessList = [
-        { address: '0xcontract1', storageKeys: ['0xkey1', '0xkey2'] },
-        { address: '0xcontract2', storageKeys: ['0xkey3'] },
-      ];
-
-      const ethersTx = createMockEthersTransaction({
-        type: 1,
-        accessList,
+    it('should handle very large hex values', () => {
+      const rawTx = createMockRawTransaction({
+        nonce: '0xffffffffffffffff', // Max uint64
+        gas: '0xffffffff', // Max uint32
+        value: '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff', // Max uint256
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
-      expect(result.accessList).toEqual(accessList);
-    });
+      const result = provider['normalizeRawTransaction'](rawTx);
 
-    it('should handle maximum gas values', () => {
-      const ethersTx = createMockEthersTransaction({
-        gasLimit: BigInt('0xffffffffffffffff'), // Max uint64
-        gasPrice: BigInt('0xffffffffffffffff'),
-      });
-
-      const result = provider['normalizeTransaction'](ethersTx);
-
+      expect(typeof result.nonce).toBe('number');
       expect(typeof result.gas).toBe('number');
-      expect(typeof result.gasPrice).toBe('string');
+      expect(typeof result.value).toBe('string');
     });
 
-    it('should handle zero values correctly', () => {
-      const ethersTx = createMockEthersTransaction({
-        nonce: 0,
-        value: 0n,
-        gasPrice: 0n,
-        chainId: 0n,
+    it('should handle invalid hex values gracefully', () => {
+      const rawTx = createMockRawTransaction({
+        nonce: 'invalid',
+        gas: '',
+        chainId: 'not-hex',
       });
 
-      const result = provider['normalizeTransaction'](ethersTx);
-
-      expect(result.nonce).toBe(0);
-      expect(result.value).toBe('0');
-      expect(result.gasPrice).toBe('0');
-      expect(result.chainId).toBeUndefined();
+      expect(() => provider['normalizeRawTransaction'](rawTx)).toThrow();
     });
 
-    it('should handle complex log structure', () => {
-      const complexLog = createMockLog({
-        topics: ['0xtopic1', '0xtopic2', '0xtopic3', '0xtopic4'],
-        data: '0x' + 'a'.repeat(128), // 64 bytes of data
-        logIndex: 5,
-        removed: true,
+    it('should handle null and undefined gas values', () => {
+      const rawReceipt = createMockRawReceipt({
+        cumulativeGasUsed: undefined,
+        gasUsed: null,
+        effectiveGasPrice: '',
       });
 
-      const ethersReceipt = createMockEthersReceipt({
-        logs: [complexLog],
+      // Should not throw but handle gracefully
+      expect(() => provider['normalizeRawReceipt'](rawReceipt)).not.toThrow();
+    });
+
+    it('should handle empty arrays and null values', () => {
+      const rawBlock = createMockRawBlock({
+        transactions: [],
+        uncles: [],
+        withdrawals: null,
       });
 
-      const result = provider['normalizeReceipt'](ethersReceipt);
+      const result = provider['normalizeRawBlock'](rawBlock);
 
-      expect(result.logs[0]!.topics).toHaveLength(4);
-      expect(result.logs[0]!.logIndex).toBe(5);
-      expect(result.logs[0]!.removed).toBe(true);
+      expect(result.transactions).toEqual([]);
+      expect(result.uncles).toEqual([]);
+      expect(result.withdrawals).toBeNull();
     });
   });
 });

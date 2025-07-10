@@ -4,29 +4,14 @@ import type { Block } from '../../../blockchain-provider';
 import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
 import { BlocksQueue } from '../../blocks-queue';
 
-/**
- * Pull-based network provider strategy with two-phase loading optimization.
- *
- * This strategy implements an optimized approach for loading blockchain blocks:
- * - Phase 1: Loads blocks with transactions (without receipts) and stores them locally
- * - Phase 2: Loads only receipts in batches and combines them with existing blocks
- *
- * Features:
- * - Dynamic batch size adjustment based on consumption patterns
- * - Intelligent receipt size estimation using heuristics
- * - Memory-optimized processing to avoid unnecessary object copying
- * - Concurrent receipt loading with configurable concurrency
- *
- */
 export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
-  private _concurrency: number = 1;
   private _preloadedItemsQueue: Block[] = []; // Blocks + Transactions - Receipts
 
   private _maxPreloadCount: number;
-  private _lastPreloadCount = 0;
-  private _lastLoadedCount = 0;
+  private _lastLoadReceiptsDuration = 0;
+  private _previousLoadReceiptsDuration = 0;
 
   constructor(
     private readonly log: AppLogger,
@@ -34,12 +19,10 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     private readonly queue: BlocksQueue<Block>,
     config: {
       maxRequestBlocksBatchSize: number;
-      concurrency: number;
       basePreloadCount: number;
     }
   ) {
     this._maxRequestBlocksBatchSize = config.maxRequestBlocksBatchSize;
-    this._concurrency = config.concurrency;
     this._maxPreloadCount = config.basePreloadCount;
   }
 
@@ -71,12 +54,11 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
     // IMPORTANT: This check is mandatory after preload.
     // We don't want to start downloading receipts if there is no space in the queue
-    if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * this._concurrency)) {
+    if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
       this.log.debug('The queue is overloaded');
       return;
     }
 
-    // Load receipts and enqueue complete blocks
     if (this._preloadedItemsQueue.length > 0) {
       await this.loadReceiptsAndEnqueueBlocks();
     }
@@ -92,10 +74,10 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
   /**
    * Phase 1: Preloads blocks with transactions and stores them locally.
    *
-   * This method implements dynamic adjustment of the preload count based on consumption patterns:
-   * - If consumption ratio > 0.9, increases preload count by 25%
-   * - If consumption ratio < 0.2, decreases preload count by 25% (minimum 1)
-   * - Otherwise, keeps the current preload count unchanged
+   * This method implements dynamic adjustment of the preload count based on loadReceipts timing:
+   * - If `timingRatio > 1.2` (current took 20%+ longer), increase `_maxPreloadCount` by 25%
+   * - If `timingRatio < 0.8` (current took 20%+ less time), decrease `_maxPreloadCount` by 25%, but not below 1
+   * - If timing is similar (0.8-1.2 range), leave `_maxPreloadCount` unchanged
    *
    * The method loads blocks with full transactions but without receipts to optimize
    * memory usage and network traffic for the initial phase.
@@ -106,14 +88,15 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
    */
   @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksWithTransactions(currentNetworkHeight: number): Promise<void> {
-    // Dynamic adjustment based on consumption ratio
-    if (this._lastPreloadCount > 0) {
-      const ratio = this._lastLoadedCount / this._lastPreloadCount;
-      if (ratio > 0.9) {
-        // Almost everything was used, increase preload count
+    // Dynamic adjustment based on timing comparison with previous loadReceipts
+    if (this._previousLoadReceiptsDuration > 0 && this._lastLoadReceiptsDuration > 0) {
+      const timingRatio = this._lastLoadReceiptsDuration / this._previousLoadReceiptsDuration;
+
+      if (timingRatio > 1.2) {
+        // Current loadReceipts took significantly longer - need more preload buffer
         this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
-      } else if (ratio < 0.2) {
-        // Barely used any, decrease preload count
+      } else if (timingRatio < 0.8) {
+        // Current loadReceipts was significantly faster - can reduce preload buffer
         this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
       }
     }
@@ -124,8 +107,6 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     if (count <= 0) {
       return;
     }
-
-    this._lastPreloadCount = count;
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
     this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true); // true = with transactions
@@ -148,13 +129,15 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
    */
   private async loadReceiptsAndEnqueueBlocks(): Promise<void> {
     const retryLimit = 3;
+    const startTime = Date.now();
 
     // Create batches for receipts loading based on transaction count and estimated receipt sizes
     const receiptsBatches = this.createOptimalBatchesForReceipts();
 
     const activeTasks: Promise<Block[]>[] = [];
 
-    for (let i = 0; i < this._concurrency; i++) {
+    for (let i = 0; i < 1; i++) {
+      // 1 - _concurrency
       const batch = receiptsBatches[i];
       if (batch) {
         activeTasks.push(this.loadBlocks(batch.blocks, retryLimit));
@@ -164,12 +147,15 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     const results: Block[][] = await Promise.all(activeTasks);
     const completeBlocks: Block[] = results.flat();
 
-    // Clear processed blocks and update loaded count
+    // Clear processed blocks
     this._preloadedItemsQueue = [];
-    this._lastLoadedCount = completeBlocks.length;
 
     // Enqueue complete blocks
     await this.enqueueBlocks(completeBlocks);
+
+    // Update timing history
+    this._previousLoadReceiptsDuration = this._lastLoadReceiptsDuration;
+    this._lastLoadReceiptsDuration = Date.now() - startTime;
   }
 
   /**
@@ -292,24 +278,20 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
     while (attempt < maxRetries) {
       try {
-        // Collect all transaction hashes from all blocks in batch
-        const allTxHashes: string[] = [];
+        // Extract block heights from all blocks in batch
+        const blockHeights: number[] = blocks.map((block: Block) => block.blockNumber);
 
-        blocks.forEach((block: Block) => {
-          if (block.transactions && block.transactions.length > 0) {
-            const txHashes = block.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
-            allTxHashes.push(...txHashes);
-          }
+        // Get all block receipts at once using eth_getBlockReceipts
+        const allBlocksReceipts = await this.blockchainProvider.getManyBlocksWithReceipts(blockHeights);
+
+        // Attach receipts to each block
+        blocks.forEach((block: Block, index: number) => {
+          const blockReceipts = allBlocksReceipts[index] || [];
+          (block as any).receipts = blockReceipts;
         });
 
-        // Get all receipts at once if there are any transactions
-        let allReceipts: any[] = [];
-        if (allTxHashes.length > 0) {
-          allReceipts = await this.blockchainProvider.getManyTransactionReceipts(allTxHashes);
-        }
-
-        // Use provider service to merge receipts into blocks
-        return await this.blockchainProvider.mergeReceiptsIntoBlocks(blocks, allReceipts);
+        // Use provider service to merge receipts into blocks and recalculate sizes
+        return await this.blockchainProvider.mergeReceiptsIntoBlocks(blocks, []);
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {

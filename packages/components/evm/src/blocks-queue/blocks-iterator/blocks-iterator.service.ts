@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import { AppLogger } from '@easylayer/common/logger';
-import type { Block } from '../../blockchain-provider';
+import { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import type { BlocksCommandExecutor } from '../interfaces';
 
@@ -39,6 +39,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    this.log.debug('Shutting down iterator');
     this._timer?.destroy();
     this._timer = null;
     this._resolveNextBatch();
@@ -49,11 +50,14 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
    * Starts iterating over the block queue and processing blocks.
    */
   public async startQueueIterating(queue: BlocksQueue<Block>): Promise<void> {
-    this.log.debug('Setup blocks iterating');
+    this.log.debug('Start blocks iterating', {
+      args: { initialQueueLength: queue.length },
+    });
 
     // NOTE: We use this to make sure that
     // method startQueueIterating() is executed only once in its entire life.
     if (this._isIterating) {
+      this.log.debug('Blocks iterating skipped: already iterating');
       // Iterating Blocks already started
       return;
     }
@@ -63,17 +67,26 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     // TODO: think where put this
     this._queue = queue;
 
+    this.log.debug('Queue assigned to iterator', {
+      args: { currentSize: this._queue.currentSize },
+    });
+
     this._timer = exponentialIntervalAsync(
       async (resetInterval) => {
         // IMPORTANT: Before processing the next batch from the queue,
         // we wait for the resolving of the promise of the previous batch (confirm batch method)
         await this.batchProcessedPromise;
 
+        this.log.debug('Previous batch resolved, fetching next batch');
+
         const batch = await this.peekNextBatch();
 
         if (batch.length > 0) {
           await this.processBatch(batch);
+          this.log.debug('Batch processed, resetting interval');
           resetInterval();
+        } else {
+          this.log.debug('No blocks to process this tick');
         }
       },
       {
@@ -82,6 +95,8 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         multiplier: 2,
       }
     );
+
+    this.log.debug('Iterator exponential timer started');
   }
 
   private async processBatch(batch: Block[]) {
@@ -92,8 +107,13 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
 
     try {
       await this.blocksCommandExecutor.handleBatch({ batch, requestId: uuidv4() });
+
+      this.log.debug('handleBatch succeeded');
     } catch (error) {
-      this.log.warn('Failed to process the batch', { args: error });
+      this.log.debug('Failed to process the batch, will retry', {
+        methodName: 'processBatch',
+        args: error,
+      });
 
       // IMPORTANT: We call this to resolve queue promise
       // that we can try same block one more time

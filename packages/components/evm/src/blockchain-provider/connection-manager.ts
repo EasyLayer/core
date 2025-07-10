@@ -44,7 +44,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       interval: 1000, // Start with 1 second
       multiplier: 2, // Double each time
       maxInterval: 30000, // Max 30 seconds between attempts
-      // maxAttempts: 10      // Max 10 reconnection attempts
+      maxAttempts: 20, // Max 20 reconnection attempts
     },
   };
 
@@ -65,7 +65,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       }
       this._providers.set(name, provider);
 
-      this.log.info('Blockchain provider registered', {
+      this.log.info('EVM blockchain provider registered', {
         args: { providerName: name },
       });
     });
@@ -76,23 +76,41 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    for (const provider of this._providers.values()) {
-      if (await this.tryConnectProvider(provider)) {
-        this.activeProviderName = provider.uniqName;
-        this.log.info(`Connected to provider: ${provider.constructor.name}`, {
-          args: { activeProviderName: this.activeProviderName },
-        });
+    const failedProviders: Array<{ name: string; error: string }> = [];
 
-        // Start health monitoring
-        this.startHealthMonitoring();
-        return;
+    for (const provider of this._providers.values()) {
+      try {
+        if (await this.tryConnectProvider(provider)) {
+          this.activeProviderName = provider.uniqName;
+          this.log.info(`Connected to EVM provider: ${provider.constructor.name}`, {
+            args: { activeProviderName: this.activeProviderName },
+          });
+
+          // Start health monitoring after successful connection
+          this.startHealthMonitoring();
+          return;
+        }
+      } catch (error: any) {
+        failedProviders.push({
+          name: provider.uniqName,
+          error: error.message || 'Unknown error',
+        });
       }
 
-      this.log.warn('Provider connect failed, trying next', {
-        args: { providerName: provider.uniqName },
+      this.log.warn('EVM provider connect failed, trying next', {
+        args: {
+          providerName: provider.uniqName,
+          lastError: failedProviders[failedProviders.length - 1]?.error,
+        },
       });
     }
-    throw new Error(`Unable to connect to any providers.`);
+
+    // Show all failed providers and their errors
+    const errorMessage = `Unable to connect to any EVM providers. Failed attempts:\n${failedProviders
+      .map((fp) => `- ${fp.name}: ${fp.error}`)
+      .join('\n')}`;
+
+    throw new Error(errorMessage);
   }
 
   async onModuleDestroy() {
@@ -103,13 +121,13 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
     this.stopReconnection();
 
     for (const provider of this._providers.values()) {
-      this.log.debug('Disconnecting provider', {
+      this.log.debug('Disconnecting EVM provider', {
         args: { providerName: provider.uniqName },
       });
       try {
         await provider.disconnect();
       } catch (error) {
-        this.log.warn('Error disconnecting provider during cleanup', {
+        this.log.warn('Error disconnecting EVM provider during cleanup', {
           args: { error, providerName: provider.uniqName },
         });
       }
@@ -134,7 +152,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       // If health check fails, exponential backoff will increase interval
     }, this.reconnectOptions.healthCheckInterval);
 
-    this.log.debug('Health monitoring started with exponential backoff', {
+    this.log.debug('EVM health monitoring started with exponential backoff', {
       args: {
         initialInterval: this.reconnectOptions.healthCheckInterval.interval,
         maxInterval: this.reconnectOptions.healthCheckInterval.maxInterval,
@@ -149,7 +167,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
     if (this.healthCheckTimer) {
       this.healthCheckTimer.destroy();
       this.healthCheckTimer = undefined;
-      this.log.debug('Health monitoring stopped');
+      this.log.debug('EVM health monitoring stopped');
     }
   }
 
@@ -167,23 +185,24 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
         const success = await this.attemptReconnection(provider, type);
 
         if (success) {
-          this.log.info(`${type} reconnection successful`, {
+          this.log.info(`EVM ${type} reconnection successful`, {
             args: { providerName: this.activeProviderName, type },
           });
 
-          // Stop timer on success
+          // Stop timer on success and restart health monitoring
           this.stopReconnection();
+          this.startHealthMonitoring();
           resetInterval(); // Won't be called since we stop timer
         }
       } catch (error) {
-        this.log.error(`${type} reconnection attempt failed`, {
+        this.log.error(`EVM ${type} reconnection attempt failed`, {
           args: { error, providerName: this.activeProviderName, type },
         });
         // Exponential backoff handles the delay
       }
     }, this.reconnectOptions.reconnectInterval);
 
-    this.log.debug(`Started ${type} reconnection with exponential backoff`, {
+    this.log.debug(`Started EVM ${type} reconnection with exponential backoff`, {
       args: {
         providerName: this.activeProviderName,
         type,
@@ -197,7 +216,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    * Attempts reconnection based on type
    */
   private async attemptReconnection(provider: BaseNodeProvider, type: ReconnectionType): Promise<boolean> {
-    this.log.debug(`Attempting ${type} reconnection`, {
+    this.log.debug(`Attempting EVM ${type} reconnection`, {
       args: { providerName: this.activeProviderName, type },
     });
 
@@ -232,7 +251,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       this.reconnectionTimer.destroy();
       this.reconnectionTimer = undefined;
       this.currentReconnectionType = undefined;
-      this.log.debug('Reconnection timer stopped');
+      this.log.debug('EVM reconnection timer stopped');
     }
   }
 
@@ -243,7 +262,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   private async performHealthCheck(): Promise<boolean> {
     // Prevent parallel health checks
     if (this.isHealthCheckRunning) {
-      this.log.debug('Health check already running, skipping');
+      this.log.debug('EVM health check already running, skipping');
       return true; // Return true to avoid resetting interval
     }
 
@@ -255,14 +274,14 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       const provider = this._providers.get(currentActiveProviderName);
 
       if (!provider) {
-        this.log.error('Active provider not found during health check');
+        this.log.error('Active EVM provider not found during health check');
         return false;
       }
 
       // Check HTTP health
       const httpHealthy = await provider.healthcheck();
       if (!httpHealthy) {
-        this.log.warn('HTTP health check failed for active provider', {
+        this.log.warn('EVM HTTP health check failed for active provider', {
           args: { providerName: currentActiveProviderName },
           methodName: 'performHealthCheck',
         });
@@ -274,7 +293,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       if (this.hasWebSocketSupport(provider)) {
         const wsHealthy = await provider.healthcheckWebSocket();
         if (!wsHealthy) {
-          this.log.warn('WebSocket health check failed, starting WebSocket reconnection', {
+          this.log.warn('EVM WebSocket health check failed, starting WebSocket reconnection', {
             args: { providerName: currentActiveProviderName },
             methodName: 'performHealthCheck',
           });
@@ -287,7 +306,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
       return true;
     } catch (error) {
-      this.log.error('Health check failed', {
+      this.log.error('EVM health check failed', {
         args: { error, providerName: this.activeProviderName },
         methodName: 'performHealthCheck',
       });
@@ -303,9 +322,12 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    * or reconnecting the current one if it's the only available provider
    */
   private async handleProviderFailure(): Promise<void> {
-    this.log.debug('Attempting to handle provider failure', {
+    this.log.debug('Attempting to handle EVM provider failure', {
       args: { failedProvider: this.activeProviderName },
     });
+
+    // Stop health monitoring during failure handling
+    this.stopHealthMonitoring();
 
     // Check if we have multiple providers
     const hasMultipleProviders = this._providers.size > 1;
@@ -321,20 +343,23 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
           const oldProvider = this.activeProviderName;
           this.activeProviderName = name;
 
-          this.log.info('Successfully switched to backup provider', {
+          this.log.info('Successfully switched to backup EVM provider', {
             args: {
               oldProvider,
               newProvider: this.activeProviderName,
             },
           });
+
+          // Restart health monitoring for new provider
+          this.startHealthMonitoring();
           return;
         }
       }
 
-      this.log.error('No working backup providers found');
+      this.log.error('No working backup EVM providers found');
     } else {
       // Only one provider available - attempt to reconnect it
-      this.log.info('Only one provider available, attempting to reconnect', {
+      this.log.info('Only one EVM provider available, attempting to reconnect', {
         args: { providerName: this.activeProviderName },
       });
 
@@ -348,7 +373,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   private async attemptSingleProviderReconnection(): Promise<void> {
     const provider = this._providers.get(this.activeProviderName);
     if (!provider) {
-      this.log.error('Active provider not found during reconnection attempt');
+      this.log.error('Active EVM provider not found during reconnection attempt');
       return;
     }
 
@@ -383,27 +408,30 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    */
   public async removeProvider(name: string): Promise<boolean> {
     if (!this._providers.has(name)) {
-      throw new Error(`Provider with name ${name} not found`);
+      throw new Error(`EVM provider with name ${name} not found`);
     }
 
     // If removing active provider
     if (this.activeProviderName === name) {
+      // Stop monitoring first
+      this.stopHealthMonitoring();
+      this.stopReconnection();
+
       // If there are other providers, switch to one of them
       if (this._providers.size > 1) {
         for (const [otherName, otherProvider] of this._providers.entries()) {
           if (otherName !== name && (await this.tryConnectProvider(otherProvider))) {
-            this.log.info('Switched to backup provider after removing active one', {
+            this.log.info('Switched to backup EVM provider after removing active one', {
               args: { removedProvider: name, newProvider: otherName },
             });
             this.activeProviderName = otherName;
+            this.startHealthMonitoring(); // Restart monitoring
             break;
           }
         }
       } else {
-        // This is the only provider, stop all monitoring
-        this.stopHealthMonitoring();
-        this.stopReconnection();
-        this.activeProviderName = ''; // Clear active provider
+        // This is the only provider, clear active provider
+        this.activeProviderName = '';
       }
     }
 
@@ -413,12 +441,12 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Improved disconnectProvider - doesn't try to connect before disconnect
+   * Disconnect provider without trying to connect first
    */
   public async disconnectProvider(name: string): Promise<void> {
     const provider = this._providers.get(name);
     if (!provider) {
-      throw new Error(`Provider with name ${name} not found`);
+      throw new Error(`EVM provider with name ${name} not found`);
     }
 
     // If this is active provider, stop its monitoring
@@ -429,11 +457,11 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
     try {
       await provider.disconnect();
-      this.log.warn(`Disconnected from provider: ${provider.constructor.name}`, {
+      this.log.warn(`Disconnected from EVM provider: ${provider.constructor.name}`, {
         args: { name },
       });
     } catch (error) {
-      this.log.error('Error disconnecting provider', {
+      this.log.error('Error disconnecting EVM provider', {
         args: { error, name },
       });
       throw error;
@@ -446,7 +474,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   public async switchProvider(name: string): Promise<void> {
     const provider = this._providers.get(name);
     if (!provider) {
-      throw new Error(`Provider with name ${name} not found`);
+      throw new Error(`EVM provider with name ${name} not found`);
     }
 
     // Stop monitoring and reconnection of current provider
@@ -455,7 +483,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
     if (await this.tryConnectProvider(provider)) {
       this.activeProviderName = name;
-      this.log.info(`Switched to provider: ${provider.constructor.name}`, {
+      this.log.info(`Switched to EVM provider: ${provider.constructor.name}`, {
         args: { name },
       });
 
@@ -464,30 +492,30 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
     } else {
       // If switch failed, resume monitoring of old provider
       this.startHealthMonitoring();
-      throw new Error(`Failed to switch to provider with name ${name}`);
+      throw new Error(`Failed to switch to EVM provider with name ${name}`);
     }
   }
 
   public async getActiveProvider(): Promise<BaseNodeProvider> {
     const provider = this._providers.get(this.activeProviderName);
     if (!provider) {
-      throw new Error(`Provider with name ${this.activeProviderName} not found`);
+      throw new Error(`EVM provider with name ${this.activeProviderName} not found`);
     }
     return provider;
   }
 
   /**
-   * Improved getProviderByName - doesn't auto-connect if not needed
+   * Get provider by name without auto-connect by default
    */
   public async getProviderByName(name: string, autoConnect = false): Promise<BaseNodeProvider> {
     const provider = this._providers.get(name);
     if (!provider) {
-      throw new Error(`Provider with name ${name} not found`);
+      throw new Error(`EVM provider with name ${name} not found`);
     }
 
     // If the requested provider is already active, return it
     if (this.activeProviderName === name) {
-      this.log.debug('Requested provider is already active', {
+      this.log.debug('Requested EVM provider is already active', {
         args: { name },
       });
       return provider;
@@ -498,29 +526,35 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       return provider;
     }
 
-    this.log.debug('Trying to connect requested provider', {
+    this.log.debug('Trying to connect requested EVM provider', {
       args: { name },
     });
+
+    // Stop current monitoring during switch
+    this.stopHealthMonitoring();
+    this.stopReconnection();
 
     // Trying to connect to the requested provider
     const isConnected = await this.tryConnectProvider(provider);
     if (!isConnected) {
-      throw new Error(`Failed to connect to provider with name ${name}`);
+      // Restart monitoring of current provider if switch failed
+      this.startHealthMonitoring();
+      throw new Error(`Failed to connect to EVM provider with name ${name}`);
     }
 
     // Disconnect the current active provider if necessary
     if (this.activeProviderName && this.activeProviderName !== name) {
       const current = this._providers.get(this.activeProviderName)!;
-      this.log.debug('Disconnecting current active provider', {
+      this.log.debug('Disconnecting current active EVM provider', {
         args: { name: this.activeProviderName },
       });
       try {
         await current.disconnect();
-        this.log.info(`Disconnected from provider: ${current.constructor.name}`, {
+        this.log.info(`Disconnected from EVM provider: ${current.constructor.name}`, {
           args: { oldProvider: this.activeProviderName },
         });
       } catch (error) {
-        this.log.debug('Error while disconnecting old provider', {
+        this.log.debug('Error while disconnecting old EVM provider', {
           args: error,
         });
       }
@@ -528,9 +562,13 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
     // Update the active provider
     this.activeProviderName = name;
-    this.log.info(`Connected to provider: ${provider.constructor.name}`, {
+    this.log.info(`Connected to EVM provider: ${provider.constructor.name}`, {
       args: { name },
     });
+
+    // Start monitoring for new provider
+    this.startHealthMonitoring();
+
     return provider;
   }
 

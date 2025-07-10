@@ -1,4 +1,4 @@
-import { BlockchainProviderService, BlockParserService, Block } from '../../../blockchain-provider';
+import { BlockchainProviderService, Block } from '../../../blockchain-provider';
 import { AppLogger, RuntimeTracker } from '@easylayer/common/logger';
 import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
 import { BlocksQueue } from '../../blocks-queue';
@@ -12,12 +12,11 @@ interface BlockInfo {
 export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
-  private _concurrency: number = 1;
   private _preloadedItemsQueue: BlockInfo[] = [];
 
   private _maxPreloadCount: number;
-  private _lastPreloadCount = 0;
-  private _lastLoadedCount = 0;
+  private _lastLoadAndEnqueueDuration = 0;
+  private _previousLoadAndEnqueueDuration = 0;
 
   /**
    * Creates an instance of PullNetworkProviderStrategy.
@@ -32,12 +31,10 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     private readonly queue: BlocksQueue<Block>,
     config: {
       maxRequestBlocksBatchSize: number;
-      concurrency: number;
       basePreloadCount: number;
     }
   ) {
     this._maxRequestBlocksBatchSize = config.maxRequestBlocksBatchSize;
-    this._concurrency = config.concurrency;
     this._maxPreloadCount = config.basePreloadCount;
   }
 
@@ -69,13 +66,8 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
     // IMPORTANT: This check is mandatory after preload.
     // We don't want to start downloading blocks if there is no items in the queue for them
-    if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * this._concurrency)) {
-      this.log.debug('The queue is overloaded', {
-        args: {
-          currentSize: this._maxRequestBlocksBatchSize * this._concurrency + this.queue.currentSize,
-          maxQueueSize: this.queue.maxQueueSize,
-        },
-      });
+    if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
+      this.log.debug('The queue is overloaded');
       return;
     }
 
@@ -93,21 +85,19 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
   /**
    * Preloads block metadata (hash, size, height) into the internal queue in a single RPC call,
-   * and dynamically tunes the preload batch size based on previous consumption.
+   * and dynamically tunes the preload batch size based on previous loadAndEnqueue timing.
    *
    * Behavior:
-   * 1. If this is not the first preload invocation, compute the consumption ratio:
-   *    `ratio = _lastLoadedCount / _lastPreloadCount`.
-   *    - If `ratio > 0.9`, increase `_maxPreloadCount` by 25%.
-   *    - If `ratio < 0.2`, decrease `_maxPreloadCount` by 25%, but not below 1.
-   *    - Otherwise, leave `_maxPreloadCount` unchanged.
+   * 1. If this is not the first preload invocation, compare current vs previous loadAndEnqueue timing:
+   *    - If `timingRatio > 1.2` (current took 20%+ longer), increase `_maxPreloadCount` by 25%
+   *    - If `timingRatio < 0.8` (current took 20%+ less time), decrease `_maxPreloadCount` by 25%, but not below 1
+   *    - If timing is similar (0.8-1.2 range), leave `_maxPreloadCount` unchanged
    * 2. Calculate how many blocks remain between `queue.lastHeight` and
    *    `currentNetworkHeight`, and cap the request count to `_maxPreloadCount`.
    * 3. If the resulting `count` is zero or negative, return immediately.
-   * 4. Record `_lastPreloadCount = count`.
-   * 5. Request stats for heights `[lastHeight+1 ... lastHeight+count]` via
+   * 4. Request stats for heights `[lastHeight+1 ... lastHeight+count]` via
    *    `blockchainProvider.getManyBlocksStatsByHeights`.
-   * 6. For each returned stat:
+   * 5. For each returned stat:
    *    - Throw if `blockhash` or `height` is missing.
    *    - Use `total_size` if present, otherwise fall back to `queue.blockSize`.
    *    - Push `{ hash, size, height }` into `_preloadedItemsQueue`.
@@ -118,14 +108,15 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
    */
   @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
-    // Dynamic adjustment
-    if (this._lastPreloadCount > 0) {
-      const ratio = this._lastLoadedCount / this._lastPreloadCount;
-      if (ratio > 0.9) {
-        // almost everything was used
+    // Dynamic adjustment based on timing comparison with previous loadAndEnqueue
+    if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
+      const timingRatio = this._lastLoadAndEnqueueDuration / this._previousLoadAndEnqueueDuration;
+
+      if (timingRatio > 1.2) {
+        // Current loadAndEnqueue took significantly longer - need more preload buffer
         this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
-      } else if (ratio < 0.2) {
-        // you barely used any
+      } else if (timingRatio < 0.8) {
+        // Current loadAndEnqueue was significantly faster - can reduce preload buffer
         this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
       }
     }
@@ -137,15 +128,15 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       return;
     }
 
-    this._lastPreloadCount = count;
-
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
-    const stats = await this.blockchainProvider.getManyBlocksStatsByHeights(heights);
+
+    // Use the new optimized method for getting block info
+    const blockInfos = await this.blockchainProvider.getManyBlocksStatsByHeights(heights);
 
     // Fill the preload queue, substituting the default size if there is none
-    for (const { blockhash, total_size, height } of stats) {
+    for (const { blockhash, total_size, height } of blockInfos) {
       if (!blockhash || height == null) {
-        throw new Error('Block stats missing required hash and height');
+        throw new Error('Block infos missing required hash and height');
       }
       const size = total_size != null ? total_size : this.queue.blockSize;
       this._preloadedItemsQueue.push({ hash: blockhash, size, height });
@@ -167,6 +158,7 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
    */
   private async loadAndEnqueueBlocks(): Promise<void> {
     const retryLimit = 3;
+    const startTime = Date.now();
 
     const activeTasks: Promise<Block[]>[] = [];
     let totalInfosPulled = 0;
@@ -177,14 +169,22 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       return 0;
     });
 
-    for (let i = 0; i < this._concurrency; i++) {
+    for (let i = 0; i < 1; i++) {
+      // 1 - conccurency
       const infos: BlockInfo[] = [];
       let size = 0;
 
       while (size < this._maxRequestBlocksBatchSize && this._preloadedItemsQueue.length > 0) {
         const info = this._preloadedItemsQueue.pop()!;
-        infos.push(info);
-        size += info.size;
+
+        if (size + info.size <= this._maxRequestBlocksBatchSize) {
+          infos.push(info);
+          size += info.size;
+        } else {
+          // If it doesn't fit, we return it back to the queue.
+          this._preloadedItemsQueue.push(info);
+          break;
+        }
       }
 
       if (infos.length > 0) {
@@ -193,10 +193,13 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       }
     }
 
-    this._lastLoadedCount = totalInfosPulled;
     const batches: Block[][] = await Promise.all(activeTasks);
     const blocks: Block[] = batches.flat();
     await this.enqueueBlocks(blocks);
+
+    // Update timing history
+    this._previousLoadAndEnqueueDuration = this._lastLoadAndEnqueueDuration;
+    this._lastLoadAndEnqueueDuration = Date.now() - startTime;
   }
 
   /**
@@ -211,18 +214,10 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
-        const hashes = infos.map((i) => i.hash);
-        const rawHexes: string[] = await this.blockchainProvider.getManyBlocksByHashes(hashes, 0);
-        const parsedBlocks: Block[] = infos.map((info, idx) => {
-          const hex = rawHexes[idx];
-          if (typeof hex !== 'string' || hex.length === 0) {
-            throw new Error(`rawHexes[${idx}] for height ${info.height} is not defined: ${hex}`);
-          }
-          // Now we parse only valid hex
-          return BlockParserService.parseRawBlock(hex, info.height);
-        });
-
-        return parsedBlocks;
+        const heights = infos.map((i) => i.height);
+        // Use the new performance method that returns fully parsed blocks with all transactions
+        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(heights, true);
+        return blocks;
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {

@@ -199,6 +199,9 @@ export class BlocksQueue<T extends Block> {
         );
       }
 
+      // Clean up hex data to save memory
+      this.cleanupBlockHexData(block);
+
       // Add the modified block to the inStack
       this.inStack.push(block);
       this._lastHeight = Number(block.blockNumber);
@@ -231,6 +234,25 @@ export class BlocksQueue<T extends Block> {
 
       return Array.isArray(hashOrHashes) ? results : results[0];
     });
+  }
+
+  /**
+   * Remove hex data from block and transactions to save memory
+   */
+  private cleanupBlockHexData(block: T): void {
+    // Remove block hex if present
+    if ('hex' in block) {
+      delete (block as any).hex;
+    }
+
+    // Remove transaction hex data to save memory
+    if (Array.isArray(block.transactions)) {
+      for (const tx of block.transactions) {
+        if ('hex' in tx) {
+          delete (tx as any).hex;
+        }
+      }
+    }
   }
 
   /**

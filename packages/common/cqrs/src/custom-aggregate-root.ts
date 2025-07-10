@@ -26,6 +26,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   protected _version: number = 0;
   protected _aggregateId: string;
   protected _lastBlockHeight: number;
+  private _versionsFromSnapshot: number = 0;
 
   constructor(aggregateId: string, lastBlockHeight = -1) {
     if (!aggregateId) throw new Error('aggregateId is required');
@@ -41,6 +42,13 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   }
   get lastBlockHeight() {
     return this._lastBlockHeight;
+  }
+  get versionsFromSnapshot() {
+    return this._versionsFromSnapshot;
+  }
+  // Method to reset snapshot counter (called after creating snapshot)
+  public resetSnapshotCounter(): void {
+    this._versionsFromSnapshot = 0;
   }
 
   public async publish<T extends E>(event: T): Promise<void> {}
@@ -134,6 +142,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
       if (handler) {
         handler.call(this, event);
         this._version++;
+        this._versionsFromSnapshot++;
         this._lastBlockHeight = event.payload.blockHeight;
       }
     }
@@ -179,6 +188,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     this._aggregateId = aggregateId;
     this._version = version;
     this._lastBlockHeight = blockHeight;
+    this._versionsFromSnapshot = 0; // Reset counter when loading from snapshot
 
     // IMPORTANT: We don't need to restore the prototype and properties since loadFromSnapshot() is not a static method,
     // but a method inside an instance of the base aggregate.

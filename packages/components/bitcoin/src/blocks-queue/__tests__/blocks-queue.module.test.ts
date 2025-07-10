@@ -23,16 +23,29 @@ describe('BlocksQueueModule', () => {
     minTransferSize: 1024,
     queueLoaderStrategyName: 'pull',
     queueIteratorBlocksBatchSize: 2,
-    queueLoaderConcurrency: 1,
     basePreloadCount: 1 * 1024 * 1024,
     blockSize: 1 * 1024 * 1024
   };
 
   beforeEach(async () => {
+    const providers = [
+      { 
+         
+      }
+    ]
     module = await Test.createTestingModule({
       imports: [
         // IMPORTANT: We are explicitly importing the BitcoinBlockchainProviderModule for testing
-        BlockchainProviderModule.forRootAsync({ isGlobal: true, selfNodesUrl: 'http://localhost' }),
+        BlockchainProviderModule.forRootAsync({
+          isGlobal: true, 
+          network: {} as any,
+          rateLimits: {} as any,
+          providers: [{
+          connection: {
+            type: 'selfnode' as any,
+            baseUrl: 'http://localhost'
+          },
+        }] }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],
     }).compile();

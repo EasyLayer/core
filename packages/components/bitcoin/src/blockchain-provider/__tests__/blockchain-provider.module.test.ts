@@ -2,7 +2,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BlockchainProviderModule, BlockchainProviderModuleOptions } from '../blockchain-provider.module';
 import { BlockchainProviderService } from '../blockchain-provider.service';
 import { ConnectionManager } from '../connection-manager';
-import { WebhookStreamService } from '../webhook-stream.service';
 
 describe('BlockchainProviderModule', () => {
   let module: TestingModule;
@@ -10,8 +9,17 @@ describe('BlockchainProviderModule', () => {
 
   const moduleOptions: BlockchainProviderModuleOptions = {
     isGlobal: false,
-    selfNodesUrl: 'http://localhost',
-  };
+    network: {} as any,
+    rateLimits: {} as any,
+    providers: [
+      {
+        connection: {
+          type: 'selfnode' as any,
+          baseUrl: 'http://localhost'
+        }
+      } 
+    ]
+  }
 
   beforeEach(async () => {
     module = await Test.createTestingModule({
@@ -35,12 +43,4 @@ describe('BlockchainProviderModule', () => {
     expect(connectionManager).toBeDefined();
     expect(connectionManager).toBeInstanceOf(ConnectionManager);
   });
-
-  it('should have WebhookStreamService', () => {
-    const webhookStreamService = module.get<WebhookStreamService>(WebhookStreamService);
-    expect(webhookStreamService).toBeDefined();
-    expect(webhookStreamService).toBeInstanceOf(WebhookStreamService);
-  });
-
-  // Add more tests for specific methods of the services if needed
 });
