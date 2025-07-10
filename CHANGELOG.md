@@ -1,3 +1,11 @@
+## 0.8.0 (2025-07-10)
+
+* fix: fixed prepare branch to release script; ([881a212](https://github.com/EasyLayer/core/commit/881a212))
+* fix: fixed unit tests; ([6dc6b39](https://github.com/EasyLayer/core/commit/6dc6b39))
+* BREAKING: refactored network transport; refactored bitcoin and evm components; ([d104969](https://github.com/EasyLayer/core/commit/d104969))
+
+
+
 ## <small>0.7.6 (2025-06-17)</small>
 
 * refactor: added fetching receipts for entire block in one request; ([fc0daf6](https://github.com/EasyLayer/core/commit/fc0daf6))
