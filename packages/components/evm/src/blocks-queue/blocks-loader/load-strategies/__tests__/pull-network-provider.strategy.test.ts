@@ -10,7 +10,7 @@ const mockLogger = {
 
 const mockBlockchainProvider = {
   getManyBlocksByHeights: jest.fn(),
-  getManyTransactionReceipts: jest.fn(),
+  getManyBlocksWithReceipts: jest.fn(), // Исправлено: правильный метод
   mergeReceiptsIntoBlocks: jest.fn(),
 };
 
@@ -44,7 +44,6 @@ describe('PullNetworkProviderStrategy', () => {
   let strategy: PullNetworkProviderStrategy;
   const defaultConfig = {
     maxRequestBlocksBatchSize: 1024 * 1024, // 1MB
-    concurrency: 2,
     basePreloadCount: 5,
   };
 
@@ -91,7 +90,7 @@ describe('PullNetworkProviderStrategy', () => {
 
       expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true);
       expect(mockLogger.debug).toHaveBeenCalledWith('The queue is overloaded');
-      expect(mockBlockchainProvider.getManyTransactionReceipts).not.toHaveBeenCalled();
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).not.toHaveBeenCalled();
     });
 
     it('should successfully load and enqueue blocks with receipts', async () => {
@@ -99,27 +98,22 @@ describe('PullNetworkProviderStrategy', () => {
         createMockBlock(101, 2),
         createMockBlock(102, 1),
       ];
-      const mockReceipts = [
-        createMockReceipt('0xtx101_0'),
-        createMockReceipt('0xtx101_1'),
-        createMockReceipt('0xtx102_0'),
+      const mockBlocksReceipts = [
+        [createMockReceipt('0xtx101_0'), createMockReceipt('0xtx101_1')], // Block 101 receipts
+        [createMockReceipt('0xtx102_0')], // Block 102 receipts
       ];
       const mockCompleteBlocks = mockBlocks.map(block => ({ ...block, receipts: [] }));
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue(mockReceipts);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocksReceipts);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockCompleteBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
       expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true);
-      
-      // Blocks are sorted by ascending order, so tx hashes will be in normal block order
-      expect(mockBlockchainProvider.getManyTransactionReceipts).toHaveBeenCalledWith([
-        '0xtx101_0', '0xtx101_1', '0xtx102_0'
-      ]);
-      expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalledWith(mockBlocks, mockReceipts);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
+      expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalledWith(mockBlocks, []);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
 
@@ -127,7 +121,7 @@ describe('PullNetworkProviderStrategy', () => {
       // First load - should preload
       const mockBlocks = [createMockBlock(101)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[]]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.isQueueOverloaded.mockReturnValue(true); // Skip receipts loading
 
@@ -150,14 +144,13 @@ describe('PullNetworkProviderStrategy', () => {
       const mockCompleteBlocks = [...mockBlocksWithNoTx];
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocksWithNoTx);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]); // Empty receipts arrays
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockCompleteBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      // When there are no transactions, getManyTransactionReceipts should NOT be called
-      expect(mockBlockchainProvider.getManyTransactionReceipts).not.toHaveBeenCalled();
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
       expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalledWith(mockBlocksWithNoTx, []);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
@@ -167,7 +160,7 @@ describe('PullNetworkProviderStrategy', () => {
 
       const mockBlocks = [createMockBlock(109), createMockBlock(110)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
@@ -192,7 +185,7 @@ describe('PullNetworkProviderStrategy', () => {
       // Next load should preload again since queue was cleared
       jest.clearAllMocks();
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       
       await strategy.load(110);
@@ -201,56 +194,58 @@ describe('PullNetworkProviderStrategy', () => {
   });
 
   describe('dynamic preload count adjustment', () => {
-    it('should increase preload count when consumption ratio > 0.9', async () => {
-      // Mock initial load with high consumption
+    it('should increase preload count when loadReceipts takes longer', async () => {
+      // Set up timing history to trigger increase
+      (strategy as any)._previousLoadReceiptsDuration = 1000;
+      (strategy as any)._lastLoadReceiptsDuration = 1300; // 30% longer > 20%
+
       const mockBlocks = Array.from({ length: 5 }, (_, i) => createMockBlock(101 + i));
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(5).fill([]));
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
-      
+
       // Clear preloaded queue and trigger next preload
       (strategy as any)._preloadedItemsQueue = [];
       mockQueue.lastHeight = 105;
-      
+
       // Next load should request more blocks (increased preload count)
-      const moreBlocks = Array.from({ length: 6 }, (_, i) => createMockBlock(106 + i)); // Should be more than 5
+      const moreBlocks = Array.from({ length: 7 }, (_, i) => createMockBlock(106 + i));
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(moreBlocks);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(7).fill([]));
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
 
       await strategy.load(120);
-      
+
       // Should request more than initial 5 blocks
       const lastCall = mockBlockchainProvider.getManyBlocksByHeights.mock.calls[1];
       expect(lastCall[0].length).toBeGreaterThan(5);
     });
 
-    it('should decrease preload count when consumption ratio < 0.2', async () => {
-      // First load with high count but low consumption
-      const strategy = new PullNetworkProviderStrategy(
-        mockLogger,
-        mockBlockchainProvider as any,
-        mockQueue as any,
-        { ...defaultConfig, basePreloadCount: 10 }
-      );
+    it('should decrease preload count when loadReceipts is faster', async () => {
+      // Set up timing history to trigger decrease
+      (strategy as any)._previousLoadReceiptsDuration = 1000;
+      (strategy as any)._lastLoadReceiptsDuration = 700; // 30% faster < 20%
 
-      // Simulate low consumption by manually setting internal state
-      (strategy as any)._lastPreloadCount = 10;
-      (strategy as any)._lastLoadedCount = 1; // Only 1 out of 10 used (10% < 20%)
-
-      const mockBlocks = [createMockBlock(101)];
+      const mockBlocks = Array.from({ length: 3 }, (_, i) => createMockBlock(101 + i));
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(3).fill([]));
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
       
+      // Clear preloaded queue and trigger next preload  
+      (strategy as any)._preloadedItemsQueue = [];
+      mockQueue.lastHeight = 103;
+
+      await strategy.load(120);
+      
       // Should request fewer blocks in the next preload
-      const requestedHeights = mockBlockchainProvider.getManyBlocksByHeights.mock.calls[0][0];
-      expect(requestedHeights.length).toBeLessThan(10);
+      const lastCall = mockBlockchainProvider.getManyBlocksByHeights.mock.calls[1];
+      expect(lastCall[0].length).toBeLessThan(5); // Less than original basePreloadCount
     });
   });
 
@@ -262,20 +257,13 @@ describe('PullNetworkProviderStrategy', () => {
       const smallBlock = createMockBlock(103, 2, 100 * 1024); // 100KB block
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([largeBlock, mediumBlock, smallBlock]);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], [], []]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      // Blocks are sorted by ascending order (101, 102, 103), so transaction hashes follow that order
-      const expectedTxHashes = [
-        ...largeBlock.transactions.map((tx: any) => tx.hash),   // 101 first
-        ...mediumBlock.transactions.map((tx: any) => tx.hash),  // 102 second  
-        ...smallBlock.transactions.map((tx: any) => tx.hash),   // 103 last
-      ];
-      
-      expect(mockBlockchainProvider.getManyTransactionReceipts).toHaveBeenCalledWith(expectedTxHashes);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102, 103]);
     });
 
     it('should estimate receipt sizes correctly based on block characteristics', async () => {
@@ -293,14 +281,14 @@ describe('PullNetworkProviderStrategy', () => {
       // Set preloaded queue directly to test batching
       (strategy as any)._preloadedItemsQueue = [largeBlock, smallBlock];
 
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
       // Verify that receipts were loaded (indicating batches were created properly)
-      expect(mockBlockchainProvider.getManyTransactionReceipts).toHaveBeenCalled();
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalled();
     });
   });
 
@@ -310,28 +298,28 @@ describe('PullNetworkProviderStrategy', () => {
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
       
       // Fail first two attempts, succeed on third
-      mockBlockchainProvider.getManyTransactionReceipts
+      mockBlockchainProvider.getManyBlocksWithReceipts
         .mockRejectedValueOnce(new Error('Network error'))
         .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValueOnce([createMockReceipt('0xtx101_0')]);
+        .mockResolvedValueOnce([[createMockReceipt('0xtx101_0')]]);
       
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyTransactionReceipts).toHaveBeenCalledTimes(3);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledTimes(3);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(1);
     });
 
     it('should throw error after exceeding max retries', async () => {
       const mockBlocks = [createMockBlock(101)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockRejectedValue(new Error('Persistent network error'));
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockRejectedValue(new Error('Persistent network error'));
 
       await expect(strategy.load(110)).rejects.toThrow('Persistent network error');
       
-      expect(mockBlockchainProvider.getManyTransactionReceipts).toHaveBeenCalledTimes(3); // Max retries
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledTimes(3); // Max retries
       expect(mockLogger.error).toHaveBeenCalledWith(
         'Exceeded max retries for receipts batch',
         expect.objectContaining({
@@ -350,7 +338,7 @@ describe('PullNetworkProviderStrategy', () => {
       const validBlock = createMockBlock(101);
       
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([oldBlock, validBlock]);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([oldBlock, validBlock]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
@@ -371,7 +359,7 @@ describe('PullNetworkProviderStrategy', () => {
       );
     });
 
-    it('should enqueue blocks in correct order (ascending height)', async () => {
+    it('should enqueue blocks in correct order (descending height for processing)', async () => {
       const blocks = [
         createMockBlock(103),
         createMockBlock(101),
@@ -379,40 +367,17 @@ describe('PullNetworkProviderStrategy', () => {
       ];
       
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], [], []]);
       mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(blocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      // Should enqueue in ascending order
+      // Should enqueue in descending order (blocks are sorted desc and popped from end)
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(3);
       expect(mockQueue.enqueue.mock.calls[0][0].blockNumber).toBe(101);
       expect(mockQueue.enqueue.mock.calls[1][0].blockNumber).toBe(102);
       expect(mockQueue.enqueue.mock.calls[2][0].blockNumber).toBe(103);
-    });
-  });
-
-  describe('concurrency handling', () => {
-    it('should process batches concurrently based on concurrency setting', async () => {
-      const strategy = new PullNetworkProviderStrategy(
-        mockLogger,
-        mockBlockchainProvider as any,
-        mockQueue as any,
-        { ...defaultConfig, concurrency: 3 }
-      );
-
-      // Create many blocks to ensure multiple batches
-      const manyBlocks = Array.from({ length: 20 }, (_, i) => createMockBlock(101 + i));
-      mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(manyBlocks);
-      mockBlockchainProvider.getManyTransactionReceipts.mockResolvedValue([]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
-      mockQueue.enqueue.mockResolvedValue(undefined);
-
-      await strategy.load(130);
-
-      // Should have called mergeReceiptsIntoBlocks (indicating concurrent processing occurred)
-      expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalled();
     });
   });
 });

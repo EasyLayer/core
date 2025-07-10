@@ -22,7 +22,6 @@ describe('BlocksQueueModule', () => {
     minTransferSize: 1024,
     queueLoaderStrategyName: 'pull',
     queueIteratorBlocksBatchSize: 2,
-    queueLoaderConcurrency: 1,
     basePreloadCount: 1 * 1024 * 1024,
     blockSize: 8 * 1024 * 1024
   };
@@ -31,7 +30,17 @@ describe('BlocksQueueModule', () => {
     module = await Test.createTestingModule({
       imports: [
         // IMPORTANT: We are explicitly importing the EvmBlockchainProviderModule for testing
-        BlockchainProviderModule.forRootAsync({ isGlobal: true, providers: [], network: {} as any }),
+        BlockchainProviderModule.forRootAsync({
+          isGlobal: true, 
+          network: {} as any,
+          rateLimits: {} as any,
+          providers: [{
+            connection: {
+              type: 'web3js' as any,
+              httpUrl: 'http://localhost'
+            },
+          }]
+        }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],
     }).compile();

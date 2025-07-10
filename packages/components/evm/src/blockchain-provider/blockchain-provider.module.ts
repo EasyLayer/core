@@ -10,7 +10,7 @@ export interface BlockchainProviderModuleOptions {
   providers: ProviderOptions[];
   network: NetworkConfig;
   isGlobal?: boolean;
-  rateLimits?: RateLimits;
+  rateLimits: RateLimits;
 }
 @Module({})
 export class BlockchainProviderModule {
@@ -47,7 +47,6 @@ export class BlockchainProviderModule {
       global: isGlobal || false,
       imports: [LoggerModule.forRoot({ componentName: BlockchainProviderModule.name })],
       providers: [
-        BlockchainProviderService,
         {
           provide: BlockchainProviderService,
           useFactory: (logger, connectionManager) => {

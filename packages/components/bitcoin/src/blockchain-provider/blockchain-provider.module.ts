@@ -4,54 +4,21 @@ import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { ConnectionManager } from './connection-manager';
 import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from './utils';
-import { WebhookStreamService } from './webhook-stream.service';
-import { createProvider, ProviderOptions, QuickNodeProvider, SelfNodeProvider } from './node-providers';
+import { createProvider, ProviderOptions, NetworkConfig, RateLimits } from './node-providers';
 
 export interface BlockchainProviderModuleOptions {
-  providers?: ProviderOptions[];
+  providers: ProviderOptions[];
   isGlobal?: boolean;
-  quickNodesUrls?: string[];
-  selfNodesUrl?: string;
-  responseTimeout?: number;
-  network?: string;
+  network: NetworkConfig;
+  rateLimits: RateLimits;
 }
 
 @Module({})
 export class BlockchainProviderModule {
   static async forRootAsync(options: BlockchainProviderModuleOptions): Promise<DynamicModule> {
-    const { providers, isGlobal, quickNodesUrls, selfNodesUrl, ...restOptions } = options;
+    const { providers, isGlobal, rateLimits, network } = options;
 
-    // Create QuickNode providers
-    const quickNodeProviders: ProviderOptions[] = [];
-    if (Array.isArray(quickNodesUrls)) {
-      for (const quickNodeProviderOption of quickNodesUrls) {
-        quickNodeProviders.push({
-          useFactory: () =>
-            new QuickNodeProvider({
-              uniqName: `QuickNodeProvider_${uuidv4()}`,
-              baseUrl: quickNodeProviderOption,
-              ...restOptions,
-            }),
-        });
-      }
-    }
-
-    // Create SelfNode providers
-    const selfNodeProviders: ProviderOptions[] = [];
-    if (selfNodesUrl) {
-      selfNodeProviders.push({
-        useFactory: () =>
-          new SelfNodeProvider({
-            uniqName: `SelfNodeProvider_${uuidv4()}`,
-            baseUrl: selfNodesUrl,
-            ...restOptions,
-          }),
-      });
-    }
-
-    const providersToConnect: ProviderOptions[] = [...quickNodeProviders, ...selfNodeProviders, ...(providers || [])];
-
-    const providersInstance = providersToConnect.map(async (providerOptions) => {
+    const providersInstance = (providers || []).map(async (providerOptions) => {
       if (providerOptions.useFactory) {
         return await providerOptions.useFactory();
       } else if (providerOptions.connection) {
@@ -59,6 +26,8 @@ export class BlockchainProviderModule {
         return createProvider({
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
+          rateLimits,
+          network,
         });
       } else {
         throw new Error('Provider configuration is invalid.');
@@ -79,8 +48,13 @@ export class BlockchainProviderModule {
       global: isGlobal || false,
       imports: [LoggerModule.forRoot({ componentName: BlockchainProviderModule.name })],
       providers: [
-        BlockchainProviderService,
-        WebhookStreamService,
+        {
+          provide: BlockchainProviderService,
+          useFactory: (logger, connectionManager) => {
+            return new BlockchainProviderService(logger, connectionManager, network);
+          },
+          inject: [AppLogger, ConnectionManager],
+        },
         connectionManager,
         KeyManagementService,
         ScriptUtilService,
@@ -89,7 +63,6 @@ export class BlockchainProviderModule {
       ],
       exports: [
         BlockchainProviderService,
-        WebhookStreamService,
         ConnectionManager,
         KeyManagementService,
         ScriptUtilService,

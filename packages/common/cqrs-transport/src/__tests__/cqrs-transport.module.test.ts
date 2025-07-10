@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { LoggerModule } from '@easylayer/common/logger';
 import { CqrsModule } from '@easylayer/common/cqrs';
-import { NetworkTransportModule } from '@easylayer/common/network-transport';
+import { TransportModule } from '@easylayer/common/network-transport';
 import { CqrsTransportModule } from '../cqrs-transport.module';
 
 describe('CqrsTransportModule', () => {
@@ -13,7 +13,7 @@ describe('CqrsTransportModule', () => {
         LoggerModule.forRoot({ componentName: 'CqrsTransportModule' }),
         CqrsModule.forRoot({ isGlobal: true }),
         CqrsTransportModule.forRoot({ isGlobal: true }),
-        NetworkTransportModule.forRoot({ isGlobal: true, transports: [] }),
+        TransportModule.forRoot({ isGlobal: true, transports: [] }),
       ],
     }).compile();
 

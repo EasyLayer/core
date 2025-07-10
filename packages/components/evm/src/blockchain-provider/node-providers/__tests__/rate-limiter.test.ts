@@ -1,225 +1,346 @@
-import { RateLimiter, DEFAULT_RATE_LIMITS } from '../rate-limiter';
+import { EvmRateLimiter } from '../rate-limiter';
+import type { RateLimits } from '../interfaces';
 
+// Mock Bottleneck to control its behavior in tests
 jest.mock('bottleneck');
+import Bottleneck from 'bottleneck';
 
-describe('RateLimiter', () => {
-  let rateLimiter: RateLimiter;
-  let mockBottleneck: any;
+const MockBottleneck = Bottleneck as jest.MockedClass<typeof Bottleneck>;
+
+describe('EvmRateLimiter', () => {
+  let mockBottleneckInstance: jest.Mocked<Bottleneck>;
+  let rateLimiter: EvmRateLimiter;
 
   beforeEach(() => {
-    jest.useFakeTimers({ advanceTimers: true });
-    jest.clearAllMocks();
-    
-    mockBottleneck = {
+    // Create mock instance
+    mockBottleneckInstance = {
       schedule: jest.fn(),
-      stop: jest.fn(),
-    };
+      stop: jest.fn().mockResolvedValue(undefined),
+    } as any;
 
-    const BottleneckMock = jest.requireMock('bottleneck');
-    BottleneckMock.mockImplementation(() => mockBottleneck);
-    
-    rateLimiter = new RateLimiter();
+    // Mock constructor to return our instance
+    MockBottleneck.mockImplementation(() => mockBottleneckInstance);
+
+    jest.clearAllMocks();
   });
 
-  afterEach(() => {
-    rateLimiter.reset();
-    jest.useRealTimers();
+  afterEach(async () => {
+    if (rateLimiter) {
+      await rateLimiter.stop();
+    }
   });
 
-  describe('executeRequest', () => {
-    it('should execute request through Bottleneck', async () => {
-      const mockFn = jest.fn().mockResolvedValue('success');
-      mockBottleneck.schedule.mockResolvedValue('success');
-      
-      const result = await rateLimiter.executeRequest(mockFn);
-      
-      expect(result).toBe('success');
-      expect(mockBottleneck.schedule).toHaveBeenCalledWith(mockFn);
+  describe('Constructor', () => {
+    it('should initialize with default configuration', () => {
+      rateLimiter = new EvmRateLimiter();
+
+      expect(MockBottleneck).toHaveBeenCalledWith({
+        maxConcurrent: 1,
+        minTime: 1000,
+      });
     });
 
-    it('should propagate errors without retry', async () => {
-      const mockFn = jest.fn();
-      const error = new Error('Network error');
-      mockBottleneck.schedule.mockRejectedValue(error);
-      
-      await expect(rateLimiter.executeRequest(mockFn)).rejects.toThrow('Network error');
+    it('should initialize with custom configuration', () => {
+      const config: RateLimits = {
+        maxConcurrentRequests: 5,
+        maxBatchSize: 20,
+        requestDelayMs: 500,
+      };
+
+      rateLimiter = new EvmRateLimiter(config);
+
+      expect(MockBottleneck).toHaveBeenCalledWith({
+        maxConcurrent: 5,
+        minTime: 500,
+      });
+    });
+
+    it('should use partial configuration with defaults', () => {
+      const config: RateLimits = {
+        maxConcurrentRequests: 3,
+        // maxBatchSize and requestDelayMs should use defaults
+      };
+
+      rateLimiter = new EvmRateLimiter(config);
+
+      expect(MockBottleneck).toHaveBeenCalledWith({
+        maxConcurrent: 3,
+        minTime: 1000, // default
+      });
     });
   });
 
-  describe('executeParallelRequests', () => {
-    it('should execute multiple requests in parallel', async () => {
-      const requestFns = [
-        jest.fn().mockResolvedValue('result1'),
-        jest.fn().mockResolvedValue('result2'),
+  describe('execute()', () => {
+    beforeEach(() => {
+      rateLimiter = new EvmRateLimiter();
+    });
+
+    it('should return empty array for empty requests', async () => {
+      const mockBatchRpcCall = jest.fn();
+      
+      const result = await rateLimiter.execute([], mockBatchRpcCall);
+      
+      expect(result).toEqual([]);
+      expect(mockBatchRpcCall).not.toHaveBeenCalled();
+      expect(mockBottleneckInstance.schedule).not.toHaveBeenCalled();
+    });
+
+    it('should execute single request correctly', async () => {
+      const requests = [
+        { method: 'getblock', params: ['hash1'] }
+      ];
+      const mockResults = ['result1'];
+      const mockBatchRpcCall = jest.fn().mockResolvedValue(mockResults);
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      expect(result).toEqual(['result1']);
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(1);
+      expect(mockBatchRpcCall).toHaveBeenCalledWith([
+        { method: 'getblock', params: ['hash1'] }
+      ]);
+    });
+
+    it('should group requests by method', async () => {
+      const requests = [
+        { method: 'getblock', params: ['hash1'] },
+        { method: 'getblockhash', params: [1] },
+        { method: 'getblock', params: ['hash2'] },
+        { method: 'getblockhash', params: [2] }
+      ];
+      const mockResults1 = ['block1', 'block2'];
+      const mockResults2 = ['hash1', 'hash2'];
+      const mockBatchRpcCall = jest.fn()
+        .mockResolvedValueOnce(mockResults1)
+        .mockResolvedValueOnce(mockResults2);
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      expect(result).toEqual(['block1', 'hash1', 'block2', 'hash2']);
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(2);
+      
+      // Verify calls were made with correct grouping
+      expect(mockBatchRpcCall).toHaveBeenNthCalledWith(1, [
+        { method: 'getblock', params: ['hash1'] },
+        { method: 'getblock', params: ['hash2'] }
+      ]);
+      expect(mockBatchRpcCall).toHaveBeenNthCalledWith(2, [
+        { method: 'getblockhash', params: [1] },
+        { method: 'getblockhash', params: [2] }
+      ]);
+    });
+
+    it('should split large batches based on maxBatchSize', async () => {
+      // Create limiter with small batch size
+      rateLimiter = new EvmRateLimiter({ maxBatchSize: 2 });
+
+      const requests = [
+        { method: 'getblock', params: ['hash1'] },
+        { method: 'getblock', params: ['hash2'] },
+        { method: 'getblock', params: ['hash3'] },
+        { method: 'getblock', params: ['hash4'] }
+      ];
+      const mockResults1 = ['block1', 'block2'];
+      const mockResults2 = ['block3', 'block4'];
+      const mockBatchRpcCall = jest.fn()
+        .mockResolvedValueOnce(mockResults1)
+        .mockResolvedValueOnce(mockResults2);
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      expect(result).toEqual(['block1', 'block2', 'block3', 'block4']);
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(2);
+      
+      // Verify batches were split correctly
+      expect(mockBatchRpcCall).toHaveBeenNthCalledWith(1, [
+        { method: 'getblock', params: ['hash1'] },
+        { method: 'getblock', params: ['hash2'] }
+      ]);
+      expect(mockBatchRpcCall).toHaveBeenNthCalledWith(2, [
+        { method: 'getblock', params: ['hash3'] },
+        { method: 'getblock', params: ['hash4'] }
+      ]);
+    });
+
+    it('should preserve original order in results', async () => {
+      const requests = [
+        { method: 'getblockhash', params: [1] },    // index 0
+        { method: 'getblock', params: ['hash1'] },   // index 1
+        { method: 'getblockhash', params: [2] },    // index 2
+        { method: 'getblock', params: ['hash2'] }    // index 3
       ];
       
-      mockBottleneck.schedule.mockImplementation(async (fn: any) => await fn());
-      
-      const result = await rateLimiter.executeParallelRequests(requestFns);
-      
-      expect(result).toEqual(['result1', 'result2']);
-      expect(mockBottleneck.schedule).toHaveBeenCalledTimes(2);
+      // Mock results for different method groups (order matters based on execution)
+      const mockBatchRpcCall = jest.fn()
+        .mockResolvedValueOnce(['hash1', 'hash2'])   // getblockhash results (executed first)
+        .mockResolvedValueOnce(['block1', 'block2']); // getblock results (executed second)
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      // Results should be in original request order
+      expect(result).toEqual(['hash1', 'block1', 'hash2', 'block2']);
     });
 
-    it('should return empty array for empty input', async () => {
-      const result = await rateLimiter.executeParallelRequests([]);
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe('executeBatchRequests', () => {
-    it('should execute single batch', async () => {
-      const items = ['item1', 'item2'];
-      const batchRequestFn = jest.fn().mockResolvedValue(['result1', 'result2']);
-      
-      const result = await rateLimiter.executeBatchRequests(items, batchRequestFn);
-      
-      expect(result).toEqual(['result1', 'result2']);
-      expect(batchRequestFn).toHaveBeenCalledWith(['item1', 'item2']);
-    });
-
-    it('should split into multiple batches with delay', async () => {
-      const customLimiter = new RateLimiter({ maxBatchSize: 1, batchDelayMs: 200 });
-      const items = ['item1', 'item2'];
-      
-      const batchRequestFn = jest.fn()
-        .mockResolvedValueOnce(['result1'])
-        .mockResolvedValueOnce(['result2']);
-      
-      const promise = customLimiter.executeBatchRequests(items, batchRequestFn);
-      
-      // First batch should execute immediately
-      await Promise.resolve();
-      expect(batchRequestFn).toHaveBeenCalledTimes(1);
-      
-      // Advance through delay
-      jest.advanceTimersByTime(200);
-      const result = await promise;
-      
-      expect(result).toEqual(['result1', 'result2']);
-      expect(batchRequestFn).toHaveBeenCalledTimes(2);
-    });
-
-    it('should detect rate limit errors', async () => {
-      const items = ['item1'];
-      const rateLimitError = new Error('Too many requests');
-      (rateLimitError as any).code = 429;
-      
-      const batchRequestFn = jest.fn().mockRejectedValue(rateLimitError);
-      
-      await expect(rateLimiter.executeBatchRequests(items, batchRequestFn)).rejects.toThrow('Rate limit exceeded');
-    });
-
-    it('should return empty array for empty input', async () => {
-      const result = await rateLimiter.executeBatchRequests([], jest.fn());
-      expect(result).toEqual([]);
-    });
-
-    it('should not delay when batchDelayMs is 0', async () => {
-      const customLimiter = new RateLimiter({ maxBatchSize: 1, batchDelayMs: 0 });
-      const items = ['item1', 'item2'];
-      
-      const batchRequestFn = jest.fn()
-        .mockResolvedValueOnce(['result1'])
-        .mockResolvedValueOnce(['result2']);
-      
-      const result = await customLimiter.executeBatchRequests(items, batchRequestFn);
-      
-      expect(result).toEqual(['result1', 'result2']);
-      expect(batchRequestFn).toHaveBeenCalledTimes(2);
-      expect(jest.getTimerCount()).toBe(0);
-    });
-  });
-
-  describe('executeSequentialRequests', () => {
-    it('should execute requests sequentially', async () => {
-      const requestFns = [
-        jest.fn().mockResolvedValue('result1'),
-        jest.fn().mockResolvedValue('result2'),
+    it('should handle async bottleneck scheduling', async () => {
+      const requests = [
+        { method: 'getblock', params: ['hash1'] }
       ];
+      const mockResults = ['result1'];
+      const mockBatchRpcCall = jest.fn().mockResolvedValue(mockResults);
       
-      mockBottleneck.schedule.mockImplementation(async (fn: any) => await fn());
-      
-      const result = await rateLimiter.executeSequentialRequests(requestFns);
-      
-      expect(result).toEqual(['result1', 'result2']);
-      expect(mockBottleneck.schedule).toHaveBeenCalledTimes(2);
+      // Mock bottleneck to return a promise
+      mockBottleneckInstance.schedule.mockImplementation(async (fn: any) => {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return fn();
+      });
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      expect(result).toEqual(['result1']);
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(1);
     });
 
-    it('should stop on error', async () => {
-      const requestFns = [
-        jest.fn().mockResolvedValue('result1'),
-        jest.fn().mockRejectedValue(new Error('Error')),
-        jest.fn().mockResolvedValue('result3'),
+    it('should handle errors from batchRpcCall', async () => {
+      const requests = [
+        { method: 'getblock', params: ['hash1'] }
       ];
-      
-      mockBottleneck.schedule.mockImplementation(async (fn: any) => await fn());
-      
-      await expect(rateLimiter.executeSequentialRequests(requestFns)).rejects.toThrow('Error');
-      expect(requestFns[2]).not.toHaveBeenCalled();
-    });
+      const error = new Error('RPC call failed');
+      const mockBatchRpcCall = jest.fn().mockRejectedValue(error);
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
 
-    it('should return empty array for empty input', async () => {
-      const result = await rateLimiter.executeSequentialRequests([]);
-      expect(result).toEqual([]);
+      await expect(rateLimiter.execute(requests, mockBatchRpcCall)).rejects.toThrow('RPC call failed');
     });
   });
 
-  describe('rate limit error detection', () => {
-    it('should detect rate limit errors by code', async () => {
-      const codes = [429, -32007, -32005, -32000];
-      
-      for (const code of codes) {
-        const error = new Error('Error');
-        (error as any).code = code;
-        const batchRequestFn = jest.fn().mockRejectedValue(error);
-        
-        await expect(rateLimiter.executeBatchRequests(['item'], batchRequestFn)).rejects.toThrow('Rate limit exceeded');
-      }
+  describe('createBatches()', () => {
+    beforeEach(() => {
+      rateLimiter = new EvmRateLimiter();
     });
 
-    it('should detect rate limit errors by message', async () => {
-      const messages = ['rate limit', 'too many requests', 'quota exceeded'];
-      
-      for (const message of messages) {
-        const error = new Error(message);
-        const batchRequestFn = jest.fn().mockRejectedValue(error);
-        
-        await expect(rateLimiter.executeBatchRequests(['item'], batchRequestFn)).rejects.toThrow('Rate limit exceeded');
-      }
+    it('should split array into correct batch sizes', () => {
+      const items = [1, 2, 3, 4, 5, 6, 7];
+      const batchSize = 3;
+
+      const batches = rateLimiter['createBatches'](items, batchSize);
+
+      expect(batches).toEqual([
+        [1, 2, 3],
+        [4, 5, 6],
+        [7]
+      ]);
     });
 
-    it('should not enhance non-rate-limit errors', async () => {
-      const error = new Error('Network timeout');
-      const batchRequestFn = jest.fn().mockRejectedValue(error);
-      
-      await expect(rateLimiter.executeBatchRequests(['item'], batchRequestFn)).rejects.toThrow('Network timeout');
+    it('should handle empty array', () => {
+      const items: number[] = [];
+      const batchSize = 3;
+
+      const batches = rateLimiter['createBatches'](items, batchSize);
+
+      expect(batches).toEqual([]);
+    });
+
+    it('should handle single item', () => {
+      const items = [1];
+      const batchSize = 3;
+
+      const batches = rateLimiter['createBatches'](items, batchSize);
+
+      expect(batches).toEqual([[1]]);
+    });
+
+    it('should handle batch size larger than array', () => {
+      const items = [1, 2, 3];
+      const batchSize = 10;
+
+      const batches = rateLimiter['createBatches'](items, batchSize);
+
+      expect(batches).toEqual([[1, 2, 3]]);
+    });
+
+    it('should handle batch size of 1', () => {
+      const items = [1, 2, 3];
+      const batchSize = 1;
+
+      const batches = rateLimiter['createBatches'](items, batchSize);
+
+      expect(batches).toEqual([[1], [2], [3]]);
     });
   });
 
-  describe('configuration', () => {
-    it('should use default configuration', () => {
-      const limiter = new RateLimiter();
-      expect(limiter.getStats()).toEqual(DEFAULT_RATE_LIMITS);
+  describe('stop()', () => {
+    it('should call bottleneck stop with dropWaitingJobs', async () => {
+      rateLimiter = new EvmRateLimiter();
+
+      await rateLimiter.stop();
+
+      expect(mockBottleneckInstance.stop).toHaveBeenCalledWith({ dropWaitingJobs: true });
+    });
+  });
+
+  describe('Integration scenarios', () => {
+    it('should handle complex mixed method batching', async () => {
+      rateLimiter = new EvmRateLimiter({ maxBatchSize: 2 });
+
+      const requests = [
+        { method: 'getblock', params: ['hash1'] },      // batch 1
+        { method: 'getblock', params: ['hash2'] },      // batch 1
+        { method: 'getblock', params: ['hash3'] },      // batch 2
+        { method: 'getblockhash', params: [1] },        // batch 3
+        { method: 'getblockhash', params: [2] },        // batch 3
+        { method: 'getblockhash', params: [3] },        // batch 4
+        { method: 'getblockstats', params: ['hash4'] }  // batch 5
+      ];
+
+      const mockBatchRpcCall = jest.fn()
+        .mockResolvedValueOnce(['block1', 'block2'])     // getblock batch 1
+        .mockResolvedValueOnce(['block3'])               // getblock batch 2
+        .mockResolvedValueOnce(['hash1', 'hash2'])       // getblockhash batch 3
+        .mockResolvedValueOnce(['hash3'])                // getblockhash batch 4
+        .mockResolvedValueOnce(['stats1']);              // getblockstats batch 5
+
+      mockBottleneckInstance.schedule.mockImplementation((fn: any) => fn());
+
+      const result = await rateLimiter.execute(requests, mockBatchRpcCall);
+
+      expect(result).toEqual([
+        'block1', 'block2', 'block3',  // getblock results in order
+        'hash1', 'hash2', 'hash3',     // getblockhash results in order
+        'stats1'                        // getblockstats result
+      ]);
+
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(5);
     });
 
-    it('should merge custom config with defaults', () => {
-      const limiter = new RateLimiter({ maxRequestsPerSecond: 20 });
-      const stats = limiter.getStats();
-      
-      expect(stats.maxRequestsPerSecond).toBe(20);
-      expect(stats.maxConcurrentRequests).toBe(DEFAULT_RATE_LIMITS.maxConcurrentRequests);
-    });
+    it('should maintain timing constraints through bottleneck', async () => {
+      rateLimiter = new EvmRateLimiter({ requestDelayMs: 100 });
 
-    it('should update configuration', () => {
-      rateLimiter.updateConfig({ maxRequestsPerSecond: 30 });
-      expect(rateLimiter.getStats().maxRequestsPerSecond).toBe(30);
-    });
+      const requests = [
+        { method: 'getblock', params: ['hash1'] },
+        { method: 'getblock', params: ['hash2'] }
+      ];
 
-    it('should stop Bottleneck on reset', () => {
-      const stopSpy = jest.spyOn(mockBottleneck, 'stop');
-      rateLimiter.reset();
-      expect(stopSpy).toHaveBeenCalled();
+      let callTimes: number[] = [];
+      const mockBatchRpcCall = jest.fn().mockImplementation(() => {
+        callTimes.push(Date.now());
+        return Promise.resolve(['result']);
+      });
+
+      // Mock bottleneck to simulate timing
+      mockBottleneckInstance.schedule.mockImplementation(async (fn: any) => {
+        await new Promise(resolve => setTimeout(resolve, 50)); // Simulate some delay
+        return fn();
+      });
+
+      const startTime = Date.now();
+      await rateLimiter.execute(requests, mockBatchRpcCall);
+      const totalTime = Date.now() - startTime;
+
+      expect(totalTime).toBeGreaterThan(40); // Should have some delay
+      expect(mockBottleneckInstance.schedule).toHaveBeenCalledTimes(1); // Same method, single batch
     });
   });
 });

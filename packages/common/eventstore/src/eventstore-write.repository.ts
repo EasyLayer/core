@@ -76,10 +76,6 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     // The publication logic implies publishing events immediately and then updating the event status in the database.
     // In case of an update error in the database, these events will be published next time.
     await this.retryCommit(aggregates);
-
-    this.log.debug('Updating snapshots after save');
-    await Promise.all(aggregates.map((aggregate: T) => this.onSaveUpdateSnapshot(aggregate)));
-    this.log.debug('Snapshots updated');
   }
 
   public async rollback({
@@ -210,6 +206,10 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
           // Refreshing the cache after a successful commit
           aggregates.forEach((a) => this.readRepository.cache.set(a.aggregateId, a));
+
+          this.log.debug('Updating snapshots after commit');
+          await Promise.all(aggregates.map((aggregate: T) => this.onSaveUpdateSnapshot(aggregate)));
+          this.log.debug('Snapshots updated');
         },
         {
           connectionName: this.dataSourceName,
@@ -421,8 +421,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
   private async onSaveUpdateSnapshot(aggregate: T) {
     try {
-      // Update snapshot only when version is a multiple of 50
-      if (aggregate.version % this.snapshotInterval !== 0) {
+      if (aggregate.versionsFromSnapshot < this.snapshotInterval) {
         return;
       }
 
@@ -479,8 +478,6 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
       if (aggregate.lastBlockHeight >= blockHeight) {
         await this.deleteSnapshot(aggregate);
-
-        // TODO: add creating new snapshout and perhaps we can update cache
       }
 
       // If snapshot is actual just return;

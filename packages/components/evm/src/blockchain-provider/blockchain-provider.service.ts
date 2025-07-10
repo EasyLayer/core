@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
-import type { Hash, NetworkConfig, UniversalBlock } from './node-providers';
+import type { Hash, NetworkConfig, UniversalBlock, UniversalTransactionReceipt } from './node-providers';
 import { BlockchainNormalizer } from './normalizer';
 import { Block, Transaction, TransactionReceipt } from './components';
 import { BlockSizeCalculator } from './utils';
@@ -33,56 +33,8 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Subscribes to contract logs via WebSocket using provider's native implementation
-   */
-  public subscribeToLogs(
-    options: {
-      address?: string | string[];
-      topics?: (string | string[] | null)[];
-    },
-    callback: (log: any) => void
-  ): Subscription {
-    let resolveSubscription!: () => void;
-    let rejectSubscription!: (error: Error) => void;
-
-    const subscriptionPromise = new Promise<void>((resolve, reject) => {
-      resolveSubscription = resolve;
-      rejectSubscription = reject;
-    }) as Subscription;
-
-    this._connectionManager
-      .getActiveProvider()
-      .then((provider) => {
-        if (!provider.wsClient) {
-          const err = new Error('Active provider does not support WebSocket connections');
-          rejectSubscription(err);
-          return;
-        }
-
-        try {
-          // Use provider's unified subscription method
-          const subscription = provider.subscribeToLogs(options, callback);
-
-          // Attach unsubscribe method
-          subscriptionPromise.unsubscribe = () => {
-            subscription.unsubscribe();
-            resolveSubscription();
-          };
-        } catch (error) {
-          rejectSubscription(error as Error);
-        }
-      })
-      .catch((error) => {
-        this.log.error('subscribeToLogs(): failed to get provider', { args: { error } });
-        rejectSubscription(error as Error);
-      });
-
-    return subscriptionPromise;
-  }
-
-  /**
    * Subscribes to new block events via WebSocket using provider's native implementation
-   * Now uses eth_getBlockReceipts for better performance
+   * Returns complete blocks with transactions and receipts
    *
    * @param callback - Function to be invoked whenever a new block is received
    * @returns A Subscription (Promise<void> & { unsubscribe(): void })
@@ -91,13 +43,11 @@ export class BlockchainProviderService {
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
-    // Create the underlying promise
     const subscriptionPromise = new Promise<void>((resolve, reject) => {
       resolveSubscription = resolve;
       rejectSubscription = reject;
     }) as Subscription;
 
-    // Asynchronously retrieve the active provider
     this._connectionManager
       .getActiveProvider()
       .then((provider) => {
@@ -108,19 +58,21 @@ export class BlockchainProviderService {
         }
 
         try {
-          // Use provider's unified subscription method
           const subscription = provider.subscribeToNewBlocks(async (blockNumber: number) => {
             try {
-              // Use optimized method with eth_getBlockReceipts
               const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
-              callback(blockWithReceipts);
+              if (blockWithReceipts) {
+                callback(blockWithReceipts);
+              }
             } catch (error) {
-              this.log.error('Error fetching block in subscription', { args: { error } });
+              this.log.error('Error fetching block in subscription', {
+                args: { blockNumber, error },
+                methodName: 'subscribeToNewBlocks()',
+              });
               rejectSubscription(error as Error);
             }
           });
 
-          // Attach unsubscribe method
           subscriptionPromise.unsubscribe = () => {
             subscription.unsubscribe();
             resolveSubscription();
@@ -130,49 +82,10 @@ export class BlockchainProviderService {
         }
       })
       .catch((error) => {
-        this.log.error('subscribeToNewBlocks(): failed to get provider', { args: { error } });
-        rejectSubscription(error as Error);
-      });
-
-    return subscriptionPromise;
-  }
-
-  /**
-   * Subscribes to pending transactions via WebSocket using provider's native implementation
-   */
-  public subscribeToPendingTransactions(callback: (txHash: string) => void): Subscription {
-    let resolveSubscription!: () => void;
-    let rejectSubscription!: (error: Error) => void;
-
-    const subscriptionPromise = new Promise<void>((resolve, reject) => {
-      resolveSubscription = resolve;
-      rejectSubscription = reject;
-    }) as Subscription;
-
-    this._connectionManager
-      .getActiveProvider()
-      .then((provider) => {
-        if (!provider.wsClient) {
-          const err = new Error('Active provider does not support WebSocket connections');
-          rejectSubscription(err);
-          return;
-        }
-
-        try {
-          // Use provider's unified subscription method
-          const subscription = provider.subscribeToPendingTransactions(callback);
-
-          // Attach unsubscribe method
-          subscriptionPromise.unsubscribe = () => {
-            subscription.unsubscribe();
-            resolveSubscription();
-          };
-        } catch (error) {
-          rejectSubscription(error as Error);
-        }
-      })
-      .catch((error) => {
-        this.log.error('subscribeToPendingTransactions(): failed to get provider', { args: { error } });
+        this.log.error('Failed to get provider', {
+          args: { error },
+          methodName: 'subscribeToNewBlocks()',
+        });
         rejectSubscription(error as Error);
       });
 
@@ -182,41 +95,42 @@ export class BlockchainProviderService {
   /**
    * Gets a block with full transactions and all receipts using eth_getBlockReceipts.
    * Optimized approach: get block + transactions, then get all receipts with one call.
+   * Guarantees blockNumber since height is known from request.
+   * Node calls: 2 (1 for block + 1 for receipts if block has transactions, otherwise just 1)
    */
-  public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block> {
+  public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block | null> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
+      const numericHeight = Number(height);
 
-      // Get block with full transactions
-      const rawBlock = await provider.getOneBlockByHeight(Number(height), fullTransactions);
+      // Get block with transactions
+      const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions);
 
-      // Get all receipts using eth_getBlockReceipts (much more efficient!)
+      if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
+        return null;
+      }
+
+      let rawBlock = rawBlocks[0];
+
+      // Ensure blockNumber is present - required for final Block interface
+      if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
+        rawBlock.blockNumber = numericHeight;
+      }
+
+      // Get receipts if block has transactions
       if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-        try {
-          // Use the new eth_getBlockReceipts method for better performance
-          const rawReceipts = await provider.getBlockReceipts(Number(height));
-          rawBlock.receipts = rawReceipts;
-        } catch (blockReceiptsError) {
-          this.log.warn('eth_getBlockReceipts failed, falling back to individual receipt fetching', {
-            args: { height, error: blockReceiptsError },
-          });
-
-          // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
-          const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
-          const rawReceipts = await provider.getManyTransactionReceipts(txHashes);
-          rawBlock.receipts = rawReceipts;
-        }
+        const rawReceiptsArray = await provider.getManyBlocksReceipts([numericHeight]);
+        rawBlock.receipts = rawReceiptsArray[0] || [];
       } else {
         rawBlock.receipts = [];
       }
 
-      // Normalize the complete block (including receipts)
       const normalizedBlock = this.normalizer.normalizeBlock(rawBlock);
-
       return normalizedBlock;
     } catch (error) {
-      this.log.error('getOneBlockWithReceipts() failed', {
+      this.log.error('Failed to get block with receipts', {
         args: { height, error },
+        methodName: 'getOneBlockWithReceipts()',
       });
       throw error;
     }
@@ -225,68 +139,34 @@ export class BlockchainProviderService {
   /**
    * Gets multiple blocks with full transactions and receipts using eth_getBlockReceipts.
    * Optimized approach using batch calls for better performance.
+   * Guarantees blockNumber since heights are known from request.
+   * Node calls: 2 (1 batch for blocks + 1 batch for receipts)
    */
   public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
       const numericHeights = heights.map((h) => Number(h));
 
-      // Get all blocks with full transactions using batch calls
       const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
-      try {
-        // Use the new eth_getBlockReceipts method for much better performance
-        const allBlocksReceipts = await provider.getManyBlocksReceipts(numericHeights);
+      // Filter out null blocks before processing receipts
+      const validRawBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+      const allBlocksReceipts = await provider.getManyBlocksReceipts(numericHeights);
 
-        // Map receipts back to blocks
-        rawBlocks.forEach((rawBlock, index) => {
+      // Attach receipts to valid blocks, maintaining order
+      rawBlocks.forEach((rawBlock, index) => {
+        if (rawBlock) {
           rawBlock.receipts = allBlocksReceipts[index] || [];
-        });
-      } catch (blockReceiptsError) {
-        this.log.warn('getManyBlocksReceipts failed, falling back to individual receipt fetching', {
-          args: { heights, error: blockReceiptsError },
-        });
-
-        // Fallback to individual receipt fetching if eth_getBlockReceipts is not supported
-        const allTxHashes: string[] = [];
-        const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
-
-        rawBlocks.forEach((rawBlock: UniversalBlock) => {
-          if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-            const txHashes = rawBlock.transactions.map((tx: any) => (typeof tx === 'string' ? tx : tx.hash));
-            blockTxMapping.set(rawBlock.blockNumber, txHashes);
-            allTxHashes.push(...txHashes);
-          } else {
-            blockTxMapping.set(rawBlock.blockNumber, []);
-          }
-        });
-
-        // Get all receipts at once using batch calls
-        let allRawReceipts: any[] = [];
-        if (allTxHashes.length > 0) {
-          allRawReceipts = await provider.getManyTransactionReceipts(allTxHashes);
         }
+      });
 
-        // Map receipts back to blocks
-        let receiptIndex = 0;
-        rawBlocks.forEach((rawBlock) => {
-          const txHashes = blockTxMapping.get(rawBlock.blockNumber) || [];
-          if (txHashes.length > 0) {
-            rawBlock.receipts = allRawReceipts.slice(receiptIndex, receiptIndex + txHashes.length);
-            receiptIndex += txHashes.length;
-          } else {
-            rawBlock.receipts = [];
-          }
-        });
-      }
-
-      // Normalize all blocks
-      const normalizedBlocks = rawBlocks.map((rawBlock) => this.normalizer.normalizeBlock(rawBlock));
-
+      // Normalize only valid blocks
+      const normalizedBlocks = validRawBlocks.map((rawBlock) => this.normalizer.normalizeBlock(rawBlock));
       return normalizedBlocks;
     } catch (error) {
-      this.log.error('getManyBlocksWithReceipts() failed', {
-        args: { heights, error },
+      this.log.error('Failed to get many blocks with receipts', {
+        args: { heightsCount: heights.length, error },
+        methodName: 'getManyBlocksWithReceipts()',
       });
       throw error;
     }
@@ -298,8 +178,7 @@ export class BlockchainProviderService {
    */
   public async mergeReceiptsIntoBlocks(blocks: Block[], receipts: TransactionReceipt[]): Promise<Block[]> {
     try {
-      // Collect all transaction hashes from all blocks
-      const blockTxMapping = new Map<number, string[]>(); // blockNumber -> txHashes
+      const blockTxMapping = new Map<number, string[]>();
 
       blocks.forEach((block: Block) => {
         if (block.transactions && block.transactions.length > 0) {
@@ -310,13 +189,11 @@ export class BlockchainProviderService {
         }
       });
 
-      // Map receipts back to blocks in place to optimize memory
       let receiptIndex = 0;
 
       for (const block of blocks) {
         const txHashes = blockTxMapping.get(block.blockNumber) || [];
 
-        // Add receipts directly to block to avoid copying
         if (txHashes.length > 0) {
           (block as any).receipts = receipts.slice(receiptIndex, receiptIndex + txHashes.length);
           receiptIndex += txHashes.length;
@@ -324,24 +201,21 @@ export class BlockchainProviderService {
           (block as any).receipts = [];
         }
 
-        // Recalculate sizes with receipts using BlockSizeCalculator
-        // Calculate size without receipts (original block + transactions)
         block.sizeWithoutReceipts = BlockSizeCalculator.calculateBlockSizeFromDecodedTransactions(block);
 
-        // Calculate total size including receipts
         if (block.receipts && block.receipts.length > 0) {
           const receiptsSize = BlockSizeCalculator.calculateReceiptsSize(block.receipts);
           block.size = block.sizeWithoutReceipts + receiptsSize;
         } else {
-          // No receipts, so both sizes are the same
           block.size = block.sizeWithoutReceipts;
         }
       }
 
       return blocks;
     } catch (error) {
-      this.log.error('mergeReceiptsIntoBlocks() failed', {
+      this.log.error('Failed to merge receipts into blocks', {
         args: { blockCount: blocks.length, receiptsCount: receipts.length, error },
+        methodName: 'mergeReceiptsIntoBlocks()',
       });
       throw error;
     }
@@ -349,6 +223,7 @@ export class BlockchainProviderService {
 
   /**
    * Gets the current block height
+   * Node calls: 1 (eth_blockNumber)
    */
   public async getCurrentBlockHeight(): Promise<number> {
     try {
@@ -356,164 +231,190 @@ export class BlockchainProviderService {
       const height = await provider.getBlockHeight();
       return Number(height);
     } catch (error) {
-      this.log.error('getCurrentBlockHeight()', { args: { error } });
+      this.log.error('Failed to get current block height', {
+        args: { error },
+        methodName: 'getCurrentBlockHeight()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets a block hash by height
+   * Gets a block hash by height.
+   * Guarantees blockNumber since height is known from request.
+   * Node calls: 1 (eth_getBlockByNumber with fullTransactions=false)
    */
-  public async getOneBlockHashByHeight(height: string | number): Promise<string> {
+  public async getOneBlockHashByHeight(height: string | number): Promise<string | null> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
-      return await provider.getOneBlockHashByHeight(Number(height));
+      const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], false);
+
+      if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
+        return null;
+      }
+
+      return rawBlocks[0].hash;
     } catch (error) {
-      this.log.error('getOneBlockHashByHeight()', { args: { error } });
+      this.log.error('Failed to get block hash by height', {
+        args: { height, error },
+        methodName: 'getOneBlockHashByHeight()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets a normalized block by height
+   * Gets a normalized block by height.
+   * Guarantees blockNumber since height is known from request.
+   * Node calls: 1 (eth_getBlockByNumber)
    */
-  public async getOneBlockByHeight(height: string | number, fullTransactions?: boolean): Promise<Block> {
+  public async getOneBlockByHeight(height: string | number, fullTransactions?: boolean): Promise<Block | null> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
-      const rawBlock = await provider.getOneBlockByHeight(Number(height), fullTransactions);
+      const numericHeight = Number(height);
+      const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions);
 
-      // Normalize the block data
+      if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
+        return null;
+      }
+
+      const rawBlock = rawBlocks[0];
       return this.normalizer.normalizeBlock(rawBlock);
     } catch (error) {
-      this.log.error('getOneBlockByHeight()', { args: { error } });
+      this.log.error('Failed to get block by height', {
+        args: { height, error },
+        methodName: 'getOneBlockByHeight()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets multiple normalized blocks by heights using batch calls for better performance
+   * Gets multiple normalized blocks by heights using batch calls for better performance.
+   * Guarantees blockNumber since heights are known from request.
+   * Node calls: 1 (batch eth_getBlockByNumber for all heights)
    */
   public async getManyBlocksByHeights(heights: string[] | number[], fullTransactions?: boolean): Promise<Block[]> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
-      const rawBlocks = await provider.getManyBlocksByHeights(
-        heights.map((item) => Number(item)),
-        fullTransactions
-      );
+      const numericHeights = heights.map((item) => Number(item));
+      const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
-      // Normalize all blocks
-      return rawBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
+      // Filter out null blocks and normalize
+      const validBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+      return validBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
     } catch (error) {
-      this.log.error('getManyBlocksByHeights()', { args: { error } });
+      this.log.error('Failed to get many blocks by heights', {
+        args: { heightsCount: heights.length, error },
+        methodName: 'getManyBlocksByHeights()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets block statistics by heights using batch calls
+   * Gets block statistics by heights using batch calls.
+   * Guarantees blockNumber since heights are known from request.
+   * Node calls: 1 (batch eth_getBlockByNumber with fullTransactions=false for all heights)
    */
-  public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<any> {
+  public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<any[]> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
-      return await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
+      const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
+
+      // Filter out null stats
+      return rawStats.filter((stats) => stats !== null);
     } catch (error) {
-      this.log.error('getManyBlocksStatsByHeights()', { args: { error } });
+      this.log.error('Failed to get many blocks stats by heights', {
+        args: { heightsCount: heights.length, error },
+        methodName: 'getManyBlocksStatsByHeights()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets a normalized block by hash
+   * Gets a normalized block by hash.
+   * Does NOT guarantee blockNumber - needs additional request to get heights if missing.
+   * Node calls: 1-2 (eth_getBlockByHash + eth_blockNumber if blockNumber missing)
    */
-  public async getOneBlockByHash(hash: string | Hash, fullTransactions?: boolean): Promise<Block> {
+  public async getOneBlockByHash(hash: string | Hash, fullTransactions?: boolean): Promise<Block | null> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
-      const rawBlock = await provider.getOneBlockByHash(hash as Hash, fullTransactions);
+      const rawBlocks = await provider.getManyBlocksByHashes([hash as Hash], fullTransactions);
 
-      // Normalize the block data
+      if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
+        return null;
+      }
+
+      let rawBlock = rawBlocks[0];
+
+      // If blockNumber is missing, we need to get it from the provider
+      if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
+        this.log.warn('Block retrieved by hash missing blockNumber field, fetching current height', {
+          args: { hash },
+          methodName: 'getOneBlockByHash()',
+        });
+
+        // Get current height as fallback - this is not ideal but prevents crashes
+        const currentHeight = await provider.getBlockHeight();
+        rawBlock.blockNumber = currentHeight;
+      }
+
       return this.normalizer.normalizeBlock(rawBlock);
     } catch (error) {
-      this.log.error('getOneBlockByHash()', { args: { error } });
+      this.log.error('Failed to get block by hash', {
+        args: { hash, error },
+        methodName: 'getOneBlockByHash()',
+      });
       throw error;
     }
   }
 
   /**
-   * Gets multiple normalized blocks by hashes using batch calls
+   * Gets multiple normalized blocks by hashes using batch calls.
+   * Does NOT guarantee blockNumber - needs additional requests to get heights if missing.
+   * Node calls: 1-2 (batch eth_getBlockByHash + eth_blockNumber if any blockNumbers missing)
    */
   public async getManyBlocksByHashes(hashes: string[] | Hash[], fullTransactions?: boolean): Promise<Block[]> {
     try {
       const provider = await this._connectionManager.getActiveProvider();
       const rawBlocks = await provider.getManyBlocksByHashes(hashes as Hash[], fullTransactions);
 
-      // Filter out null blocks and normalize the rest
-      return rawBlocks.filter((block: any) => block).map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
+      // Check for missing blockNumbers and handle them
+      const blocksNeedingHeight: number[] = [];
+      const validBlocks: UniversalBlock[] = [];
+
+      rawBlocks.forEach((rawBlock, index) => {
+        if (rawBlock) {
+          if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
+            blocksNeedingHeight.push(index);
+            this.log.warn('Block retrieved by hash missing blockNumber field', {
+              args: { hash: rawBlock.hash },
+              methodName: 'getManyBlocksByHashes()',
+            });
+          }
+          validBlocks.push(rawBlock);
+        }
+      });
+
+      // If some blocks are missing blockNumber, get current height as fallback
+      if (blocksNeedingHeight.length > 0) {
+        const currentHeight = await provider.getBlockHeight();
+        blocksNeedingHeight.forEach((index) => {
+          const block = validBlocks.find((b) => b === rawBlocks[index]);
+          if (block) {
+            block.blockNumber = currentHeight;
+          }
+        });
+      }
+
+      return validBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
     } catch (error) {
-      this.log.error('getManyBlocksByHashes()', { args: { error } });
-      throw error;
-    }
-  }
-
-  /**
-   * Gets a normalized transaction by hash
-   */
-  public async getOneTransactionByHash(hash: string | Hash): Promise<Transaction> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      const rawTransaction = await provider.getOneTransactionByHash(hash as Hash);
-
-      // Normalize the transaction data
-      return this.normalizer.normalizeTransaction(rawTransaction);
-    } catch (error) {
-      this.log.error('getOneTransactionByHash()', { args: { error } });
-      throw error;
-    }
-  }
-
-  /**
-   * Gets multiple normalized transactions by hashes using batch calls
-   */
-  public async getManyTransactionsByHashes(hashes: string[] | Hash[]): Promise<Transaction[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      const rawTransactions = await provider.getManyTransactionsByHashes(hashes as Hash[]);
-
-      // Normalize all transactions
-      return rawTransactions.map((rawTx: any) => this.normalizer.normalizeTransaction(rawTx));
-    } catch (error) {
-      this.log.error('getManyTransactionsByHashes()', { args: { error } });
-      throw error;
-    }
-  }
-
-  /**
-   * Gets a normalized transaction receipt by hash
-   */
-  public async getTransactionReceipt(hash: string | Hash): Promise<TransactionReceipt> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      const rawReceipt = await provider.getTransactionReceipt(hash as Hash);
-
-      // Normalize the receipt data
-      return this.normalizer.normalizeTransactionReceipt(rawReceipt);
-    } catch (error) {
-      this.log.error('getTransactionReceipt()', { args: { error } });
-      throw error;
-    }
-  }
-
-  /**
-   * Gets multiple normalized transaction receipts by hashes using batch calls
-   */
-  public async getManyTransactionReceipts(hashes: string[] | Hash[]): Promise<TransactionReceipt[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      const rawReceipts = await provider.getManyTransactionReceipts(hashes as Hash[]);
-
-      // Normalize all receipts
-      return rawReceipts.map((rawReceipt: any) => this.normalizer.normalizeTransactionReceipt(rawReceipt));
-    } catch (error) {
-      this.log.error('getManyTransactionReceipts()', { args: { error } });
+      this.log.error('Failed to get many blocks by hashes', {
+        args: { hashesCount: hashes.length, error },
+        methodName: 'getManyBlocksByHashes()',
+      });
       throw error;
     }
   }

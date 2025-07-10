@@ -184,19 +184,11 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async enqueue(block: T): Promise<void> {
     await this.mutex.runExclusive(async () => {
-      // Calculate the total block size based on tx.hex without modifying the original block
-      let totalBlockSize = 0;
-
-      if (block.size !== null && block.size !== undefined) {
-        // Use the provided block size (most accurate)
-        totalBlockSize = Number(block.size);
-      } else {
-        // Calculate block size manually
-        totalBlockSize = this.calculateBlockSize(block);
-      }
+      // Use the calculated block size from Block interface
+      const totalBlockSize = Number(block.size);
 
       // Check if adding this block would exceed the maximum queue size
-      // IMORTANT: We still add the last block when the size already exceeds the maximum queue size.
+      // IMPORTANT: We still add the last block when the size already exceeds the maximum queue size.
       if (this.isQueueFull || this.isMaxHeightReached) {
         throw new Error(
           `Can't enqueue block. isQueueFull: ${this.isQueueFull}, isMaxHeightReached: ${this.isMaxHeightReached}`
@@ -208,19 +200,8 @@ export class BlocksQueue<T extends Block = Block> {
         throw new Error(`Can't enqueue block. Block height: ${block.height}, Queue last height: ${this._lastHeight}`);
       }
 
-      if (block.hex) {
-        delete block.hex;
-      }
-
-      // Modify the original block by removing tx.hex and adding __size
-      // IMPORTANT: // Remove tx.hex to save memory
-      if (Array.isArray(block.tx)) {
-        for (const tx of block.tx) {
-          if ('hex' in tx) {
-            delete tx.hex;
-          }
-        }
-      }
+      // Clean up hex data to save memory
+      this.cleanupBlockHexData(block);
 
       // Add the modified block to the inStack
       this.inStack.push(block);
@@ -257,116 +238,22 @@ export class BlocksQueue<T extends Block = Block> {
   }
 
   /**
-   * Calculates the total block size including SegWit considerations
+   * Remove hex data from block and transactions to save memory
    */
-  private calculateBlockSize(block: T): number {
-    let totalSize = 0;
-
-    // Block header size (always 80 bytes)
-    totalSize += 80;
-
-    if (!Array.isArray(block.tx)) {
-      // No transactions or invalid format
-      return totalSize + this.getVarIntSize(0);
+  private cleanupBlockHexData(block: T): void {
+    // Remove block hex if present
+    if ('hex' in block) {
+      delete (block as any).hex;
     }
 
-    // Add varint size for transaction count
-    totalSize += this.getVarIntSize(block.tx.length);
-
-    // Calculate size for each transaction
-    for (const transaction of block.tx) {
-      if (transaction.size) {
-        // Use provided transaction size (includes witness data if present)
-        totalSize += Number(transaction.size);
-      } else if (transaction.hex) {
-        // Calculate from hex data
-        totalSize += this.calculateTransactionSizeFromHex(transaction);
-      } else {
-        throw new Error(
-          `Invalid transaction data. Either size or hex must be present. Transaction: ${JSON.stringify(transaction)}`
-        );
+    // Remove transaction hex data to save memory
+    if (Array.isArray(block.tx)) {
+      for (const tx of block.tx) {
+        if ('hex' in tx) {
+          delete (tx as any).hex;
+        }
       }
     }
-
-    return totalSize;
-  }
-
-  /**
-   * Calculates transaction size from hex, accounting for SegWit
-   */
-  private calculateTransactionSizeFromHex(transaction: any): number {
-    const hexData = transaction.hex;
-    let baseSize = hexData.length / 2; // Base transaction size in bytes
-
-    // Check if this is a SegWit transaction
-    // SegWit transactions have a specific marker and flag after version
-    if (this.isSegWitTransaction(hexData)) {
-      // For SegWit transactions, we need to calculate:
-      // - Base size (without witness data)
-      // - Witness size (witness data)
-      // - Total size = base + witness
-
-      const segwitSizes = this.parseSegWitTransaction(hexData);
-      return segwitSizes.totalSize;
-    }
-
-    // Non-SegWit transaction - hex length / 2 gives actual size
-    return baseSize;
-  }
-
-  /**
-   * Checks if transaction is SegWit by looking for marker and flag
-   */
-  private isSegWitTransaction(hex: string): boolean {
-    // SegWit transactions have marker (0x00) and flag (0x01) after version
-    // Version is first 4 bytes (8 hex chars)
-    // Next 2 bytes should be 0x0001 for SegWit
-    if (hex.length < 12) return false;
-
-    const markerAndFlag = hex.substring(8, 12);
-    return markerAndFlag === '0001';
-  }
-
-  /**
-   * Parses SegWit transaction to get accurate size
-   */
-  private parseSegWitTransaction(hex: string): { baseSize: number; witnessSize: number; totalSize: number } {
-    // This is a simplified parser - in production, use a proper Bitcoin library
-    // like bitcoinjs-lib or similar
-
-    const totalHexSize = hex.length / 2;
-
-    // Approximate witness data size calculation
-    // In a real implementation, you'd need to properly parse:
-    // - Version (4 bytes)
-    // - Marker + Flag (2 bytes)
-    // - Input count (varint)
-    // - Inputs (without witness)
-    // - Output count (varint)
-    // - Outputs
-    // - Witness data for each input
-    // - Locktime (4 bytes)
-
-    // For now, estimate that witness data is about 25-30% of total transaction
-    // This is very approximate - real parsing would be more accurate
-    const estimatedWitnessSize = Math.floor(totalHexSize * 0.27);
-    const baseSize = totalHexSize - estimatedWitnessSize;
-
-    return {
-      baseSize,
-      witnessSize: estimatedWitnessSize,
-      totalSize: totalHexSize,
-    };
-  }
-
-  /**
-   * Gets the size of a varint encoding for a given value
-   */
-  private getVarIntSize(value: number): number {
-    if (value < 0xfd) return 1; // 1 byte
-    if (value <= 0xffff) return 3; // 0xfd + 2 bytes
-    if (value <= 0xffffffff) return 5; // 0xfe + 4 bytes
-    return 9; // 0xff + 8 bytes
   }
 
   /**

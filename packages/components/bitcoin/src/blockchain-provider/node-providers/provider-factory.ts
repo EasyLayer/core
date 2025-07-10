@@ -1,13 +1,13 @@
-import type { ProviderNodeOptions } from './interfaces';
+import type { NodeProviderTypeInterface } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import type { BaseNodeProvider, BaseNodeProviderOptions } from './base-node-provider';
-import type { QuickNodeProviderOptions } from './quick-node.provider';
-import { createQuickNodeProvider } from './quick-node.provider';
 import type { SelfNodeProviderOptions } from './self-node.provider';
 import { createSelfNodeProvider } from './self-node.provider';
 
+export type ProviderNodeOptions = SelfNodeProviderOptions & NodeProviderTypeInterface;
+
 export interface ProviderOptions<T extends ProviderNodeOptions = ProviderNodeOptions> {
-  connection?: ProviderNodeOptions;
+  connection?: Omit<T, 'uniqName' | 'network' | 'rateLimits'>; // TODO: think about uniqName
   useFactory?: (options?: T) => Promise<BaseNodeProvider<T>> | BaseNodeProvider<T>;
 }
 
@@ -19,8 +19,6 @@ export function createProvider(options: ProviderNodeOptions): BaseNodeProvider<B
   switch (type) {
     case NodeProviderTypes.SELFNODE:
       return createSelfNodeProvider(restOptions as SelfNodeProviderOptions);
-    case NodeProviderTypes.QUICKNODE:
-      return createQuickNodeProvider(restOptions as QuickNodeProviderOptions);
     default:
       throw new Error(`Unsupported provider type: ${type}`);
   }

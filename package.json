@@ -26,6 +26,7 @@
     "clear:dist": "lerna run clear:dist",
     "build": "yarn prepare && lerna run build --stream",
     "test:unit": "lerna run test:unit --stream --",
+    "test": "lerna run test --stream --",
     "lint": "lerna run lint --stream",
     "lint:fix": "lerna run lint:fix --stream",
     "prepare": "ts-patch install -s && husky install",

@@ -9,14 +9,12 @@ export const enum NodeProviderTypes {
  * Rate limiting configuration interface
  */
 export interface RateLimits {
-  /** Maximum requests per second (default: 10 for QuickNode free plan) */
-  maxRequestsPerSecond?: number;
-  /** Maximum concurrent requests (default: 8) */
+  /** Maximum concurrent requests (default: 1) */
   maxConcurrentRequests?: number;
   /** Maximum batch size for parallel requests (default: 15) */
   maxBatchSize?: number;
-  /** Delay between batches AND between concurrent requests in milliseconds (default: 1000) */
-  batchDelayMs?: number;
+  /** Delay between requests in milliseconds (default: 1000) */
+  requestDelayMs?: number;
 }
 
 export interface NodeProviderTypeInterface {
@@ -28,9 +26,28 @@ export interface NetworkConfig {
   nativeCurrencySymbol: string;
   nativeCurrencyDecimals: number;
   blockTime: number; // Average block time in seconds
-  hasEIP1559: boolean; // Supports EIP-1559
+
+  // EIP support flags
+  hasEIP1559: boolean; // Supports EIP-1559 (dynamic fees)
   hasWithdrawals: boolean; // Supports staking withdrawals
   hasBlobTransactions: boolean; // Supports EIP-4844 blob transactions
+
+  // Block and transaction limits
+  maxBlockSize: number; // Execution data only (transactions)
+  maxBlockWeight: number; // Total block size (execution + blob + consensus)
+  maxGasLimit: number;
+  maxTransactionSize: number;
+
+  // Gas configuration
+  minGasPrice: number; // Minimum gas price in wei (for legacy networks)
+  maxBaseFeePerGas?: number; // Maximum base fee for EIP-1559 networks
+  maxPriorityFeePerGas?: number; // Maximum priority fee for EIP-1559 networks
+
+  // Network-specific limits
+  maxBlobGasPerBlock?: number; // Maximum blob gas per block (EIP-4844)
+  targetBlobGasPerBlock?: number; // Target blob gas per block (EIP-4844)
+  maxCodeSize: number; // Maximum contract code size in bytes
+  maxInitCodeSize: number; // Maximum init code size in bytes
 }
 
 // ===== UNIVERSAL INTERFACES FOR PROVIDERS =====
@@ -69,7 +86,7 @@ export interface UniversalBlock {
   uncles: string[];
 
   // Block number - handle different provider naming
-  blockNumber: number;
+  blockNumber?: number;
 
   // Optional hex representation
   hex?: string;
@@ -137,7 +154,6 @@ export interface UniversalTransactionReceipt {
   transactionHash: string;
   transactionIndex: number;
   blockHash: string;
-  blockNumber: number;
   from: string;
   to: string | null;
   cumulativeGasUsed: number;
@@ -150,6 +166,8 @@ export interface UniversalTransactionReceipt {
   // EIP-1559 fields
   type?: string;
   effectiveGasPrice?: number;
+
+  blockNumber?: number;
 
   // EIP-4844 fields
   blobGasUsed?: string;
@@ -166,4 +184,37 @@ export interface UniversalLog {
   blockHash?: string | null; // Block hash where the log was included
   logIndex?: number | null; // Log index within the block
   removed?: boolean; // True if the log was removed due to a chain reorganization
+}
+
+export interface UniversalBlockStats {
+  // Core block identification
+  hash: string;
+  number: number;
+
+  // Size and weight metrics
+  size: number;
+  gasLimit: number;
+  gasUsed: number;
+  gasUsedPercentage: number; // Calculated field
+
+  // Timing
+  timestamp: number;
+
+  // Transaction metrics
+  transactionCount: number;
+
+  // Fee metrics (if available)
+  baseFeePerGas?: string;
+
+  // EIP-4844 blob metrics (if available)
+  blobGasUsed?: string;
+  excessBlobGas?: string;
+
+  // Mining/validation
+  miner: string;
+  difficulty: string;
+
+  // Additional metadata
+  parentHash: string;
+  unclesCount: number;
 }

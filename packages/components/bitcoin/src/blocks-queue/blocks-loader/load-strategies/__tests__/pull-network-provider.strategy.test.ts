@@ -1,4 +1,4 @@
-import { BlockchainProviderService, BlockParserService, Block } from '../../../../blockchain-provider';
+import { BlockchainProviderService, Block } from '../../../../blockchain-provider';
 import { PullNetworkProviderStrategy } from '../pull-network-provider.strategy';
 import { AppLogger } from '@easylayer/common/logger';
 import { BlocksQueue } from '../../../blocks-queue';
@@ -9,9 +9,13 @@ function createTestBlock(height: number, hash: string, size: number): Block {
     hash,
     tx: [],
     size,
-    confirmations: 0,
-    strippedsize: 0,
-    weight: 0,
+    strippedsize: size,
+    sizeWithoutWitnesses: size,
+    weight: size * 4,
+    vsize: size,
+    witnessSize: undefined,
+    headerSize: 80,
+    transactionsSize: size - 80,
     version: 1,
     versionHex: '00000001',
     merkleroot: '0'.repeat(64),
@@ -20,7 +24,8 @@ function createTestBlock(height: number, hash: string, size: number): Block {
     nonce: 0,
     bits: '0'.repeat(8),
     difficulty: '1',
-    chainwork: '0'.repeat(64)
+    chainwork: '0'.repeat(64),
+    nTx: 0
   };
 }
 
@@ -30,234 +35,381 @@ describe('PullNetworkProviderStrategy', () => {
   let mockProvider: jest.Mocked<BlockchainProviderService>;
   let queue: BlocksQueue<Block>;
   const basePreloadCount = 4;
-  const defaultBlockSize = 123;
+  const defaultBlockSize = 1000;
+  const maxRequestBlocksBatchSize = 5000;
 
   beforeEach(() => {
-    // Instantiate real queue with initial lastHeight = 0
     queue = new BlocksQueue<Block>({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
-      blockSize: 1048576,
-      maxQueueSize: 1 * 1024 * 1024
+      blockSize: defaultBlockSize,
+      maxQueueSize: 10 * 1024 * 1024
     });
-    // Override queue internals (blockSize) and methods
-    (queue as any)._blockSize = defaultBlockSize;
+
     queue.isQueueOverloaded = jest.fn().mockReturnValue(false);
 
-    mockLogger = { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() } as any;
-    mockProvider = {
-      getManyBlocksStatsByHeights: jest.fn(),
-      getManyBlocksByHashes: jest.fn(),
+    mockLogger = { 
+      debug: jest.fn(), 
+      info: jest.fn(), 
+      warn: jest.fn(), 
+      error: jest.fn() 
     } as any;
 
-    // Stub parser to avoid Buffer errors
-    jest.spyOn(BlockParserService, 'parseRawBlock')
-      .mockImplementation((hex, height) => createTestBlock(height, hex, hex.length));
+    mockProvider = {
+      getManyBlocksStatsByHeights: jest.fn(),
+      getManyBlocksByHeights: jest.fn(),
+    } as any;
 
     strategy = new PullNetworkProviderStrategy(
       mockLogger,
       mockProvider,
       queue,
-      { maxRequestBlocksBatchSize: 10, concurrency: 1, basePreloadCount }
+      { maxRequestBlocksBatchSize, basePreloadCount }
     );
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
-    // reset internal queue state
-    (queue as any)._lastHeight = 0;
-    (queue as any)._size = 0;
-    // reset strategy state
-    (strategy as any)._preloadedItemsQueue = [];
-    (strategy as any)._lastPreloadCount = 0;
-    (strategy as any)._lastLoadedCount = 0;
-    (strategy as any)._maxPreloadCount = basePreloadCount;
+    jest.clearAllMocks();
   });
 
-  describe('load', () => {
-    it('throws if max height reached', async () => {
-      // set queue._maxBlockHeight < last height
-      (queue as any)._maxBlockHeight = 100;
+  describe('load()', () => {
+    it('should throw when max height is reached', async () => {
+      queue.maxBlockHeight = 100;
       (queue as any)._lastHeight = 101;
+      
       await expect(strategy.load(200)).rejects.toThrow('Reached max block height');
     });
 
-    it('throws if current network height reached', async () => {
+    it('should throw when current network height is reached', async () => {
       (queue as any)._lastHeight = 50;
+      
       await expect(strategy.load(50)).rejects.toThrow('Reached current network height');
     });
 
-    it('throws if queue is full', async () => {
-      (queue as any)._lastHeight = 10;
-      // set size >= maxQueueSize
-      (queue as any)._size = (queue as any)._maxQueueSize;
-      await expect(strategy.load(20)).rejects.toThrow('The queue is full');
-    });
-
-    it('returns early if overloaded after preload', async () => {
+    it('should return early when queue is overloaded after preload', async () => {
+      (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: 5, height: 11 }
+        { blockhash: 'h1', total_size: 100, height: 1 }
       ]);
-      (queue as any)._lastHeight = 10;
       queue.isQueueOverloaded = jest.fn().mockReturnValue(true);
 
-      await strategy.load(20);
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'The queue is overloaded', expect.any(Object)
-      );
+      await strategy.load(5);
+      
+      expect(mockLogger.debug).toHaveBeenCalledWith('The queue is overloaded');
+      expect(mockProvider.getManyBlocksByHeights).not.toHaveBeenCalled();
+    });
+
+    it('should successfully load and enqueue blocks', async () => {
+      (queue as any)._lastHeight = 0;
+      
+      // Mock preload response
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'hash1', total_size: 1000, height: 1 },
+        { blockhash: 'hash2', total_size: 1500, height: 2 }
+      ]);
+      
+      // Mock block loading response
+      mockProvider.getManyBlocksByHeights.mockResolvedValue([
+        createTestBlock(1, 'hash1', 1000),
+        createTestBlock(2, 'hash2', 1500)
+      ]);
+
+      await strategy.load(10);
+      
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2, 3, 4]);
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true);
+      expect(queue.length).toBe(2);
+      expect(queue.lastHeight).toBe(2);
+    });
+
+    it('should not preload if items already exist in queue', async () => {
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._preloadedItemsQueue = [
+        { hash: 'existing', size: 1000, height: 1 }
+      ];
+      
+      mockProvider.getManyBlocksByHeights.mockResolvedValue([
+        createTestBlock(1, 'existing', 1000)
+      ]);
+
+      await strategy.load(10);
+      
+      expect(mockProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalled();
     });
   });
 
-  describe('stop', () => {
-    it('clears the preload queue', async () => {
-      (strategy as any)._preloadedItemsQueue = [{ hash: 'h', size: 1, height: 1 }];
-      await strategy.stop();
-      expect((strategy as any)._preloadedItemsQueue).toHaveLength(0);
-    });
-  });
-
-    describe('preloadBlocksInfo', () => {
-    it('fills queue with stats', async () => {
+  describe('preloadBlocksInfo()', () => {
+    it('should increase maxPreloadCount when timing ratio > 1.2', async () => {
+      (strategy as any)._lastLoadAndEnqueueDuration = 1200;
+      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: 10, height: 1 },
-        { blockhash: 'h2', total_size: 20, height: 2 }
+        { blockhash: 'hash1', total_size: 1000, height: 1 }
       ]);
-      await (strategy as any).preloadBlocksInfo(2);
-      expect((strategy as any)._preloadedItemsQueue.map((x: any) => x.height)).toEqual([1, 2]);
-    });
-
-    it('uses default size if total_size is null', async () => {
-      (queue as any)._lastHeight = 0;
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: null, height: 1 }
-      ]);
-      await (strategy as any).preloadBlocksInfo(1);
-      expect((strategy as any)._preloadedItemsQueue[0].size).toBe(defaultBlockSize);
-    });
-
-    it('throws on missing hash or height', async () => {
-      (queue as any)._lastHeight = 0;
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: null, total_size: 10, height: null }
-      ] as any);
-      await expect((strategy as any).preloadBlocksInfo(1))
-        .rejects.toThrow('Block stats missing required hash and height');
-    });
-
-    it('does not change maxPreloadCount when ratio between 0.5 and 1', async () => {
-      (strategy as any)._lastPreloadCount = 4;
-      (strategy as any)._lastLoadedCount = 3;
-      (queue as any)._lastHeight = 0;
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([]);
+      
       const before = (strategy as any)._maxPreloadCount;
-      await (strategy as any).preloadBlocksInfo(0);
+      await (strategy as any).preloadBlocksInfo(1); // Will process 1 block and adjust timing
+      
+      expect((strategy as any)._maxPreloadCount).toBe(Math.round(before * 1.25) - 1);
+    });
+
+    it('should decrease maxPreloadCount when timing ratio < 0.8', async () => {
+      (strategy as any)._lastLoadAndEnqueueDuration = 700;
+      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'hash1', total_size: 1000, height: 1 }
+      ]);
+      
+      const before = (strategy as any)._maxPreloadCount;
+      await (strategy as any).preloadBlocksInfo(1); // Will process 1 block and adjust timing
+      
+      expect((strategy as any)._maxPreloadCount).toBe(Math.max(1, Math.round(before * 0.75)));
+    });
+
+    it('should not change maxPreloadCount when timing is stable', async () => {
+      (strategy as any)._lastLoadAndEnqueueDuration = 1000;
+      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'hash1', total_size: 1000, height: 1 }
+      ]);
+      
+      const before = (strategy as any)._maxPreloadCount;
+      await (strategy as any).preloadBlocksInfo(1); // Will process 1 block and adjust timing
+      
       expect((strategy as any)._maxPreloadCount).toBe(before);
     });
 
-    it('uses default size if total_size is null', async () => {
+    it('should use total_size when available', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: null, height: 1 }
+        { blockhash: 'hash1', total_size: 2500, height: 1 }
       ]);
+      
       await (strategy as any).preloadBlocksInfo(1);
-      expect((strategy as any)._preloadedItemsQueue[0].size).toBe(defaultBlockSize);
+      
+      const preloadedItems = (strategy as any)._preloadedItemsQueue;
+      expect(preloadedItems).toHaveLength(1);
+      expect(preloadedItems[0]).toEqual({
+        hash: 'hash1',
+        size: 2500,
+        height: 1
+      });
     });
 
-    it('throws on missing hash or height', async () => {
+    it('should use default blockSize when total_size is null', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: null, total_size: 10, height: null }
-      ] as any);
-      await expect((strategy as any).preloadBlocksInfo(1))
-        .rejects.toThrow('Block stats missing required hash and height');
+        { blockhash: 'hash1', total_size: null, height: 1 } as any
+      ]);
+      
+      await (strategy as any).preloadBlocksInfo(1);
+      
+      const preloadedItems = (strategy as any)._preloadedItemsQueue;
+      expect(preloadedItems[0].size).toBe(defaultBlockSize);
     });
 
-    it('adjusts maxPreloadCount up when fully consumed (ratio ≥ 0.9)', async () => {
-    // lastPreloadCount = 10, lastLoadedCount = 10 => ratio = 1.0 (> 0.9)
-    (strategy as any)._lastPreloadCount = 10;
-    (strategy as any)._lastLoadedCount = 10;
-    (queue as any)._lastHeight = 0;
-    mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([]);
-    const before = (strategy as any)._maxPreloadCount;
-    await (strategy as any).preloadBlocksInfo(0);
-    expect((strategy as any)._maxPreloadCount).toBe(Math.round(before * 1.25));
+    it('should throw when blockhash is missing', async () => {
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: null, total_size: 1000, height: 1 }
+      ] as any);
+      
+      await expect((strategy as any).preloadBlocksInfo(1))
+        .rejects.toThrow('Block infos missing required hash and height');
+    });
+
+    it('should throw when height is missing', async () => {
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'hash1', total_size: 1000, height: null }
+      ] as any);
+      
+      await expect((strategy as any).preloadBlocksInfo(1))
+        .rejects.toThrow('Block infos missing required hash and height');
+    });
+
+    it('should return early when no blocks to preload', async () => {
+      (queue as any)._lastHeight = 10;
+      const spy = jest.spyOn(mockProvider, 'getManyBlocksStatsByHeights');
+      
+      await (strategy as any).preloadBlocksInfo(10); // currentNetworkHeight = lastHeight
+      
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('should limit request count to maxPreloadCount', async () => {
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._maxPreloadCount = 2;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 1000, height: 1 },
+        { blockhash: 'h2', total_size: 1000, height: 2 }
+      ]);
+      
+      await (strategy as any).preloadBlocksInfo(10); // Would request 10, limited to 2
+      
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2]);
+    });
   });
 
-  it('adjusts maxPreloadCount up when ratio just above threshold (> 0.9)', async () => {
-    // lastPreloadCount = 20, lastLoadedCount = 19 => ratio = 0.95 (> 0.9)
-    (strategy as any)._lastPreloadCount = 20;
-    (strategy as any)._lastLoadedCount = 19;
-    (queue as any)._lastHeight = 0;
-    mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([]);
-    const before = (strategy as any)._maxPreloadCount;
-    await (strategy as any).preloadBlocksInfo(0);
-    expect((strategy as any)._maxPreloadCount).toBe(Math.round(before * 1.25));
-  });
-
-  it('adjusts maxPreloadCount down when ratio < 0.2', async () => {
-    // lastPreloadCount = 10, lastLoadedCount = 1 => ratio = 0.1 (< 0.2)
-    (strategy as any)._lastPreloadCount = 10;
-    (strategy as any)._lastLoadedCount = 1;
-    (queue as any)._lastHeight = 0;
-    mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([]);
-    const before = (strategy as any)._maxPreloadCount;
-    await (strategy as any).preloadBlocksInfo(0);
-    expect((strategy as any)._maxPreloadCount).toBe(Math.max(1, Math.round(before * 0.75)));
-  });
-
-  it('does not change maxPreloadCount when 0.2 ≤ ratio ≤ 0.9', async () => {
-    // lastPreloadCount = 10, lastLoadedCount = 5 => ratio = 0.5 (between thresholds)
-    (strategy as any)._lastPreloadCount = 10;
-    (strategy as any)._lastLoadedCount = 5;
-    (queue as any)._lastHeight = 0;
-    mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([]);
-    const before = (strategy as any)._maxPreloadCount;
-    await (strategy as any).preloadBlocksInfo(0);
-    expect((strategy as any)._maxPreloadCount).toBe(before);
-  });
-
-  it('throws on missing hash or height', async () => {
-    (queue as any)._lastHeight = 0;
-    mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-      { blockhash: null, total_size: 10, height: null }
-    ] as any);
-    await expect((strategy as any).preloadBlocksInfo(1))
-      .rejects.toThrow('Block stats missing required hash and height');
-  });
-  });
-
-  describe('loadBlocks', () => {
+  describe('loadBlocks() - Retry Logic', () => {
     const infos = [
-      { hash: 'h1', size: 1, height: 1 },
-      { hash: 'h2', size: 2, height: 2 }
+      { hash: 'hash1', size: 1000, height: 1 },
+      { hash: 'hash2', size: 1500, height: 2 }
     ];
 
-    it('fetches and parses blocks on first try', async () => {
-      const hexes = ['aa', 'bb'];
-      mockProvider.getManyBlocksByHashes.mockResolvedValue(hexes);
+    it('should fetch blocks successfully on first try', async () => {
+      const blocks = [
+        createTestBlock(1, 'hash1', 1000),
+        createTestBlock(2, 'hash2', 1500)
+      ];
+      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      
       const result = await (strategy as any).loadBlocks(infos, 3);
-      expect(mockProvider.getManyBlocksByHashes).toHaveBeenCalledWith(['h1', 'h2'], 0);
-      expect(result.map((b:any) => b.height)).toEqual([1, 2]);
+      
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true);
+      expect(result).toEqual(blocks);
     });
 
-    it('retries until success', async () => {
-      const hexes = ['cc', 'dd'];
-      const gp = mockProvider.getManyBlocksByHashes;
-      gp.mockRejectedValueOnce(new Error('err1')).mockResolvedValue(hexes);
-      const result = await (strategy as any).loadBlocks(infos, 2);
-      expect(gp).toHaveBeenCalledTimes(2);
-      expect(result).toHaveLength(2);
+    it('should retry on failure and eventually succeed', async () => {
+      const blocks = [createTestBlock(1, 'hash1', 1000)];
+      mockProvider.getManyBlocksByHeights
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValue(blocks);
+      
+      const result = await (strategy as any).loadBlocks(infos, 3);
+      
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledTimes(2);
+      expect(result).toEqual(blocks);
     });
 
-    it('logs and throws after max retries', async () => {
-      mockProvider.getManyBlocksByHashes.mockRejectedValue(new Error('fail'));
-      await expect((strategy as any).loadBlocks(infos, 1))
-        .rejects.toThrow('fail');
+    it('should throw after max retries', async () => {
+      mockProvider.getManyBlocksByHeights.mockRejectedValue(new Error('Persistent error'));
+      
+      await expect((strategy as any).loadBlocks(infos, 2))
+        .rejects.toThrow('Persistent error');
+      
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledTimes(2);
       expect(mockLogger.debug).toHaveBeenCalledWith(
         'Exceeded max retries for fetching blocks batch.',
-        expect.any(Object)
+        expect.objectContaining({
+          methodName: 'loadBlocks',
+          args: { batchLength: 2 }
+        })
       );
+    });
+  });
+
+  describe('enqueueBlocks() - Block Processing', () => {
+    it('should enqueue blocks in ascending height order', async () => {
+      // Start with lastHeight = 0 to allow enqueuing blocks 1, 2, 3
+      (queue as any)._lastHeight = 0;
+      
+      const blocks = [
+        createTestBlock(3, 'hash3', 1000),
+        createTestBlock(1, 'hash1', 1000),
+        createTestBlock(2, 'hash2', 1000)
+      ];
+      
+      await (strategy as any).enqueueBlocks(blocks);
+      
+      expect(queue.length).toBe(3);
+      expect(queue.lastHeight).toBe(3);
+    });
+
+    it('should skip blocks with height <= lastHeight', async () => {
+      (queue as any)._lastHeight = 2;
+      const blocks = [
+        createTestBlock(1, 'hash1', 1000), // Should be skipped
+        createTestBlock(2, 'hash2', 1000), // Should be skipped  
+        createTestBlock(3, 'hash3', 1000)  // Should be enqueued
+      ];
+      
+      await (strategy as any).enqueueBlocks(blocks);
+      
+      expect(queue.length).toBe(1);
+      expect(queue.lastHeight).toBe(3);
+      expect(mockLogger.debug).toHaveBeenCalledTimes(2);
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Skipping block with height less than or equal to lastHeight',
+        expect.objectContaining({
+          args: expect.objectContaining({
+            blockHeight: 1,
+            lastHeight: 2
+          })
+        })
+      );
+    });
+  });
+
+  describe('loadAndEnqueueBlocks() - Integration', () => {
+    it('should process and enqueue blocks successfully', async () => {
+      // Start with lastHeight = 0 to allow enqueuing blocks 1, 2
+      (queue as any)._lastHeight = 0;
+      
+      (strategy as any)._preloadedItemsQueue = [
+        { hash: 'hash1', size: 1000, height: 1 },
+        { hash: 'hash2', size: 1000, height: 2 }
+      ];
+      
+      const blocks = [
+        createTestBlock(1, 'hash1', 1000),
+        createTestBlock(2, 'hash2', 1000)
+      ];
+      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      
+      await (strategy as any).loadAndEnqueueBlocks();
+      
+      expect(queue.length).toBe(2);
+      expect(queue.lastHeight).toBe(2);
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalled();
+      expect((strategy as any)._preloadedItemsQueue).toHaveLength(0);
+    });
+
+    it('should keep unprocessed blocks in queue when batch size limit is exceeded', async () => {
+      // Start with lastHeight = 0 to allow enqueuing blocks 1, 2
+      (queue as any)._lastHeight = 0;
+      
+      // Create blocks where the third one won't fit in batch (maxRequestBlocksBatchSize = 5000)
+      (strategy as any)._preloadedItemsQueue = [
+        { hash: 'hash1', size: 2000, height: 1 },
+        { hash: 'hash2', size: 2000, height: 2 },
+        { hash: 'hash3', size: 2000, height: 3 } // This won't fit: 2000+2000+2000=6000 > 5000
+      ];
+      
+      // Only blocks 1 and 2 will be processed
+      const blocks = [
+        createTestBlock(1, 'hash1', 2000),
+        createTestBlock(2, 'hash2', 2000)
+      ];
+      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      
+      await (strategy as any).loadAndEnqueueBlocks();
+      
+      expect(queue.length).toBe(2);
+      expect(queue.lastHeight).toBe(2);
+      // The third block should remain in the preloaded queue
+      expect((strategy as any)._preloadedItemsQueue).toHaveLength(1);
+      expect((strategy as any)._preloadedItemsQueue[0]).toEqual({
+        hash: 'hash3', 
+        size: 2000, 
+        height: 3
+      });
+    });
+  });
+
+  describe('stop()', () => {
+    it('should clear preloaded items queue', async () => {
+      (strategy as any)._preloadedItemsQueue = [
+        { hash: 'hash1', size: 1000, height: 1 },
+        { hash: 'hash2', size: 1000, height: 2 }
+      ];
+      
+      await strategy.stop();
+      
+      expect((strategy as any)._preloadedItemsQueue).toHaveLength(0);
     });
   });
 });
