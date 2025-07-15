@@ -241,28 +241,30 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       throw new Error('Model does not have aggregateId');
     }
 
-    const cached = this._cache.get(aggregateId);
-    if (cached && cached.lastBlockHeight === blockHeight) {
-      this.log.debug('Returning snapshot from cache', { args: { aggregateId } });
-      return toSnapshot(cached as any);
-    }
+    // IMPORTANT: Cache is not used for specific blockHeight requests
+    // Cache only stores the latest state of aggregates
 
-    const snapshotRepo = this.getRepository<SnapshotInterface>('snapshots');
-    const snapshot = await snapshotRepo.findOneBy({ aggregateId });
+    // IMPORTANT: Find the latest snapshot before or at the requested blockHeight
+    const snapshot = await this.findLatestSnapshotBeforeHeight(aggregateId, blockHeight);
 
     // Two scenarios:
     //  a) There is no snapshot or it is “higher” than the required height — rebuild from scratch
     //  b) There is a snapshot “lower” than the required height — hydrate and catch up
-    if (!snapshot || snapshot.blockHeight > blockHeight) {
-      this.log.debug('Rebuilding from scratch', { args: { aggregateId } });
+    if (!snapshot) {
+      // No snapshot found - rebuild from scratch
+      this.log.debug('No snapshot found, rebuilding from scratch', { args: { aggregateId, blockHeight } });
       await this.applyEvents(model, blockHeight);
     } else if (snapshot.blockHeight < blockHeight) {
-      this.log.debug('Hydrating from snapshot then catching up', { args: { aggregateId } });
+      // Found snapshot is older - hydrate and catch up
+      this.log.debug('Hydrating from snapshot then catching up', {
+        args: { aggregateId, snapshotHeight: snapshot.blockHeight, targetHeight: blockHeight },
+      });
       model.loadFromSnapshot(snapshot);
       await this.applyEvents(model, blockHeight);
     } else {
-      this.log.debug('Exact snapshot matches blockHeight', { args: { aggregateId } });
-      return snapshot;
+      // Exact match
+      this.log.debug('Exact snapshot matches blockHeight', { args: { aggregateId, blockHeight } });
+      model.loadFromSnapshot(snapshot);
     }
 
     return toSnapshot(model as any);
@@ -271,6 +273,24 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   public async getManySnapshotByHeight<K extends T>(models: K[], blockHeight: number): Promise<SnapshotParameters[]> {
     const result = await Promise.all(models.map((model) => this.getOneSnapshotByHeight(model, blockHeight)));
     return result;
+  }
+
+  // IMPORTANT: method to find the latest snapshot before or at given blockHeight
+  private async findLatestSnapshotBeforeHeight(
+    aggregateId: string,
+    blockHeight: number
+  ): Promise<SnapshotInterface | null> {
+    const snapshotRepo = this.getRepository<SnapshotInterface>('snapshots');
+
+    const snapshot = await snapshotRepo
+      .createQueryBuilder('s')
+      .where('s.aggregateId = :aggregateId', { aggregateId })
+      .andWhere('s.blockHeight <= :blockHeight', { blockHeight })
+      .orderBy('s.blockHeight', 'DESC')
+      .limit(1)
+      .getOne();
+
+    return snapshot;
   }
 
   private async applyEvents<K extends T>(model: K, toHeight: number) {

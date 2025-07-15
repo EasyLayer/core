@@ -28,8 +28,6 @@ export class TransportModule {
     const { transports } = options;
 
     for (const transportConfig of transports) {
-      if (!transportConfig.isEnabled) continue;
-
       if (transportConfig.type === 'http') {
         imports.push(HttpTransportModule.forRoot(transportConfig));
       }

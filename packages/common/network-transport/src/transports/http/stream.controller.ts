@@ -32,12 +32,17 @@ export class StreamController extends BaseConsumer {
     const { requestId, action, payload } = request;
 
     this.log.debug('Received HTTP streaming request', {
-      args: { requestId, action, payload },
+      args: {
+        requestId,
+        action,
+        payload,
+        ssl: this.options.ssl?.enabled || false,
+      },
     });
 
     try {
       // Validate message size
-      validateMessageSize(request, this.maxMessageSize, 'http', this.options.name || 'http');
+      validateMessageSize(request, this.maxMessageSize, 'http');
 
       if (!this.validateMessage(request)) {
         throw new BadRequestError('Invalid message format');
@@ -49,12 +54,19 @@ export class StreamController extends BaseConsumer {
         }
 
         this.log.debug('Executing HTTP streaming query', {
-          args: { constructorName: payload.constructorName, dto: payload.dto },
+          args: {
+            constructorName: payload.constructorName,
+            dto: payload.dto,
+            ssl: this.options.ssl?.enabled || false,
+          },
         });
 
+        // Set up streaming response headers
         res.writeHead(200, {
           'Content-Type': 'application/x-ndjson',
           'Transfer-Encoding': 'chunked',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
         });
 
         try {
@@ -65,26 +77,35 @@ export class StreamController extends BaseConsumer {
             res.write(JSON.stringify(responseWithId) + '\n');
           }
 
+          // Send stream end message
           const endMessage = this.createResponse('streamEnd', undefined, requestId);
           res.write(JSON.stringify(endMessage) + '\n');
           res.end();
         } catch (streamError: any) {
           this.log.error('Error during HTTP streaming', {
-            args: { error: streamError.message, requestId },
+            args: {
+              error: streamError.message,
+              requestId,
+              ssl: this.options.ssl?.enabled || false,
+            },
           });
 
           const errorResponse = this.createErrorResponse(streamError, requestId);
           res.write(JSON.stringify(errorResponse) + '\n');
           res.end();
         }
-
         return;
       }
 
       throw new BadRequestError('Streaming not supported for this action');
     } catch (err: any) {
       this.log.error('Error during HTTP streaming query setup', {
-        args: { error: err.message, requestId, stack: err.stack },
+        args: {
+          error: err.message,
+          requestId,
+          stack: err.stack,
+          ssl: this.options.ssl?.enabled || false,
+        },
       });
 
       // Convert transport errors to HTTP exceptions for non-streaming errors

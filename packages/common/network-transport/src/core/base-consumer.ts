@@ -35,9 +35,6 @@ export abstract class BaseConsumer {
     }
   }
 
-  /**
-   * Create a standardized response message
-   */
   protected createResponse(
     action: 'queryResponse' | 'streamResponse' | 'streamEnd' | 'error',
     payload: any,

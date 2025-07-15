@@ -426,19 +426,20 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
       }
 
       // Serialize the cloned aggregate
-      const snapshot = toSnapshot(aggregate as any); // TODO: here is an error with typescript types....
+      aggregate.resetSnapshotCounter();
+      const snapshot = toSnapshot(aggregate as any);
       const repository = this.getRepository('snapshots');
 
-      await repository
-        .createQueryBuilder()
-        .insert()
-        .values(snapshot)
-        .orUpdate(
-          ['payload'], // Columns that we update
-          ['aggregateId']
-        )
-        .updateEntity(false)
-        .execute();
+      // IMPORTANT: we keep all snapshots instead of overwriting
+      await repository.createQueryBuilder().insert().values(snapshot).updateEntity(false).execute();
+
+      this.log.debug('Snapshot created', {
+        args: {
+          aggregateId: aggregate.aggregateId,
+          blockHeight: aggregate.lastBlockHeight,
+          version: aggregate.version,
+        },
+      });
     } catch (error) {
       if (error instanceof QueryFailedError) {
         const driverError = error.driverError as any;
@@ -465,22 +466,16 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
   private async onRollbackUpdateSnapshot(aggregate: T, blockHeight: number) {
     try {
-      const snapshotRepo = this.getRepository('snapshots');
+      // IMPORTANT: Delete all snapshots with blockHeight >= rollback blockHeight
+      // This ensures we don't have "future" snapshots after rollback
+      await this.deleteSnapshotsAfterHeight(aggregate.aggregateId, blockHeight);
 
-      const snapshot = await snapshotRepo.findOneBy({ aggregateId: aggregate.aggregateId });
-
-      if (!snapshot) {
-        return;
-      }
-
-      // If the snapshot was in the database,
-      aggregate.loadFromSnapshot(snapshot);
-
-      if (aggregate.lastBlockHeight >= blockHeight) {
-        await this.deleteSnapshot(aggregate);
-      }
-
-      // If snapshot is actual just return;
+      this.log.debug('Snapshots cleaned after rollback', {
+        args: {
+          aggregateId: aggregate.aggregateId,
+          blockHeight,
+        },
+      });
     } catch (error) {
       this.log.debug('Error during snapshot rollback', {
         methodName: 'onRollbackUpdateSnapshot',
@@ -489,10 +484,29 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     }
   }
 
-  private async deleteSnapshot(aggregate: T) {
+  private async deleteSnapshotsAfterHeight(aggregateId: string, blockHeight: number) {
     const repository = this.getRepository('snapshots');
 
-    await repository.createQueryBuilder().delete().where({ aggregateId: aggregate.aggregateId }).execute();
+    await repository
+      .createQueryBuilder()
+      .delete()
+      .where('aggregateId = :aggregateId', { aggregateId })
+      .andWhere('blockHeight >= :blockHeight', { blockHeight })
+      .execute();
+  }
+
+  private async deleteSnapshot(aggregate: T, blockHeight?: number) {
+    const repository = this.getRepository('snapshots');
+    const query = repository
+      .createQueryBuilder()
+      .delete()
+      .where('aggregateId = :aggregateId', { aggregateId: aggregate.aggregateId });
+
+    if (blockHeight !== undefined) {
+      query.andWhere('blockHeight = :blockHeight', { blockHeight });
+    }
+
+    await query.execute();
   }
 
   private handleDatabaseError(error: any, aggregate: T): void {

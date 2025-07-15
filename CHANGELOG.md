@@ -1,3 +1,9 @@
+## 0.9.0 (2025-07-15)
+
+* BREAKING: refactored network transport; fixed aggregate model to json fn; change snapshot logic; ([67a0c49](https://github.com/EasyLayer/core/commit/67a0c49))
+
+
+
 ## 0.8.0 (2025-07-10)
 
 * fix: fixed prepare branch to release script; ([881a212](https://github.com/EasyLayer/core/commit/881a212))
