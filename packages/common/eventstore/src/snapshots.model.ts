@@ -17,9 +17,14 @@ export const createSnapshotsEntity = (): EntitySchema<SnapshotInterface> =>
     name: 'snapshots',
     tableName: 'snapshots',
     columns: {
-      aggregateId: {
+      id: {
         type: 'varchar',
         primary: true,
+        generated: 'uuid',
+      },
+      aggregateId: {
+        type: 'varchar',
+        // IMPORTANT: Removed primary: true to allow multiple snapshots per aggregate
       },
       blockHeight: {
         type: 'int',
@@ -35,8 +40,19 @@ export const createSnapshotsEntity = (): EntitySchema<SnapshotInterface> =>
     },
     indices: [
       {
+        name: 'IDX_aggregate_blockheight',
+        columns: ['aggregateId', 'blockHeight'],
+      },
+      {
         name: 'IDX_blockheight',
         columns: ['blockHeight'],
+      },
+    ],
+    // IMPORTANT: Composite unique constraint to prevent duplicate snapshots
+    uniques: [
+      {
+        name: 'UQ_aggregate_blockheight',
+        columns: ['aggregateId', 'blockHeight'],
       },
     ],
   });

@@ -5,7 +5,6 @@ export class TransportError extends Error {
   public readonly code: string;
   public readonly timestamp: Date;
   public readonly transportType?: string;
-  public readonly transportName?: string;
   public readonly context?: Record<string, any>;
 
   constructor(
@@ -13,7 +12,6 @@ export class TransportError extends Error {
     code: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -23,7 +21,6 @@ export class TransportError extends Error {
     this.code = code;
     this.timestamp = new Date();
     this.transportType = options?.transportType;
-    this.transportName = options?.transportName;
     this.context = options?.context;
 
     if (Error.captureStackTrace) {
@@ -42,7 +39,6 @@ export class TransportError extends Error {
       code: this.code,
       timestamp: this.timestamp.toISOString(),
       transportType: this.transportType,
-      transportName: this.transportName,
       context: this.context,
       // stack: this.stack,
     };
@@ -54,7 +50,6 @@ export class ConnectionError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -73,7 +68,6 @@ export class TimeoutError extends TransportError {
     timeoutMs: number,
     options?: {
       transportType?: string;
-      transportName?: string;
       requestId?: string;
       action?: string;
       context?: Record<string, any>;
@@ -93,7 +87,6 @@ export class MessageError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       messageData?: any;
       context?: Record<string, any>;
       cause?: Error;
@@ -109,7 +102,6 @@ export class TransportInitError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -127,7 +119,6 @@ export class ServerError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       serverCode?: string;
       serverMessage?: string;
       statusCode?: number;
@@ -146,7 +137,6 @@ export class BadRequestError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -160,7 +150,6 @@ export class NotFoundError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -174,7 +163,6 @@ export class ClientNotFoundError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }
@@ -193,7 +181,6 @@ export class MessageSizeError extends TransportError {
     maxSize: number,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
     }
   ) {
@@ -210,7 +197,6 @@ export class SubscriptionError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       constructorName?: string;
       context?: Record<string, any>;
       cause?: Error;
@@ -226,7 +212,6 @@ export class DestroyError extends TransportError {
     message: string,
     options?: {
       transportType?: string;
-      transportName?: string;
       context?: Record<string, any>;
       cause?: Error;
     }

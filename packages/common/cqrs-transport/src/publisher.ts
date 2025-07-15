@@ -27,14 +27,15 @@ export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> 
     this.log.debug('Broadcast to external transport succeeded');
 
     // IMPORTANT: publish to local transport AFTER success publishing ti external transport
-    if (isSystemEvent(event)) {
-      await this.publishToLocalTransport(event);
-    }
+    // IMPORTANT: We publish to local handlers and custom events - this is for cases when users extend the functionality with their own handlers
+    // if (isSystemEvent(event)) {
+    await this.publishToLocalTransport(event);
+    // }
   }
 
   async publishAll<T extends BasicEvent<EventBasePayload>>(events: T[]): Promise<void> {
     this.log.debug('Publishing batch of events', { args: { count: events.length } });
-    const systemEvents: T[] = events.filter(isSystemEvent);
+    // const systemEvents: T[] = events.filter(isSystemEvent);
 
     // IMPORTANT: don't need catch here,
     // if some event makes a mistake, the commit method will roll back
@@ -42,7 +43,9 @@ export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> 
     this.log.debug('Broadcast to external transport succeeded for batch', { args: { count: events.length } });
 
     // IMPORTANT: publish to local transport AFTER success publishing ti external transport
-    for (const event of systemEvents) {
+    // We publish to local handlers and custom events - this is for cases when users extend the functionality with their own handlers
+    for (const event of events) {
+      //systemEvents
       await this.publishToLocalTransport(event);
     }
   }

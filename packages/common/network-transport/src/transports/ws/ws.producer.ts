@@ -60,7 +60,7 @@ export class WsProducer extends BaseProducer<OutgoingMessage> implements OnModul
       timestamp: Date.now(),
     };
 
-    validateMessageSize(msg, this.maxMessageSize, 'ws', this.options.name || 'ws');
+    validateMessageSize(msg, this.maxMessageSize, 'ws');
     this.server.emit('message', msg);
     this.log.debug('WebSocket ping sent to all clients');
   }
@@ -107,7 +107,7 @@ export class WsProducer extends BaseProducer<OutgoingMessage> implements OnModul
       throw new ClientNotFoundError('WebSocket server not available');
     }
 
-    validateMessageSize(message, this.maxMessageSize, 'ws', this.options.name || 'ws');
+    validateMessageSize(message, this.maxMessageSize, 'ws');
 
     // IMPORTANT: For broadcast events, we immediately throw error if no connection
     // (and do not wait for a timeout), this is because we have a commit method

@@ -31,7 +31,13 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
     this.maxMessageSize = options.maxMessageSize ?? MESSAGE_SIZE_LIMITS.IPC;
     process.on('message', this.handleMessage.bind(this));
 
-    this.log.debug('IPC consumer initialized and listening for messages');
+    this.log.info('IPC consumer initialized and listening for messages', {
+      args: {
+        pid: process.pid,
+        maxMessageSize: this.maxMessageSize,
+        heartbeatTimeout: options.heartbeatTimeout || 10000,
+      },
+    });
   }
 
   public async onModuleDestroy(): Promise<void> {
@@ -40,7 +46,13 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
   }
 
   private async handleMessage(raw: unknown) {
-    this.log.debug('Received raw IPC message', { args: { hasData: !!raw } });
+    this.log.debug('Received raw IPC message', {
+      args: {
+        hasData: !!raw,
+        pid: process.pid,
+        connected: process.connected,
+      },
+    });
 
     try {
       // Guard: Skip everything that doesn't look like a message
@@ -50,13 +62,18 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
       }
 
       // Validate message size
-      validateMessageSize(raw, this.maxMessageSize, 'ipc', this.options.name || 'ipc');
+      validateMessageSize(raw, this.maxMessageSize, 'ipc');
 
       const msg = raw as IpcIncomingMessage;
       const { correlationId, action, requestId } = msg;
 
       this.log.debug('Parsed IPC message', {
-        args: { action, requestId, correlationId },
+        args: {
+          action,
+          requestId,
+          correlationId,
+          pid: process.pid,
+        },
       });
 
       if (typeof correlationId !== 'string' || !action) {
@@ -64,16 +81,19 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
         return;
       }
 
+      // Handle pong messages
       if (action === 'pong') {
         this.producer.markPong();
         return;
       }
 
+      // Check if producer is connected
       if (!this.producer.isConnected()) {
         this.log.debug('IPC connection not alive, ignoring message');
         return;
       }
 
+      // Handle query messages
       if (action === 'query') {
         await this.handleQuery(msg);
       } else if (action === 'streamQuery') {
@@ -85,7 +105,12 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
       }
     } catch (err: any) {
       this.log.error('Error processing IPC message', {
-        args: { error: err.message, stack: err.stack },
+        args: {
+          error: err.message,
+          stack: err.stack,
+          pid: process.pid,
+          connected: process.connected,
+        },
       });
 
       try {
@@ -96,6 +121,7 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
           args: {
             originalError: err.message,
             sendError: sendError.message,
+            pid: process.pid,
           },
         });
       }
@@ -115,13 +141,14 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
           constructorName: payload.constructorName,
           correlationId,
           requestId,
+          pid: process.pid,
         },
       });
 
       const result = await this.executeQuery(this.queryBus, payload);
 
       this.log.debug('IPC query executed, preparing response', {
-        args: { correlationId, requestId },
+        args: { correlationId, requestId, pid: process.pid },
       });
 
       const response = this.createResponse('queryResponse', result, requestId);
@@ -133,6 +160,7 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
           correlationId,
           requestId,
           stack: err.stack,
+          pid: process.pid,
         },
       });
 
@@ -154,6 +182,7 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
           constructorName: payload.constructorName,
           correlationId,
           requestId,
+          pid: process.pid,
         },
       });
 
@@ -173,6 +202,7 @@ export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
           correlationId,
           requestId,
           stack: err.stack,
+          pid: process.pid,
         },
       });
 
