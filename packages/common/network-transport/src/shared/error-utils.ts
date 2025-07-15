@@ -44,7 +44,6 @@ export class ErrorUtils {
 
     return new ServerError(message, {
       transportType: transportInfo?.type,
-      transportName: transportInfo?.name,
       serverCode: payload.code || payload.errorCode,
       serverMessage: payload.message || payload.error,
       statusCode: payload.statusCode,

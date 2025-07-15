@@ -151,9 +151,14 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   public toSnapshotPayload(): string {
     // IMPORTANT: We do not put the values _version, _aggregateId, _lastBlockHeight in the payload,
     // they are saved at the top level of snapshot
+
+    const systemPayload = this.getSystemPayload();
+    const userPayload = this.toJsonPayload();
+
     const payload: any = {
       __type: this.constructor.name,
-      ...this.toJsonPayload(),
+      ...systemPayload,
+      ...userPayload,
     };
     return JSON.stringify(payload, this.getCircularReplacer());
   }
@@ -197,10 +202,11 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     this.fromSnapshot(deserializedPayload);
   }
 
-  // IMPORTANT: This method in the current base class does not transform anything
-  // (because there are no other variables that will be stored at the top level except for the base ones),
-  // but the user can override this method in his aggregates to transform what he needs
+  // IMPORTANT: This method can be overridden by user for custom transformations
+  // System fields are always excluded at toSnapshotPayload level
   protected toJsonPayload(): any {
+    // Default implementation returns empty object
+    // User can override this method in derived classes for custom transformations
     return {};
   }
 
@@ -210,6 +216,42 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   // since it has access to the classes of its structures.
   protected fromSnapshot(state: any): void {
     Object.assign(this, state);
+  }
+
+  // IMPORTANT: System part - always executes, automatically serializes all properties
+  // except system fields. User cannot override this method.
+  private getSystemPayload(): any {
+    const result: any = {};
+
+    // Excluded system fields - manually defined array
+    const excludedFields = [
+      '_version',
+      '_aggregateId',
+      '_lastBlockHeight',
+      '_versionsFromSnapshot',
+      INTERNAL_EVENTS.toString(),
+    ];
+
+    // Get all own properties
+    const allKeys = [...Object.getOwnPropertyNames(this), ...Object.getOwnPropertySymbols(this)];
+
+    for (const key of allKeys) {
+      const keyString = key.toString();
+
+      // Skip excluded system fields
+      if (excludedFields.includes(keyString)) {
+        continue;
+      }
+
+      // Skip methods
+      if (typeof (this as any)[key] === 'function') {
+        continue;
+      }
+
+      result[key] = (this as any)[key];
+    }
+
+    return result;
   }
 
   protected getEventHandler<E extends BasicEvent<EventBasePayload>>(event: E): Type<IEventHandler> | undefined {
