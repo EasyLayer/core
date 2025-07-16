@@ -1,7 +1,8 @@
-import { Module, DynamicModule, OnModuleInit, Inject } from '@nestjs/common';
+import { Module, DynamicModule, OnModuleInit, Inject, OnModuleDestroy } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
 import { readFileSync } from 'node:fs';
-import { createServer } from 'node:https';
+import { createServer, Server as HttpsServer } from 'node:https';
+import { createServer as createHttpServer, Server as HttpServer } from 'node:http';
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { RpcController } from './rpc.controller';
 import { StreamController } from './stream.controller';
@@ -22,7 +23,9 @@ export interface HttpServerOptions {
   };
 }
 
-class HttpServerManager implements OnModuleInit {
+class HttpServerManager implements OnModuleInit, OnModuleDestroy {
+  private server!: HttpServer | HttpsServer;
+
   constructor(
     @Inject('HTTP_OPTIONS')
     private readonly options: HttpServerOptions,
@@ -52,29 +55,25 @@ class HttpServerManager implements OnModuleInit {
           ...(ssl.ca && { ca: readFileSync(ssl.ca, 'utf8') }),
         };
 
-        const httpsServer = createServer(httpsOptions, app);
-
-        httpsServer.listen(port, host, () => {
-          this.logger.info(`HTTPS server listening on ${host}:${port}`);
-        });
-
-        httpsServer.on('error', (error) => {
-          this.logger.error('HTTPS server error:', { args: { error } });
-        });
+        this.server = createServer(httpsOptions, app);
+        this.server.listen(port, host, () => this.logger.info(`HTTPS server listening on ${host}:${port}`));
       } catch (sslError) {
         this.logger.error('Failed to start HTTPS server:', { args: { sslError } });
         throw sslError;
       }
     } else {
       // Start regular HTTP server
-      app.listen(port, host, () => {
-        this.logger.info(`HTTP server listening on ${host}:${port}`);
-      });
+      this.server = app.listen(port, host, () => this.logger.info(`HTTP server listening on ${host}:${port}`));
 
-      app.on('error', (error: any) => {
-        this.logger.error('HTTP server error:', { args: { error } });
+      this.server.on('error', (err) => {
+        this.logger.error('HTTP(S) server error', { args: { err } });
       });
     }
+  }
+
+  async onModuleDestroy() {
+    await new Promise<void>((res) => this.server.close(() => res()));
+    this.logger.info('HTTP server closed');
   }
 }
 

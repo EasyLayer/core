@@ -1,7 +1,12 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
 import { Blockchain, restoreChainLinks } from '../../blockchain-provider';
-import { EvmNetworkInitializedEvent, EvmNetworkBlocksAddedEvent, EvmNetworkReorganizedEvent } from '../events';
+import {
+  EvmNetworkInitializedEvent,
+  EvmNetworkBlocksAddedEvent,
+  EvmNetworkReorganizedEvent,
+  EvmNetworkClearedEvent,
+} from '../events';
 import { BlockchainValidationError } from './errors';
 
 export class Network extends AggregateRoot {
@@ -38,19 +43,24 @@ export class Network extends AggregateRoot {
   }
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
-    const last = this.chain.lastBlockHeight;
-    const height =
-      last != null
-        ? // if there is already a height, we take the maximum between the current and starting
-          Math.max(last, startHeight)
-        : // if the chain is empty, we put it on the “pre-start” block
-          startHeight - 1;
-
     await this.apply(
       new EvmNetworkInitializedEvent({
         aggregateId: this.aggregateId,
         requestId,
-        blockHeight: height,
+        blockHeight: startHeight,
+      })
+    );
+  }
+
+  // Method to clear all blockchain data(for database cleaning)
+  public async clearChain({ requestId }: { requestId: string }) {
+    this.chain.truncateToBlock(-1); // Clear all blocks
+
+    await this.apply(
+      new EvmNetworkClearedEvent({
+        aggregateId: this.aggregateId,
+        requestId,
+        blockHeight: -1,
       })
     );
   }
