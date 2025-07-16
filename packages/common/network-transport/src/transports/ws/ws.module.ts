@@ -1,7 +1,7 @@
 import { Module, DynamicModule, OnModuleInit, OnModuleDestroy, Inject } from '@nestjs/common';
-import { readFileSync } from 'fs';
-import { createServer } from 'https';
-import { createServer as createHttpServer } from 'http';
+import { readFileSync } from 'node:fs';
+import { createServer, Server as HttpsServer } from 'node:https';
+import { createServer as createHttpServer, Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { WsGateway } from './ws.gateway';
@@ -29,7 +29,7 @@ export interface WsServerOptions {
 }
 
 class WsServerManager implements OnModuleInit, OnModuleDestroy {
-  private httpServer: any; // native Node server (http or https)
+  private httpServer: any;
   private ioServer: SocketIOServer | null = null;
 
   constructor(

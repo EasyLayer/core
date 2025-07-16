@@ -14,8 +14,6 @@ class IpcServerManager implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject('IPC_OPTIONS')
     private readonly options: IpcServerOptions,
-    private readonly consumer: IpcChildConsumer,
-    private readonly producer: IpcChildProducer,
     private readonly logger: AppLogger
   ) {}
 

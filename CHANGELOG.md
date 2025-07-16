@@ -1,3 +1,9 @@
+## <small>0.9.1 (2025-07-16)</small>
+
+* refactor: fixed network transport modules; refactored cqrs components for bitcoin and evm; ([052eec5](https://github.com/EasyLayer/core/commit/052eec5))
+
+
+
 ## 0.9.0 (2025-07-15)
 
 * BREAKING: refactored network transport; fixed aggregate model to json fn; change snapshot logic; ([67a0c49](https://github.com/EasyLayer/core/commit/67a0c49))

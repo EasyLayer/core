@@ -5,6 +5,7 @@ import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
   BitcoinNetworkReorganizedEvent,
+  BitcoinNetworkClearedEvent,
 } from '../events';
 import { BlockchainValidationError } from './errors';
 
@@ -21,6 +22,11 @@ export class Network extends AggregateRoot {
     // so we must take the smallest blocks in the network,
     // and make sure that they fit into a single batch less than the value of 'maxSize' .
     this.chain = new Blockchain({ maxSize });
+  }
+
+  // Getter for current block height in the chain
+  public get currentBlockHeight(): number | undefined {
+    return this.chain.lastBlockHeight;
   }
 
   protected toJsonPayload(): any {
@@ -42,19 +48,24 @@ export class Network extends AggregateRoot {
   }
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
-    const last = this.chain.lastBlockHeight;
-    const height =
-      last != null
-        ? // if there is already a height, we take the maximum between the current and starting
-          Math.max(last, startHeight)
-        : // if the chain is empty, we put it on the “pre-start” block
-          startHeight - 1;
-
     await this.apply(
       new BitcoinNetworkInitializedEvent({
         aggregateId: this.aggregateId,
         requestId,
-        blockHeight: height,
+        blockHeight: startHeight,
+      })
+    );
+  }
+
+  // Method to clear all blockchain data(for database cleaning)
+  public async clearChain({ requestId }: { requestId: string }) {
+    this.chain.truncateToBlock(-1); // Clear all blocks
+
+    await this.apply(
+      new BitcoinNetworkClearedEvent({
+        aggregateId: this.aggregateId,
+        requestId,
+        blockHeight: -1,
       })
     );
   }
