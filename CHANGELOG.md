@@ -1,3 +1,9 @@
+## <small>0.9.2 (2025-07-20)</small>
+
+* chore: fixed event store leak; refactored blockchains providers; fixed blockchains queues; ([0a3ea1d](https://github.com/EasyLayer/core/commit/0a3ea1d))
+
+
+
 ## <small>0.9.1 (2025-07-16)</small>
 
 * refactor: fixed network transport modules; refactored cqrs components for bitcoin and evm; ([052eec5](https://github.com/EasyLayer/core/commit/052eec5))
