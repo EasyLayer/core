@@ -425,7 +425,7 @@ describe('BlocksQueue', () => {
 
       // Ensure at least one block is returned, even though its size exceeds maxSize
       expect(batch.length).toBe(1);
-      expect(batch[0].size).toBe(validBlock.size);
+      expect(batch[0]!.size).toBe(validBlock.size);
     });
 
     it('should return an empty array when the queue is empty', async () => {

@@ -25,6 +25,38 @@ export class BlockchainProviderService {
     return this.networkConfig;
   }
 
+  /**
+   * Execute provider method with automatic error handling and provider switching
+   */
+  private async executeProviderMethod<T>(methodName: string, operation: (provider: any) => Promise<T>): Promise<T> {
+    try {
+      const provider = await this._connectionManager.getActiveProvider();
+      return await operation(provider);
+    } catch (error) {
+      this.log.warn('Bitcoin provider operation failed, attempting recovery', {
+        args: { methodName, error: error || 'Unknown error' },
+      });
+
+      // Let connection manager handle the failure and provider switching
+      try {
+        const currentProvider = await this._connectionManager.getActiveProvider();
+        const recoveredProvider = await this._connectionManager.handleProviderFailure(
+          currentProvider.uniqName,
+          error,
+          methodName
+        );
+
+        // Retry with recovered/switched provider
+        return await operation(recoveredProvider);
+      } catch (recoveryError) {
+        this.log.error('Bitcoin provider recovery failed', {
+          args: { methodName, originalError: error, recoveryError },
+        });
+        throw recoveryError;
+      }
+    }
+  }
+
   // ===== BASIC INFO METHODS =====
 
   /**
@@ -32,9 +64,10 @@ export class BlockchainProviderService {
    * Node calls: 1 (getblockcount)
    */
   public async getCurrentBlockHeight(): Promise<number> {
-    const provider = await this._connectionManager.getActiveProvider();
-    const height = await provider.getBlockHeight();
-    return Number(height);
+    return this.executeProviderMethod('getCurrentBlockHeight', async (provider) => {
+      const height = await provider.getBlockHeight();
+      return Number(height);
+    });
   }
 
   /**
@@ -43,17 +76,14 @@ export class BlockchainProviderService {
    * @returns block hash or null if block doesn't exist
    */
   public async getOneBlockHashByHeight(height: string | number): Promise<string | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      const hashes = await provider.getManyBlockHashesByHeights([Number(height)]);
-      return hashes[0] || null;
-    } catch (error) {
-      this.log.error('Failed to get block hash by height', {
-        args: { height, error },
-        methodName: 'getOneBlockHashByHeight()',
-      });
-      return null;
-    }
+    return this.executeProviderMethod('getOneBlockHashByHeight', async (provider) => {
+      try {
+        const hashes = await provider.getManyBlockHashesByHeights([Number(height)]);
+        return hashes[0] || null;
+      } catch (error) {
+        return null;
+      }
+    });
   }
 
   /**
@@ -61,8 +91,9 @@ export class BlockchainProviderService {
    * Node calls: 1 (batch getblockhash for all heights)
    */
   public async getManyHashesByHeights(heights: string[] | number[]): Promise<(string | null)[]> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.getManyBlockHashesByHeights(heights.map((h) => Number(h)));
+    return this.executeProviderMethod('getManyHashesByHeights', async (provider) => {
+      return await provider.getManyBlockHashesByHeights(heights.map((h) => Number(h)));
+    });
   }
 
   // ===== BLOCK METHODS WITH HEX OPTION =====
@@ -80,9 +111,7 @@ export class BlockchainProviderService {
     useHex: boolean = false,
     verbosity: number = 1
   ): Promise<Block | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getOneBlockByHeight', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHeights([Number(height)]);
@@ -104,13 +133,7 @@ export class BlockchainProviderService {
 
         return this.normalizer.normalizeBlock(rawBlock);
       }
-    } catch (error) {
-      this.log.error('Failed to get block by height', {
-        args: { height, useHex, verbosity, error },
-        methodName: 'getOneBlockByHeight()',
-      });
-      return null;
-    }
+    });
   }
 
   /**
@@ -122,9 +145,7 @@ export class BlockchainProviderService {
    * @returns normalized block or null if block doesn't exist
    */
   public async getOneBlockByHash(hash: string, useHex: boolean = false, verbosity: number = 1): Promise<Block | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getOneBlockByHash', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHashes([hash]);
@@ -156,13 +177,7 @@ export class BlockchainProviderService {
 
         return this.normalizer.normalizeBlock(rawBlock);
       }
-    } catch (error) {
-      this.log.error('Failed to get block by hash', {
-        args: { hash, useHex, verbosity, error },
-        methodName: 'getOneBlockByHash()',
-      });
-      return null;
-    }
+    });
   }
 
   /**
@@ -177,15 +192,13 @@ export class BlockchainProviderService {
     useHex: boolean = false,
     verbosity: number = 1
   ): Promise<Block[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getManyBlocksByHeights', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHeights(heights.map((item) => Number(item)));
 
         // Filter out null blocks and normalize
-        const validBlocks = universalBlocks.filter((block): block is UniversalBlock => block !== null);
+        const validBlocks = universalBlocks.filter((block: any): block is UniversalBlock => block !== null);
         return this.normalizer.normalizeManyBlocks(validBlocks);
       } else {
         // Get structured blocks - GUARANTEES HEIGHT
@@ -195,16 +208,10 @@ export class BlockchainProviderService {
         );
 
         // Filter out null blocks and normalize
-        const validBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+        const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
         return this.normalizer.normalizeManyBlocks(validBlocks);
       }
-    } catch (error) {
-      this.log.error('Failed to get many blocks by heights', {
-        args: { heightsCount: heights.length, useHex, verbosity, error },
-        methodName: 'getManyBlocksByHeights()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -219,9 +226,7 @@ export class BlockchainProviderService {
     useHex: boolean = false,
     verbosity: number = 1
   ): Promise<Block[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getManyBlocksByHashes', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHashes(hashes);
@@ -239,7 +244,7 @@ export class BlockchainProviderService {
         const completeBlocks: UniversalBlock[] = [];
         let heightIndex = 0;
 
-        universalBlocks.forEach((block, index) => {
+        universalBlocks.forEach((block: any, index: any) => {
           if (block !== null) {
             const heightInfo = heightInfos[heightIndex++];
             if (heightInfo && heightInfo.height !== undefined) {
@@ -256,16 +261,10 @@ export class BlockchainProviderService {
         const rawBlocks = await provider.getManyBlocksByHashes(hashes, verbosity);
 
         // Filter out null blocks and normalize
-        const validBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+        const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
         return this.normalizer.normalizeManyBlocks(validBlocks);
       }
-    } catch (error) {
-      this.log.error('Failed to get many blocks by hashes', {
-        args: { hashesCount: hashes.length, useHex, verbosity, error },
-        methodName: 'getManyBlocksByHashes()',
-      });
-      throw error;
-    }
+    });
   }
 
   // ===== BLOCK STATS METHODS =====
@@ -275,22 +274,14 @@ export class BlockchainProviderService {
    * Node calls: 2 (batch getblockhash + batch getblockstats, with special genesis handling)
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<BlockStats[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
       // Get raw stats - GUARANTEES HEIGHT
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
 
       // Filter out null stats and normalize
-      const validStats = rawStats.filter((stats): stats is UniversalBlockStats => stats !== null);
+      const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);
-    } catch (error) {
-      this.log.error('Failed to get many blocks stats by heights', {
-        args: { heightsCount: heights.length, error },
-        methodName: 'getManyBlocksStatsByHeights()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -298,22 +289,14 @@ export class BlockchainProviderService {
    * Node calls: 1 (batch getblockstats for all hashes)
    */
   public async getManyBlocksStatsByHashes(hashes: string[]): Promise<BlockStats[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getManyBlocksStatsByHashes', async (provider) => {
       // Get raw stats - GUARANTEES HEIGHT (blockstats includes height)
       const rawStats = await provider.getManyBlocksStatsByHashes(hashes);
 
       // Filter out null stats and normalize
-      const validStats = rawStats.filter((stats): stats is UniversalBlockStats => stats !== null);
+      const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);
-    } catch (error) {
-      this.log.error('Failed to get many blocks stats by hashes', {
-        args: { hashesCount: hashes.length, error },
-        methodName: 'getManyBlocksStatsByHashes()',
-      });
-      throw error;
-    }
+    });
   }
 
   // ===== TRANSACTION METHODS =====
@@ -330,31 +313,23 @@ export class BlockchainProviderService {
     useHex: boolean = false,
     verbosity: number = 1
   ): Promise<Transaction[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-
+    return this.executeProviderMethod('getTransactionsByTxids', async (provider) => {
       if (useHex) {
         // Get Universal transactions parsed from hex
         const universalTxs = await provider.getManyTransactionsHexByTxids(txids);
 
         // Filter out null transactions and normalize
-        const validTxs = universalTxs.filter((tx): tx is UniversalTransaction => tx !== null);
+        const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
         return this.normalizer.normalizeManyTransactions(validTxs);
       } else {
         // Get structured transaction data
         const rawTxs = await provider.getManyTransactionsByTxids(txids, verbosity);
 
         // Filter out null transactions and normalize
-        const validTxs = rawTxs.filter((tx): tx is UniversalTransaction => tx !== null);
+        const validTxs = rawTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
         return this.normalizer.normalizeManyTransactions(validTxs);
       }
-    } catch (error) {
-      this.log.error('Failed to get transactions by txids', {
-        args: { txidsCount: txids.length, useHex, verbosity, error },
-        methodName: 'getTransactionsByTxids()',
-      });
-      throw error;
-    }
+    });
   }
 
   // ===== NETWORK METHODS =====
@@ -363,40 +338,45 @@ export class BlockchainProviderService {
    * Gets blockchain information
    */
   public async getBlockchainInfo(): Promise<any> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.getBlockchainInfo();
+    return this.executeProviderMethod('getBlockchainInfo', async (provider) => {
+      return await provider.getBlockchainInfo();
+    });
   }
 
   /**
    * Gets network information
    */
   public async getNetworkInfo(): Promise<any> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.getNetworkInfo();
+    return this.executeProviderMethod('getNetworkInfo', async (provider) => {
+      return await provider.getNetworkInfo();
+    });
   }
 
   /**
    * Gets mempool information
    */
   public async getMempoolInfo(): Promise<any> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.getMempoolInfo();
+    return this.executeProviderMethod('getMempoolInfo', async (provider) => {
+      return await provider.getMempoolInfo();
+    });
   }
 
   /**
    * Gets raw mempool
    */
   public async getRawMempool(verbose: boolean = false): Promise<any> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.getRawMempool(verbose);
+    return this.executeProviderMethod('getRawMempool', async (provider) => {
+      return await provider.getRawMempool(verbose);
+    });
   }
 
   /**
    * Estimates smart fee
    */
   public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
-    const provider = await this._connectionManager.getActiveProvider();
-    return await provider.estimateSmartFee(confTarget, estimateMode);
+    return this.executeProviderMethod('estimateSmartFee', async (provider) => {
+      return await provider.estimateSmartFee(confTarget, estimateMode);
+    });
   }
 
   // ===== NETWORK FEATURE UTILITY METHODS =====

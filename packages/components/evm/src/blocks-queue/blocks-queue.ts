@@ -257,32 +257,59 @@ export class BlocksQueue<T extends Block> {
 
   /**
    * Retrieves a batch of blocks whose cumulative size does not exceed the specified maximum size.
-   * @param maxSize - The maximum cumulative size of the batch in bytes.
-   * @returns A promise that resolves to an array of blocks fitting within the specified size.
-   * @throws Will throw an error if the first block exceeds the maximum batch size.
-   * @complexity O(n)
+   *
+   * Algorithm:
+   * 1. Ensures FIFO order by transferring items from inStack to outStack
+   * 2. Iterates from the end of outStack (oldest blocks first)
+   * 3. Accumulates blocks until size limit would be exceeded
+   * 4. Guarantees at least one block is returned (even if it exceeds limit)
+   *
+   * The "at least one block" guarantee is crucial because:
+   * - Every block must eventually be processed
+   * - Large blocks shouldn't block the entire pipeline
+   * - System continues to make progress even with oversized blocks
+   *
+   * @param maxSize - The maximum cumulative size of the batch in bytes
+   * @returns A promise that resolves to an array of blocks fitting within the specified size
+   * @complexity O(n) where n is the number of blocks in the batch
    */
-  public async getBatchUpToSize(maxSize: number): Promise<any> {
+  public async getBatchUpToSize(maxSize: number): Promise<T[]> {
     return this.mutex.runExclusive(async () => {
+      // Return empty batch if queue is empty
       if (this.length === 0) {
         return [];
       }
 
+      // Transfer all items from inStack to outStack to maintain FIFO order
+      // This only happens when outStack is empty to preserve ordering
       this.transferItems();
 
-      const batch = [];
+      const batch: T[] = [];
       let accumulatedSize = 0;
+
+      // Process blocks from the end of outStack (oldest blocks first)
+      // This maintains FIFO processing order
       for (let i = this.outStack.length - 1; i >= 0; i--) {
-        const block = this.outStack[i];
-        if (accumulatedSize + block!.size > maxSize) {
+        const block = this.outStack[i]!;
+        const blockSize = block!.size;
+
+        // Check if adding this block would exceed the maximum batch size
+        if (accumulatedSize + blockSize > maxSize) {
+          // Critical guarantee: always include at least one block
+          // This prevents deadlock when individual blocks exceed maxSize
           if (batch.length === 0) {
             batch.push(block);
+            accumulatedSize += blockSize;
           }
+          // Stop processing once we hit the size limit
           break;
         }
+
+        // Add block to batch and update accumulated size
         batch.push(block);
-        accumulatedSize += block!.size;
+        accumulatedSize += blockSize;
       }
+
       return batch;
     });
   }

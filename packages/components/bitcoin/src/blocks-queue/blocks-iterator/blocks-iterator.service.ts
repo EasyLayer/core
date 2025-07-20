@@ -121,13 +121,36 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Retrieves the next batch of blocks for processing.
+   *
+   * Uses maximum batch size approach to ensure optimal performance:
+   * - Always processes available blocks (guarantees progress)
+   * - Respects memory limits by not exceeding maximum batch size
+   * - Prevents resource starvation by taking all available blocks up to the limit
+   *
+   * This approach is better than minimum batch size because:
+   * - No deadlock when blocks are smaller than minimum threshold
+   * - Efficient resource utilization
+   * - Predictable performance characteristics
+   *
+   * @returns Promise resolving to array of blocks ready for processing
+   */
   private async peekNextBatch(): Promise<Block[]> {
-    // Minimum batch size in bytes
-    const minBatchSize = this._blocksBatchSize;
+    // Maximum batch size in bytes - this is our memory/processing limit
+    const maxBatchSize = this._blocksBatchSize;
 
-    // Now we start processing blocks only in batches of the appropriate sizes.
-    // If there are few blocks in the queue, we will not take them out for now in order to unload other places.
-    const batch: Block[] = await this._queue.getBatchUpToSize(minBatchSize);
+    // Get all available blocks up to the maximum size limit
+    // This ensures we always make progress while respecting resource constraints
+    const batch: Block[] = await this._queue.getBatchUpToSize(maxBatchSize);
+
+    this.log.debug('Fetched batch for processing', {
+      args: {
+        batchLength: batch.length,
+        maxBatchSize,
+        totalBatchSize: batch.reduce((sum, block) => sum + block.size, 0),
+      },
+    });
 
     return batch;
   }

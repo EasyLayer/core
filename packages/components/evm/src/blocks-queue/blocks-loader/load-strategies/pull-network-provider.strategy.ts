@@ -283,15 +283,7 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
         // Get all block receipts at once using eth_getBlockReceipts
         const allBlocksReceipts = await this.blockchainProvider.getManyBlocksWithReceipts(blockHeights);
-
-        // Attach receipts to each block
-        blocks.forEach((block: Block, index: number) => {
-          const blockReceipts = allBlocksReceipts[index] || [];
-          (block as any).receipts = blockReceipts;
-        });
-
-        // Use provider service to merge receipts into blocks and recalculate sizes
-        return await this.blockchainProvider.mergeReceiptsIntoBlocks(blocks, []);
+        return allBlocksReceipts;
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {

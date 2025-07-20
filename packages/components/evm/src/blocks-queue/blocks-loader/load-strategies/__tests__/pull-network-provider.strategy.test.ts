@@ -106,14 +106,12 @@ describe('PullNetworkProviderStrategy', () => {
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocksReceipts);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockCompleteBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
       expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true);
       expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
-      expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalledWith(mockBlocks, []);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
 
@@ -122,7 +120,6 @@ describe('PullNetworkProviderStrategy', () => {
       const mockBlocks = [createMockBlock(101)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[]]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.isQueueOverloaded.mockReturnValue(true); // Skip receipts loading
 
       await strategy.load(110);
@@ -141,17 +138,14 @@ describe('PullNetworkProviderStrategy', () => {
         { ...createMockBlock(101), transactions: [] },
         { ...createMockBlock(102), transactions: [] },
       ];
-      const mockCompleteBlocks = [...mockBlocksWithNoTx];
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocksWithNoTx);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]); // Empty receipts arrays
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockCompleteBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
       expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
-      expect(mockBlockchainProvider.mergeReceiptsIntoBlocks).toHaveBeenCalledWith(mockBlocksWithNoTx, []);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
 
@@ -161,7 +155,6 @@ describe('PullNetworkProviderStrategy', () => {
       const mockBlocks = [createMockBlock(109), createMockBlock(110)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -186,7 +179,6 @@ describe('PullNetworkProviderStrategy', () => {
       jest.clearAllMocks();
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([]);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       
       await strategy.load(110);
       expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalled();
@@ -232,7 +224,6 @@ describe('PullNetworkProviderStrategy', () => {
       const mockBlocks = Array.from({ length: 3 }, (_, i) => createMockBlock(101 + i));
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(3).fill([]));
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -258,7 +249,6 @@ describe('PullNetworkProviderStrategy', () => {
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([largeBlock, mediumBlock, smallBlock]);
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], [], []]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -282,7 +272,6 @@ describe('PullNetworkProviderStrategy', () => {
       (strategy as any)._preloadedItemsQueue = [largeBlock, smallBlock];
 
       mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -329,55 +318,6 @@ describe('PullNetworkProviderStrategy', () => {
           })
         })
       );
-    });
-  });
-
-  describe('block enqueueing', () => {
-    it('should skip blocks with height less than or equal to queue lastHeight', async () => {
-      const oldBlock = createMockBlock(99); // Less than queue.lastHeight (100)
-      const validBlock = createMockBlock(101);
-      
-      mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([oldBlock, validBlock]);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([oldBlock, validBlock]);
-      mockQueue.enqueue.mockResolvedValue(undefined);
-
-      await strategy.load(110);
-
-      // Should only enqueue the valid block
-      expect(mockQueue.enqueue).toHaveBeenCalledTimes(1);
-      expect(mockQueue.enqueue).toHaveBeenCalledWith(validBlock);
-      
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Skipping block with height less than or equal to lastHeight',
-        expect.objectContaining({
-          args: {
-            blockHeight: 99,
-            lastHeight: 100,
-          }
-        })
-      );
-    });
-
-    it('should enqueue blocks in correct order (descending height for processing)', async () => {
-      const blocks = [
-        createMockBlock(103),
-        createMockBlock(101),
-        createMockBlock(102),
-      ];
-      
-      mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], [], []]);
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(blocks);
-      mockQueue.enqueue.mockResolvedValue(undefined);
-
-      await strategy.load(110);
-
-      // Should enqueue in descending order (blocks are sorted desc and popped from end)
-      expect(mockQueue.enqueue).toHaveBeenCalledTimes(3);
-      expect(mockQueue.enqueue.mock.calls[0][0].blockNumber).toBe(101);
-      expect(mockQueue.enqueue.mock.calls[1][0].blockNumber).toBe(102);
-      expect(mockQueue.enqueue.mock.calls[2][0].blockNumber).toBe(103);
     });
   });
 });

@@ -386,8 +386,8 @@ describe('EVM BlocksQueue', () => {
       const batch = await queue.getBatchUpToSize(18000); // Should fit first 2 blocks
       
       expect(batch.length).toBe(2);
-      expect(batch[0].blockNumber).toBe(0);
-      expect(batch[1].blockNumber).toBe(1);
+      expect(batch[0]!.blockNumber).toBe(0);
+      expect(batch[1]!.blockNumber).toBe(1);
     });
 
     it('should return at least one block even if it exceeds maxSize', async () => {
@@ -399,7 +399,7 @@ describe('EVM BlocksQueue', () => {
       const batch = await queue.getBatchUpToSize(10000); // Smaller than block size
       
       expect(batch.length).toBe(1);
-      expect(batch[0].size).toBe(25000);
+      expect(batch[0]!.size).toBe(25000);
     });
 
     it('should find blocks by hash correctly', async () => {
