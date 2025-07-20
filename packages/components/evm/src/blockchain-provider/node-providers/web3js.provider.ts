@@ -2,7 +2,6 @@ import * as Web3Module from 'web3';
 const Web3 = (Web3Module as any).default ?? Web3Module;
 import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
-import type { Hash } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import { EvmRateLimiter } from './rate-limiter';
 import type {
@@ -43,6 +42,9 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     this.network = options.network;
     this.responseTimeout = options.responseTimeout ?? 5000;
 
+    // Set WebSocket availability flag
+    this._hasWebSocketUrl = !!this.wsUrl;
+
     // Configure HTTP provider with timeout and chainId
     const httpProviderOptions = {
       timeout: this.responseTimeout,
@@ -59,21 +61,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
     // Initialize WebSocket if URL provided
     if (this.wsUrl) {
-      const wsProviderOptions: any = {
-        timeout: this.responseTimeout,
-        reconnect: {
-          auto: false,
-          delay: 1000,
-          maxAttempts: 1,
-        },
-      };
-      const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl, wsProviderOptions);
-      this._wsClient = new Web3({
-        provider: wsProvider,
-        config: {
-          defaultNetworkId: this.network.chainId,
-        },
-      });
+      this.initializeWebSocket();
     }
 
     // Initialize rate limiter
@@ -91,34 +79,77 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     };
   }
 
-  get wsClient() {
-    return this._wsClient;
+  /**
+   * Initialize WebSocket connection with event handlers
+   */
+  private initializeWebSocket(): void {
+    if (!this.wsUrl) return;
+
+    try {
+      const wsProviderOptions: any = {
+        timeout: this.responseTimeout,
+        reconnect: {
+          auto: false,
+          delay: 1000,
+          maxAttempts: 1,
+        },
+      };
+      const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl, wsProviderOptions);
+
+      this._wsClient = new Web3({
+        provider: wsProvider,
+        config: {
+          defaultNetworkId: this.network.chainId,
+        },
+      });
+
+      // Set up WebSocket event handlers
+      wsProvider.on('connect', () => {
+        this._isWebSocketConnected = true;
+      });
+
+      wsProvider.on('disconnect', () => {
+        this._isWebSocketConnected = false;
+      });
+
+      wsProvider.on('error', (error: any) => {
+        this._isWebSocketConnected = false;
+        // Don't throw here, just log for debugging
+      });
+    } catch (error) {
+      this._isWebSocketConnected = false;
+      // Don't throw during initialization, provider can still work with HTTP
+    }
+  }
+
+  /**
+   * Check WebSocket connection state without making requests
+   */
+  healthcheckWebSocket(): boolean {
+    if (!this._hasWebSocketUrl || !this._wsClient) {
+      return false;
+    }
+
+    // Check WebSocket provider connection state
+    const provider = this._wsClient.currentProvider as any;
+    return provider && provider.connected && this._isWebSocketConnected;
+  }
+
+  /**
+   * Handle connection errors and attempt recovery
+   */
+  async handleConnectionError(error: any, methodName: string): Promise<void> {
+    // This method is called by the connection manager when operations fail
+    throw error; // Re-throw to let connection manager handle provider switching
   }
 
   public async healthcheck(): Promise<boolean> {
     try {
       const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
 
-      // Try WebSocket first if available, fallback to HTTP
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
-
-      await this.rateLimiter.execute(requests, batchCall);
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  public async healthcheckWebSocket(): Promise<boolean> {
-    if (!this._wsClient) {
-      return false;
-    }
-
-    try {
-      await this._wsClient.eth.getBlockNumber();
-      return true;
+      // Always use HTTP for health checks to avoid WebSocket dependency
+      const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
+      return !!results[0];
     } catch (error) {
       return false;
     }
@@ -141,45 +172,67 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     } catch (error) {
       throw new Error(`Chain validation failed: ${error}`);
     }
+
+    // Initialize WebSocket if configured
+    if (this._hasWebSocketUrl && !this._wsClient) {
+      this.initializeWebSocket();
+    }
   }
 
   public async disconnect(): Promise<void> {
     await this.rateLimiter.stop();
+
     if (this._wsClient) {
       const provider = this._wsClient.currentProvider;
       if (provider && typeof provider.disconnect === 'function') {
         provider.disconnect();
       }
+      this._wsClient = undefined;
+      this._isWebSocketConnected = false;
+    }
+
+    const httpProv = this._httpClient.currentProvider as any;
+    if (httpProv && httpProv.agent && typeof httpProv.agent.destroy === 'function') {
+      httpProv.agent.destroy();
     }
   }
 
   public async reconnectWebSocket(): Promise<void> {
-    if (!this.wsUrl) {
+    if (!this._hasWebSocketUrl || !this.wsUrl) {
       throw new Error('WebSocket URL not available for reconnection');
     }
 
+    // Cleanup existing WebSocket
     if (this._wsClient) {
       const provider = this._wsClient.currentProvider;
       if (provider && typeof provider.disconnect === 'function') {
         provider.disconnect();
       }
+      this._wsClient = undefined;
+      this._isWebSocketConnected = false;
     }
 
-    const wsProviderOptions: any = {
-      timeout: this.responseTimeout,
-      reconnect: {
-        auto: false,
-        delay: 1000,
-        maxAttempts: 1,
-      },
-    };
-    const wsProvider = new Web3.providers.WebsocketProvider(this.wsUrl, wsProviderOptions);
-    this._wsClient = new Web3({
-      provider: wsProvider,
-      config: {
-        defaultNetworkId: this.network.chainId,
-      },
-    });
+    // Reinitialize WebSocket
+    this.initializeWebSocket();
+
+    // Wait a bit for connection to establish
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    if (!this.healthcheckWebSocket()) {
+      throw new Error('Failed to reconnect WebSocket');
+    }
+  }
+
+  /**
+   * Execute request with automatic error handling and provider switching
+   */
+  private async executeWithErrorHandling<T>(operation: () => Promise<T>, methodName: string): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      await this.handleConnectionError(error, methodName);
+      throw error; // This will trigger provider switching in connection manager
+    }
   }
 
   /**
@@ -225,8 +278,8 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
    * Batch WebSocket call method for multiple requests via WebSocket
    */
   private async _batchWsCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
-    if (!this._wsClient) {
-      throw new Error('WebSocket client not available');
+    if (!this._wsClient || !this.healthcheckWebSocket()) {
+      throw new Error('WebSocket client not available or not connected');
     }
 
     return new Promise((resolve, reject) => {
@@ -265,7 +318,11 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
    * Returns a subscription object with unsubscribe method
    */
   public subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
-    if (!this._wsClient) {
+    if (!this._hasWebSocketUrl) {
+      throw new Error('WebSocket is not configured for this provider');
+    }
+
+    if (!this._wsClient || !this.healthcheckWebSocket()) {
       throw new Error('WebSocket not available for subscriptions');
     }
 
@@ -304,18 +361,18 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
   // ===== BLOCK METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      // Prefer WebSocket if available and connected, otherwise use HTTP
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const results = await this.rateLimiter.execute(requests, batchCall);
       return parseInt(results[0], 16);
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getBlockHeight', { provider: this.type, httpUrl: this.httpUrl });
-    }
+    }, 'getBlockHeight');
   }
 
   public async getManyBlocksByHeights(
@@ -326,15 +383,16 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, fullTransactions],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
@@ -354,13 +412,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
         return normalizedBlock;
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-        fullTransactions,
-      });
-    }
+    }, 'getManyBlocksByHeights');
   }
 
   public async getManyBlocksByHashes(
@@ -371,15 +423,16 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({
         method: 'eth_getBlockByHash',
         params: [hash, fullTransactions],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
@@ -391,13 +444,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
         }
         return this.normalizeRawBlock(block);
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHashes', {
-        provider: this.type,
-        totalHashes: hashes.length,
-        fullTransactions,
-      });
-    }
+    }, 'getManyBlocksByHashes');
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<(UniversalBlockStats | null)[]> {
@@ -405,15 +452,16 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, false],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
@@ -433,12 +481,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
         return normalizedStats;
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksStatsByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-      });
-    }
+    }, 'getManyBlocksStatsByHeights');
   }
 
   public async getManyBlocksReceipts(heights: number[]): Promise<UniversalTransactionReceipt[][]> {
@@ -446,15 +489,16 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockReceipts',
         params: [`0x${height.toString(16)}`],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocksReceipts = await this.rateLimiter.execute(requests, batchCall);
 
@@ -478,19 +522,12 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
           return normalizedReceipt;
         });
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksReceipts', {
-        provider: this.type,
-        totalBlocks: heights.length,
-      });
-    }
+    }, 'getManyBlocksReceipts');
   }
 
   // ===== NORMALIZATION METHODS =====
+  // Same normalization methods as EtherJS provider...
 
-  /**
-   * Normalizes block stats from raw block data
-   */
   private normalizeBlockStats(rawBlock: any): UniversalBlockStats {
     const gasLimit = parseInt(rawBlock.gasLimit, 16);
     const gasUsed = parseInt(rawBlock.gasUsed, 16);
@@ -502,7 +539,7 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       size: parseInt(rawBlock.size, 16),
       gasLimit,
       gasUsed,
-      gasUsedPercentage: Math.round(gasUsedPercentage * 100) / 100, // Round to 2 decimal places
+      gasUsedPercentage: Math.round(gasUsedPercentage * 100) / 100,
       timestamp: parseInt(rawBlock.timestamp, 16),
       transactionCount: rawBlock.transactions?.length || 0,
       baseFeePerGas: rawBlock.baseFeePerGas,
@@ -545,7 +582,6 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
       ),
     };
 
-    // Only set blockNumber if it exists in raw data
     if (rawBlock.blockNumber !== undefined && rawBlock.blockNumber !== null) {
       block.blockNumber = parseInt(rawBlock.blockNumber, 16);
     } else if (rawBlock.number !== undefined && rawBlock.number !== null) {

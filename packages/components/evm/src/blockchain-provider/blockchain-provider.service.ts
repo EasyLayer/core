@@ -33,6 +33,34 @@ export class BlockchainProviderService {
   }
 
   /**
+   * Execute provider method with automatic error handling and provider switching
+   */
+  private async executeProviderMethod<T>(methodName: string, operation: (provider: any) => Promise<T>): Promise<T> {
+    try {
+      const provider = await this._connectionManager.getActiveProvider();
+      return await operation(provider);
+    } catch (error) {
+      // Let connection manager handle the failure and provider switching
+      try {
+        const currentProvider = await this._connectionManager.getActiveProvider();
+        const recoveredProvider = await this._connectionManager.handleProviderFailure(
+          currentProvider.uniqName,
+          error,
+          methodName
+        );
+
+        // Retry with recovered/switched provider
+        return await operation(recoveredProvider);
+      } catch (recoveryError) {
+        this.log.error('Provider recovery failed', {
+          args: { methodName, originalError: error, recoveryError },
+        });
+        throw recoveryError;
+      }
+    }
+  }
+
+  /**
    * Subscribes to new block events via WebSocket using provider's native implementation
    * Returns complete blocks with transactions and receipts
    *
@@ -51,8 +79,8 @@ export class BlockchainProviderService {
     this._connectionManager
       .getActiveProvider()
       .then((provider) => {
-        if (!provider.wsClient) {
-          const err = new Error('Active provider does not support WebSocket connections');
+        if (!provider.hasWebSocketSupport || !provider.isWebSocketConnected) {
+          const err = new Error('Active provider does not support WebSocket connections or WebSocket is not connected');
           rejectSubscription(err);
           return;
         }
@@ -99,8 +127,7 @@ export class BlockchainProviderService {
    * Node calls: 2 (1 for block + 1 for receipts if block has transactions, otherwise just 1)
    */
   public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getOneBlockWithReceipts', async (provider) => {
       const numericHeight = Number(height);
 
       // Get block with transactions
@@ -127,13 +154,7 @@ export class BlockchainProviderService {
 
       const normalizedBlock = this.normalizer.normalizeBlock(rawBlock);
       return normalizedBlock;
-    } catch (error) {
-      this.log.error('Failed to get block with receipts', {
-        args: { height, error },
-        methodName: 'getOneBlockWithReceipts()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -143,33 +164,26 @@ export class BlockchainProviderService {
    * Node calls: 2 (1 batch for blocks + 1 batch for receipts)
    */
   public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getManyBlocksWithReceipts', async (provider) => {
       const numericHeights = heights.map((h) => Number(h));
 
       const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
       // Filter out null blocks before processing receipts
-      const validRawBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+      const validRawBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
       const allBlocksReceipts = await provider.getManyBlocksReceipts(numericHeights);
 
       // Attach receipts to valid blocks, maintaining order
-      rawBlocks.forEach((rawBlock, index) => {
+      rawBlocks.forEach((rawBlock: any, index: any) => {
         if (rawBlock) {
           rawBlock.receipts = allBlocksReceipts[index] || [];
         }
       });
 
       // Normalize only valid blocks
-      const normalizedBlocks = validRawBlocks.map((rawBlock) => this.normalizer.normalizeBlock(rawBlock));
+      const normalizedBlocks = validRawBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
       return normalizedBlocks;
-    } catch (error) {
-      this.log.error('Failed to get many blocks with receipts', {
-        args: { heightsCount: heights.length, error },
-        methodName: 'getManyBlocksWithReceipts()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -226,17 +240,10 @@ export class BlockchainProviderService {
    * Node calls: 1 (eth_blockNumber)
    */
   public async getCurrentBlockHeight(): Promise<number> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getCurrentBlockHeight', async (provider) => {
       const height = await provider.getBlockHeight();
       return Number(height);
-    } catch (error) {
-      this.log.error('Failed to get current block height', {
-        args: { error },
-        methodName: 'getCurrentBlockHeight()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -245,8 +252,7 @@ export class BlockchainProviderService {
    * Node calls: 1 (eth_getBlockByNumber with fullTransactions=false)
    */
   public async getOneBlockHashByHeight(height: string | number): Promise<string | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getOneBlockHashByHeight', async (provider) => {
       const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], false);
 
       if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
@@ -254,13 +260,7 @@ export class BlockchainProviderService {
       }
 
       return rawBlocks[0].hash;
-    } catch (error) {
-      this.log.error('Failed to get block hash by height', {
-        args: { height, error },
-        methodName: 'getOneBlockHashByHeight()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -269,8 +269,7 @@ export class BlockchainProviderService {
    * Node calls: 1 (eth_getBlockByNumber)
    */
   public async getOneBlockByHeight(height: string | number, fullTransactions?: boolean): Promise<Block | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getOneBlockByHeight', async (provider) => {
       const numericHeight = Number(height);
       const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions);
 
@@ -280,13 +279,7 @@ export class BlockchainProviderService {
 
       const rawBlock = rawBlocks[0];
       return this.normalizer.normalizeBlock(rawBlock);
-    } catch (error) {
-      this.log.error('Failed to get block by height', {
-        args: { height, error },
-        methodName: 'getOneBlockByHeight()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -295,21 +288,14 @@ export class BlockchainProviderService {
    * Node calls: 1 (batch eth_getBlockByNumber for all heights)
    */
   public async getManyBlocksByHeights(heights: string[] | number[], fullTransactions?: boolean): Promise<Block[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getManyBlocksByHeights', async (provider) => {
       const numericHeights = heights.map((item) => Number(item));
       const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
 
       // Filter out null blocks and normalize
-      const validBlocks = rawBlocks.filter((block): block is UniversalBlock => block !== null);
+      const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
       return validBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
-    } catch (error) {
-      this.log.error('Failed to get many blocks by heights', {
-        args: { heightsCount: heights.length, error },
-        methodName: 'getManyBlocksByHeights()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -318,19 +304,12 @@ export class BlockchainProviderService {
    * Node calls: 1 (batch eth_getBlockByNumber with fullTransactions=false for all heights)
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<any[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
 
       // Filter out null stats
-      return rawStats.filter((stats) => stats !== null);
-    } catch (error) {
-      this.log.error('Failed to get many blocks stats by heights', {
-        args: { heightsCount: heights.length, error },
-        methodName: 'getManyBlocksStatsByHeights()',
-      });
-      throw error;
-    }
+      return rawStats.filter((stats: any) => stats !== null);
+    });
   }
 
   /**
@@ -339,8 +318,7 @@ export class BlockchainProviderService {
    * Node calls: 1-2 (eth_getBlockByHash + eth_blockNumber if blockNumber missing)
    */
   public async getOneBlockByHash(hash: string | Hash, fullTransactions?: boolean): Promise<Block | null> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getOneBlockByHash', async (provider) => {
       const rawBlocks = await provider.getManyBlocksByHashes([hash as Hash], fullTransactions);
 
       if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
@@ -362,13 +340,7 @@ export class BlockchainProviderService {
       }
 
       return this.normalizer.normalizeBlock(rawBlock);
-    } catch (error) {
-      this.log.error('Failed to get block by hash', {
-        args: { hash, error },
-        methodName: 'getOneBlockByHash()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**
@@ -377,15 +349,14 @@ export class BlockchainProviderService {
    * Node calls: 1-2 (batch eth_getBlockByHash + eth_blockNumber if any blockNumbers missing)
    */
   public async getManyBlocksByHashes(hashes: string[] | Hash[], fullTransactions?: boolean): Promise<Block[]> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
+    return this.executeProviderMethod('getManyBlocksByHashes', async (provider) => {
       const rawBlocks = await provider.getManyBlocksByHashes(hashes as Hash[], fullTransactions);
 
       // Check for missing blockNumbers and handle them
       const blocksNeedingHeight: number[] = [];
       const validBlocks: UniversalBlock[] = [];
 
-      rawBlocks.forEach((rawBlock, index) => {
+      rawBlocks.forEach((rawBlock: any, index: any) => {
         if (rawBlock) {
           if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
             blocksNeedingHeight.push(index);
@@ -410,13 +381,7 @@ export class BlockchainProviderService {
       }
 
       return validBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
-    } catch (error) {
-      this.log.error('Failed to get many blocks by hashes', {
-        args: { hashesCount: hashes.length, error },
-        methodName: 'getManyBlocksByHashes()',
-      });
-      throw error;
-    }
+    });
   }
 
   /**

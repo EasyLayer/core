@@ -4,7 +4,6 @@ import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
 import type { NetworkConfig, UniversalBlock, UniversalTransaction, UniversalBlockStats } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
-import { BitcoinErrorHandler } from './errors';
 import { HexTransformer } from './hex-transformer';
 import { RateLimiter } from './rate-limiter';
 
@@ -76,6 +75,14 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     };
   }
 
+  /**
+   * Handle connection errors and attempt recovery
+   */
+  async handleConnectionError(error: any, methodName: string): Promise<void> {
+    // This method is called by the connection manager when operations fail
+    throw error; // Re-throw to let connection manager handle provider switching
+  }
+
   public async connect() {
     const health = await this.healthcheck();
     if (!health) {
@@ -126,6 +133,18 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     if (this._httpClient) {
       this._httpClient.destroy();
       this._httpClient = null;
+    }
+  }
+
+  /**
+   * Execute request with automatic error handling and provider switching
+   */
+  private async executeWithErrorHandling<T>(operation: () => Promise<T>, methodName: string): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      await this.handleConnectionError(error, methodName);
+      throw error; // This will trigger provider switching in connection manager
     }
   }
 
@@ -195,28 +214,19 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
   // ===== BASIC BLOCKCHAIN METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getblockcount', params: [] }], (calls) =>
         this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getBlockHeight', { provider: this.type, baseUrl: this.baseUrl });
-    }
+    }, 'getBlockHeight');
   }
 
   public async getManyBlockHashesByHeights(heights: number[]): Promise<string[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({ method: 'getblockhash', params: [height] }));
-
       return await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
-      // _batchRpcCall already returns null for errors, preserving order
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyHashesByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-      });
-    }
+    }, 'getManyBlockHashesByHeights');
   }
 
   // ===== HEX METHODS (parse hex to Universal objects) =====
@@ -226,7 +236,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
    * Returns blocks parsed from hex only, without height (height must be set separately)
    */
   public async getManyBlocksHexByHashes(hashes: string[]): Promise<(UniversalBlock | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       // Get hex data for all blocks
       const hexRequests = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] }));
       const hexResults = await this.rateLimiter.execute(hexRequests, (calls) => this._batchRpcCall(calls));
@@ -242,12 +252,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
         parsedBlock.hex = hex;
         return parsedBlock;
       });
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksHexByHashes', {
-        provider: this.type,
-        totalHashes: hashes.length,
-      });
-    }
+    }, 'getManyBlocksHexByHashes');
   }
 
   /**
@@ -255,7 +260,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
    * Guarantees height for all returned blocks since we know the heights from input
    */
   public async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       // Get hashes using our internal method - preserves order with nulls
       const hashes = await this.getManyBlockHashesByHeights(heights);
 
@@ -283,12 +288,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       });
 
       return results;
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksHexByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-      });
-    }
+    }, 'getManyBlocksHexByHeights');
   }
 
   // ===== OBJECT METHODS (return Universal*) =====
@@ -297,7 +297,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
    * Get multiple blocks as structured objects - ATOMIC METHOD
    */
   public async getManyBlocksByHashes(hashes: string[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, verbosity] }));
       const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
 
@@ -308,20 +308,14 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
         }
         return this.normalizeRawBlock(rawBlock);
       });
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksByHashes', {
-        provider: this.type,
-        totalHashes: hashes.length,
-        verbosity,
-      });
-    }
+    }, 'getManyBlocksByHashes');
   }
 
   /**
    * Get multiple blocks by heights as structured objects - COMBINED METHOD
    */
   public async getManyBlocksByHeights(heights: number[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       // Get hashes first - preserves order, null for missing
       const blocksHashes = await this.getManyBlockHashesByHeights(heights);
 
@@ -344,19 +338,13 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       });
 
       return results;
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-        verbosity,
-      });
-    }
+    }, 'getManyBlocksByHeights');
   }
 
   // ===== BLOCK STATS METHODS =====
 
   public async getManyBlocksStatsByHashes(hashes: string[]): Promise<(UniversalBlockStats | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({ method: 'getblockstats', params: [hash] }));
       const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
 
@@ -367,19 +355,14 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
         }
         return this.normalizeRawBlockStats(rawStats);
       });
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksStatsByHashes', {
-        provider: this.type,
-        totalHashes: hashes.length,
-      });
-    }
+    }, 'getManyBlocksStatsByHashes');
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<(UniversalBlockStats | null)[]> {
-    const genesisHeight = 0;
-    const hasGenesis = heights.includes(genesisHeight);
+    return this.executeWithErrorHandling(async () => {
+      const genesisHeight = 0;
+      const hasGenesis = heights.includes(genesisHeight);
 
-    try {
       if (hasGenesis) {
         // Handle genesis block separately since getblockstats doesn't work for it
         const genesisResults = await this.rateLimiter.execute(
@@ -443,13 +426,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
 
         return results;
       }
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyBlocksStatsByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-        hasGenesis,
-      });
-    }
+    }, 'getManyBlocksStatsByHeights');
   }
 
   /**
@@ -459,10 +436,10 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     txids: string[],
     verbosity: number = 1
   ): Promise<(UniversalTransaction | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = txids.map((txid) => ({
         method: 'getrawtransaction',
-        params: [txid, verbosity], // verbosity 1 = JSON object, 2 = with prevout info
+        params: [txid, verbosity],
       }));
 
       const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
@@ -474,13 +451,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
         }
         return this.normalizeRawTransaction(rawTx);
       });
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyTransactionsByTxids', {
-        provider: this.type,
-        totalTxids: txids.length,
-        verbosity,
-      });
-    }
+    }, 'getManyTransactionsByTxids');
   }
 
   /**
@@ -488,7 +459,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
    * Returns transactions parsed from hex only
    */
   public async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       // Get hex data for all transactions
       const hexRequests = txids.map((txid) => ({
         method: 'getrawtransaction',
@@ -512,75 +483,55 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
           return null;
         }
       });
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getManyTransactionsHexByTxids', {
-        provider: this.type,
-        totalTxids: txids.length,
-      });
-    }
+    }, 'getManyTransactionsHexByTxids');
   }
 
   // ===== NETWORK METHODS =====
 
   public async getBlockchainInfo(): Promise<any> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getblockchaininfo', params: [] }], (calls) =>
         this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getBlockchainInfo', { provider: this.type, baseUrl: this.baseUrl });
-    }
+    }, 'getBlockchainInfo');
   }
 
   public async getNetworkInfo(): Promise<any> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getnetworkinfo', params: [] }], (calls) =>
         this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getNetworkInfo', { provider: this.type, baseUrl: this.baseUrl });
-    }
+    }, 'getNetworkInfo');
   }
 
   public async getMempoolInfo(): Promise<any> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getmempoolinfo', params: [] }], (calls) =>
         this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getMempoolInfo', { provider: this.type, baseUrl: this.baseUrl });
-    }
+    }, 'getMempoolInfo');
   }
 
   public async getRawMempool(verbose: boolean = false): Promise<any> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getrawmempool', params: [verbose] }], (calls) =>
         this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'getRawMempool', { verbose, provider: this.type, baseUrl: this.baseUrl });
-    }
+    }, 'getRawMempool');
   }
 
   public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute(
         [{ method: 'estimatesmartfee', params: [confTarget, estimateMode] }],
         (calls) => this._batchRpcCall(calls)
       );
       return results[0];
-    } catch (error) {
-      BitcoinErrorHandler.handleError(error, 'estimateSmartFee', {
-        confTarget,
-        estimateMode,
-        provider: this.type,
-        baseUrl: this.baseUrl,
-      });
-    }
+    }, 'estimateSmartFee');
   }
 
   // ===== NORMALIZATION METHODS (RAW RPC TO UNIVERSAL) =====

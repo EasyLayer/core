@@ -24,6 +24,11 @@ export class Network extends AggregateRoot {
     this.chain = new Blockchain({ maxSize });
   }
 
+  // Getter for current block height in the chain
+  public get currentBlockHeight(): number | undefined {
+    return this.chain.lastBlockHeight;
+  }
+
   protected toJsonPayload(): any {
     return {
       // Convert Blockchain to an array of blocks
