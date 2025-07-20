@@ -2,7 +2,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { from as copyFrom } from 'pg-copy-streams';
 import { PostgresError } from 'pg-error-enum';
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { QueryFailedError, DataSource } from 'typeorm';
 import type { QueryRunner, Repository, ObjectLiteral } from 'typeorm';
 import { runInTransaction, Propagation, IsolationLevel } from 'typeorm-transactional';
@@ -15,11 +15,11 @@ import { toSnapshot } from './snapshots.model';
 import { EventStoreReadRepository } from './eventstore-read.repository';
 
 @Injectable()
-export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> {
+export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> implements OnModuleDestroy {
   private isSqlite: boolean;
   private snapshotInterval: number = 50;
   private sqliteBatchSize: number = 999;
-  private commitTimer?: ExponentialTimer;
+  private commitTimer: ExponentialTimer | null = null;
 
   constructor(
     private readonly log: AppLogger,
@@ -37,6 +37,11 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     if (config.sqliteBatchSize) {
       this.sqliteBatchSize = config.sqliteBatchSize;
     }
+  }
+
+  async onModuleDestroy() {
+    this.commitTimer?.destroy();
+    this.commitTimer = null;
   }
 
   private getRepository<T extends ObjectLiteral = any>(aggregtaeId: string): Repository<T> {
@@ -227,7 +232,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
   private async retryCommit(aggregates: T[]): Promise<void> {
     if (this.commitTimer) {
       this.commitTimer.destroy();
-      this.commitTimer = undefined;
+      this.commitTimer = null;
     }
 
     // IMPORTANT: Retry logic works only under specific conditions:
@@ -238,7 +243,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
         try {
           await this.commit(aggregates);
           this.commitTimer?.destroy();
-          this.commitTimer = undefined;
+          this.commitTimer = null;
         } catch (error) {
           this.log.debug('Batch commit transaction failed', {
             methodName: 'commit',

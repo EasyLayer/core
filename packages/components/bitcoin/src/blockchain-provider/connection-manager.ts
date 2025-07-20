@@ -1,64 +1,29 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import {
-  exponentialIntervalAsync,
-  ExponentialTimer,
-  IntervalOptions,
-} from '@easylayer/common/exponential-interval-async';
 import { BaseNodeProvider, ProviderNodeOptions } from './node-providers';
-
-interface ReconnectOptions {
-  enabled: boolean;
-  healthCheckInterval: IntervalOptions;
-  reconnectInterval: IntervalOptions;
-}
 
 @Injectable()
 export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   private _providers: Map<string, BaseNodeProvider> = new Map();
   private activeProviderName!: string;
-  private healthCheckTimer?: ExponentialTimer;
 
-  // Single reconnection timer
-  private reconnectionTimer?: ExponentialTimer;
-
-  // Flag to prevent parallel health checks
-  private isHealthCheckRunning = false;
-
-  private readonly reconnectOptions: ReconnectOptions = {
-    enabled: true,
-    healthCheckInterval: {
-      interval: 30000, // Check every 30 seconds initially
-      multiplier: 1.2, // Slight increase on consecutive issues
-      maxInterval: 120000, // Max 2 minutes between checks
-      maxAttempts: Infinity,
-    },
-    reconnectInterval: {
-      interval: 5000, // Start with 5 seconds (Bitcoin nodes slower than EVM)
-      multiplier: 1.5, // Slower backoff for Bitcoin
-      maxInterval: 300000, // Max 5 minutes between attempts (Bitcoin can be slower)
-      maxAttempts: 20, // Limited attempts for Bitcoin
-    },
-  };
+  // Track failed providers to implement round-robin retry
+  private failedProviders: Set<string> = new Set();
+  private reconnectionAttempts: Map<string, number> = new Map();
+  private readonly maxReconnectionAttempts = 3;
 
   constructor(
     providers: BaseNodeProvider[] = [],
-    private readonly log: AppLogger,
-    reconnectOptions?: Partial<ReconnectOptions>
+    private readonly log: AppLogger
   ) {
-    // Merge default options with provided options
-    if (reconnectOptions) {
-      this.reconnectOptions = { ...this.reconnectOptions, ...reconnectOptions };
-    }
-
     providers.forEach((provider: BaseNodeProvider) => {
       const name = provider.uniqName;
       if (this._providers.has(name)) {
-        throw new Error(`An adapter with the name "${name}" has already been added.`);
+        throw new Error(`A provider with the name "${name}" has already been added.`);
       }
       this._providers.set(name, provider);
 
-      this.log.info('Bitcoin-like provider registered', {
+      this.log.debug('Bitcoin provider registered', {
         args: { providerName: name },
       });
     });
@@ -69,50 +34,32 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
-    const failedProviders: Array<{ name: string; error: string }> = [];
+    const allProviders = Array.from(this._providers.values());
 
-    for (const provider of this._providers.values()) {
+    // Try each provider in order until one connects successfully
+    for (const provider of allProviders) {
       try {
         if (await this.tryConnectProvider(provider)) {
           this.activeProviderName = provider.uniqName;
           this.log.info(`Connected to Bitcoin provider: ${provider.constructor.name}`, {
             args: { activeProviderName: this.activeProviderName },
           });
-
-          // Start health monitoring after successful connection
-          this.startHealthMonitoring();
           return;
         }
       } catch (error: any) {
-        failedProviders.push({
-          name: provider.uniqName,
-          error: error.message || 'Unknown error',
+        this.log.warn('Bitcoin provider connection failed, trying next', {
+          args: {
+            providerName: provider.uniqName,
+            error: error.message || 'Unknown error',
+          },
         });
       }
-
-      this.log.warn('Bitcoin provider connect failed, trying next', {
-        args: {
-          providerName: provider.uniqName,
-          lastError: failedProviders[failedProviders.length - 1]?.error,
-        },
-      });
     }
 
-    // Show all failed providers and their errors
-    const errorMessage = `Unable to connect to any Bitcoin providers. Failed attempts:\n${failedProviders
-      .map((fp) => `- ${fp.name}: ${fp.error}`)
-      .join('\n')}`;
-
-    throw new Error(errorMessage);
+    throw new Error('Unable to connect to any Bitcoin providers');
   }
 
   async onModuleDestroy() {
-    // Stop health monitoring
-    this.stopHealthMonitoring();
-
-    // Stop reconnection timer
-    this.stopReconnection();
-
     for (const provider of this._providers.values()) {
       this.log.debug('Disconnecting Bitcoin provider', {
         args: { providerName: provider.uniqName },
@@ -128,182 +75,98 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Starts periodic health monitoring of the active provider
+   * Handle provider failure and attempt recovery
+   * This method is called when any provider operation fails
    */
-  private startHealthMonitoring(): void {
-    if (!this.reconnectOptions.enabled) {
-      return;
-    }
-
-    this.stopHealthMonitoring(); // Stop existing timer if any
-
-    this.healthCheckTimer = exponentialIntervalAsync(async (resetInterval) => {
-      const healthOk = await this.performHealthCheck();
-      if (healthOk) {
-        resetInterval(); // Reset interval on successful health check
-      }
-      // If health check fails, exponential backoff will increase interval
-    }, this.reconnectOptions.healthCheckInterval);
-
-    this.log.debug('Bitcoin health monitoring started with exponential backoff', {
+  public async handleProviderFailure(providerName: string, error: any, methodName: string): Promise<BaseNodeProvider> {
+    this.log.warn('Bitcoin provider operation failed, attempting recovery', {
       args: {
-        initialInterval: this.reconnectOptions.healthCheckInterval.interval,
-        maxInterval: this.reconnectOptions.healthCheckInterval.maxInterval,
+        providerName,
+        methodName,
+        error: error.message || 'Unknown error',
       },
     });
-  }
 
-  /**
-   * Stops health monitoring
-   */
-  private stopHealthMonitoring(): void {
-    if (this.healthCheckTimer) {
-      this.healthCheckTimer.destroy();
-      this.healthCheckTimer = undefined;
-      this.log.debug('Bitcoin health monitoring stopped');
+    const failedProvider = this._providers.get(providerName);
+    if (!failedProvider) {
+      throw new Error(`Bitcoin provider ${providerName} not found`);
     }
-  }
 
-  /**
-   * Starts reconnection process with exponential backoff
-   */
-  private startReconnection(provider: BaseNodeProvider): void {
-    // Stop any existing reconnection
-    this.stopReconnection();
+    // Mark provider as failed
+    this.failedProviders.add(providerName);
 
-    this.reconnectionTimer = exponentialIntervalAsync(async (resetInterval) => {
+    // Increment reconnection attempts
+    const attempts = this.reconnectionAttempts.get(providerName) || 0;
+    this.reconnectionAttempts.set(providerName, attempts + 1);
+
+    // Try to reconnect the current provider first
+    if (attempts < this.maxReconnectionAttempts) {
+      this.log.debug('Attempting to reconnect current Bitcoin provider', {
+        args: { providerName, attempt: attempts + 1 },
+      });
+
       try {
-        const success = await this.attemptReconnection(provider);
-
-        if (success) {
+        // Full provider reconnection for Bitcoin
+        await failedProvider.disconnect();
+        if (await this.tryConnectProvider(failedProvider)) {
           this.log.info('Bitcoin provider reconnection successful', {
-            args: { providerName: this.activeProviderName },
+            args: { providerName },
           });
 
-          // Stop timer on success and restart health monitoring
-          this.stopReconnection();
-          this.startHealthMonitoring();
-          resetInterval(); // Won't be called since we stop timer
+          // Reset failure state on successful reconnection
+          this.failedProviders.delete(providerName);
+          this.reconnectionAttempts.delete(providerName);
+          return failedProvider;
         }
-      } catch (error) {
-        this.log.error('Bitcoin provider reconnection attempt failed', {
-          args: { error, providerName: this.activeProviderName },
+      } catch (reconnectError) {
+        this.log.warn('Bitcoin provider reconnection failed', {
+          args: {
+            providerName,
+            attempt: attempts + 1,
+            error: reconnectError,
+          },
         });
-        // Exponential backoff handles the delay
       }
-    }, this.reconnectOptions.reconnectInterval);
+    }
 
-    this.log.debug('Started Bitcoin provider reconnection with exponential backoff', {
-      args: {
-        providerName: this.activeProviderName,
-        initialInterval: this.reconnectOptions.reconnectInterval.interval,
-        maxInterval: this.reconnectOptions.reconnectInterval.maxInterval,
-      },
-    });
+    // Try switching to another provider
+    return await this.switchToNextAvailableProvider();
   }
 
   /**
-   * Attempts reconnection for Bitcoin provider
+   * Switch to the next available provider in round-robin fashion
    */
-  private async attemptReconnection(provider: BaseNodeProvider): Promise<boolean> {
-    this.log.debug('Attempting Bitcoin provider reconnection', {
-      args: { providerName: this.activeProviderName },
-    });
+  private async switchToNextAvailableProvider(): Promise<BaseNodeProvider> {
+    const allProviders = Array.from(this._providers.values());
+    const currentIndex = allProviders.findIndex((p) => p.uniqName === this.activeProviderName);
 
-    try {
-      await provider.disconnect();
-    } catch (disconnectError) {
-      this.log.warn('Error during disconnect before reconnection', {
-        args: { error: disconnectError, providerName: this.activeProviderName },
+    // Try providers starting from the next one after current
+    for (let i = 1; i <= allProviders.length; i++) {
+      const nextIndex = (currentIndex + i) % allProviders.length;
+      const nextProvider = allProviders[nextIndex];
+
+      if (!nextProvider) continue;
+
+      // Skip recently failed providers unless all providers have failed
+      if (this.failedProviders.has(nextProvider.uniqName) && this.failedProviders.size < allProviders.length) {
+        continue;
+      }
+
+      this.log.debug('Attempting to switch to Bitcoin provider', {
+        args: {
+          fromProvider: this.activeProviderName,
+          toProvider: nextProvider.uniqName,
+        },
       });
-    }
 
-    return await this.tryConnectProvider(provider);
-  }
-
-  /**
-   * Stops any ongoing reconnection
-   */
-  private stopReconnection(): void {
-    if (this.reconnectionTimer) {
-      this.reconnectionTimer.destroy();
-      this.reconnectionTimer = undefined;
-      this.log.debug('Bitcoin reconnection timer stopped');
-    }
-  }
-
-  /**
-   * Performs health check on active provider and attempts reconnection if needed
-   * @returns true if provider is healthy, false otherwise
-   */
-  private async performHealthCheck(): Promise<boolean> {
-    // Prevent parallel health checks
-    if (this.isHealthCheckRunning) {
-      this.log.debug('Bitcoin health check already running, skipping');
-      return true; // Return true to avoid resetting interval
-    }
-
-    this.isHealthCheckRunning = true;
-
-    try {
-      // Save current active provider for consistency
-      const currentActiveProviderName = this.activeProviderName;
-      const provider = this._providers.get(currentActiveProviderName);
-
-      if (!provider) {
-        this.log.error('Active Bitcoin provider not found during health check');
-        return false;
-      }
-
-      // Check HTTP health for Bitcoin node
-      const httpHealthy = await provider.healthcheck();
-      if (!httpHealthy) {
-        this.log.warn('Bitcoin HTTP health check failed for active provider', {
-          args: { providerName: currentActiveProviderName },
-          methodName: 'performHealthCheck',
-        });
-        await this.handleProviderFailure();
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      this.log.error('Bitcoin health check failed', {
-        args: { error, providerName: this.activeProviderName },
-        methodName: 'performHealthCheck',
-      });
-      await this.handleProviderFailure();
-      return false;
-    } finally {
-      this.isHealthCheckRunning = false;
-    }
-  }
-
-  /**
-   * Handles provider failure by attempting to switch to another provider
-   * or reconnecting the current one if it's the only available provider
-   */
-  private async handleProviderFailure(): Promise<void> {
-    this.log.debug('Attempting to handle Bitcoin provider failure', {
-      args: { failedProvider: this.activeProviderName },
-    });
-
-    // Stop health monitoring during failure handling
-    this.stopHealthMonitoring();
-
-    // Check if we have multiple providers
-    const hasMultipleProviders = this._providers.size > 1;
-
-    if (hasMultipleProviders) {
-      // Try to find a working backup provider
-      for (const [name, provider] of this._providers.entries()) {
-        if (name === this.activeProviderName) {
-          continue; // Skip the currently failing provider
-        }
-
-        if (await this.tryConnectProvider(provider)) {
+      try {
+        if (await this.tryConnectProvider(nextProvider)) {
           const oldProvider = this.activeProviderName;
-          this.activeProviderName = name;
+          this.activeProviderName = nextProvider.uniqName;
+
+          // Reset failure state for the new active provider
+          this.failedProviders.delete(nextProvider.uniqName);
+          this.reconnectionAttempts.delete(nextProvider.uniqName);
 
           this.log.info('Successfully switched to backup Bitcoin provider', {
             args: {
@@ -312,38 +175,132 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
             },
           });
 
-          // Restart health monitoring for new provider
-          this.startHealthMonitoring();
-          return;
+          return nextProvider;
         }
-      }
+      } catch (error) {
+        this.log.warn('Failed to switch to Bitcoin provider', {
+          args: {
+            providerName: nextProvider.uniqName,
+            error: error || 'Unknown error',
+          },
+        });
 
-      this.log.error('No working backup Bitcoin providers found');
-    } else {
-      // Only one provider available - attempt to reconnect it
-      this.log.info('Only one Bitcoin provider available, attempting to reconnect', {
-        args: { providerName: this.activeProviderName },
+        // Mark this provider as failed too
+        this.failedProviders.add(nextProvider.uniqName);
+      }
+    }
+
+    // If all providers have failed, reset failure state and try again
+    if (this.failedProviders.size >= allProviders.length) {
+      this.log.warn('All Bitcoin providers have failed, resetting failure state', {
+        args: { totalProviders: allProviders.length },
       });
 
-      await this.attemptSingleProviderReconnection();
+      this.failedProviders.clear();
+      this.reconnectionAttempts.clear();
+
+      // Try the first provider again
+      const firstProvider = allProviders[0];
+      if (firstProvider && (await this.tryConnectProvider(firstProvider))) {
+        this.activeProviderName = firstProvider.uniqName;
+        return firstProvider;
+      }
+    }
+
+    throw new Error('No working Bitcoin providers available');
+  }
+
+  /**
+   * Get the currently active provider
+   * If the provider fails, automatically attempt recovery
+   */
+  public async getActiveProvider(): Promise<BaseNodeProvider> {
+    const provider = this._providers.get(this.activeProviderName);
+    if (!provider) {
+      throw new Error(`Active Bitcoin provider ${this.activeProviderName} not found`);
+    }
+    return provider;
+  }
+
+  /**
+   * Manually switch to a specific provider
+   */
+  public async switchProvider(name: string): Promise<void> {
+    const provider = this._providers.get(name);
+    if (!provider) {
+      throw new Error(`Bitcoin provider with name ${name} not found`);
+    }
+
+    if (await this.tryConnectProvider(provider)) {
+      this.activeProviderName = name;
+
+      // Reset failure state for manually selected provider
+      this.failedProviders.delete(name);
+      this.reconnectionAttempts.delete(name);
+
+      this.log.info(`Manually switched to Bitcoin provider: ${provider.constructor.name}`, {
+        args: { name },
+      });
+    } else {
+      throw new Error(`Failed to connect to Bitcoin provider ${name}`);
     }
   }
 
   /**
-   * Attempts to reconnect the single available provider with exponential backoff
+   * Get provider by name
    */
-  private async attemptSingleProviderReconnection(): Promise<void> {
-    const provider = this._providers.get(this.activeProviderName);
+  public async getProviderByName(name: string): Promise<BaseNodeProvider> {
+    const provider = this._providers.get(name);
     if (!provider) {
-      this.log.error('Active Bitcoin provider not found during reconnection attempt');
-      return;
+      throw new Error(`Bitcoin provider with name ${name} not found`);
     }
-
-    // Start reconnection process
-    this.startReconnection(provider);
+    return provider;
   }
 
-  // Get all connections options for all providers
+  /**
+   * Remove a provider
+   */
+  public async removeProvider(name: string): Promise<boolean> {
+    if (!this._providers.has(name)) {
+      throw new Error(`Bitcoin provider with name ${name} not found`);
+    }
+
+    // If removing active provider, switch to another one
+    if (this.activeProviderName === name) {
+      if (this._providers.size > 1) {
+        try {
+          await this.switchToNextAvailableProvider();
+        } catch (error) {
+          this.log.error('Failed to switch to backup Bitcoin provider after removal', {
+            args: { removedProvider: name, error },
+          });
+          this.activeProviderName = '';
+        }
+      } else {
+        this.activeProviderName = '';
+      }
+    }
+
+    // Disconnect and remove the provider
+    const provider = this._providers.get(name)!;
+    try {
+      await provider.disconnect();
+    } catch (error) {
+      this.log.error('Error disconnecting Bitcoin provider during removal', {
+        args: { error, name },
+      });
+    }
+
+    // Clean up failure tracking
+    this.failedProviders.delete(name);
+    this.reconnectionAttempts.delete(name);
+
+    return this._providers.delete(name);
+  }
+
+  /**
+   * Get connection options for all providers
+   */
   public connectionOptionsForAllProviders<T extends ProviderNodeOptions>(): T[] {
     const options: T[] = [];
     for (const provider of this._providers.values()) {
@@ -353,174 +310,8 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Safe provider removal with active provider check
+   * Try to connect to a provider
    */
-  public async removeProvider(name: string): Promise<boolean> {
-    if (!this._providers.has(name)) {
-      throw new Error(`Bitcoin provider with name ${name} not found`);
-    }
-
-    // If removing active provider
-    if (this.activeProviderName === name) {
-      // Stop monitoring first
-      this.stopHealthMonitoring();
-      this.stopReconnection();
-
-      // If there are other providers, switch to one of them
-      if (this._providers.size > 1) {
-        for (const [otherName, otherProvider] of this._providers.entries()) {
-          if (otherName !== name && (await this.tryConnectProvider(otherProvider))) {
-            this.log.info('Switched to backup Bitcoin provider after removing active one', {
-              args: { removedProvider: name, newProvider: otherName },
-            });
-            this.activeProviderName = otherName;
-            this.startHealthMonitoring(); // Restart monitoring
-            break;
-          }
-        }
-      } else {
-        // This is the only provider, clear active provider
-        this.activeProviderName = '';
-      }
-    }
-
-    // Disconnect and remove the provider
-    await this.disconnectProvider(name);
-    return this._providers.delete(name);
-  }
-
-  /**
-   * Disconnect provider without trying to connect first
-   */
-  public async disconnectProvider(name: string): Promise<void> {
-    const provider = this._providers.get(name);
-    if (!provider) {
-      throw new Error(`Bitcoin provider with name ${name} not found`);
-    }
-
-    // If this is active provider, stop its monitoring
-    if (this.activeProviderName === name) {
-      this.stopHealthMonitoring();
-      this.stopReconnection();
-    }
-
-    try {
-      await provider.disconnect();
-      this.log.warn(`Disconnected from Bitcoin provider: ${provider.constructor.name}`, {
-        args: { name },
-      });
-    } catch (error) {
-      this.log.error('Error disconnecting Bitcoin provider', {
-        args: { error, name },
-      });
-      throw error;
-    }
-  }
-
-  /**
-   * Switch active provider with proper cleanup
-   */
-  public async switchProvider(name: string): Promise<void> {
-    const provider = this._providers.get(name);
-    if (!provider) {
-      throw new Error(`Bitcoin provider with name ${name} not found`);
-    }
-
-    // Stop monitoring and reconnection of current provider
-    this.stopHealthMonitoring();
-    this.stopReconnection();
-
-    if (await this.tryConnectProvider(provider)) {
-      this.activeProviderName = name;
-      this.log.info(`Switched to Bitcoin provider: ${provider.constructor.name}`, {
-        args: { name },
-      });
-
-      // Start monitoring for new provider
-      this.startHealthMonitoring();
-    } else {
-      // If switch failed, resume monitoring of old provider
-      this.startHealthMonitoring();
-      throw new Error(`Failed to switch to Bitcoin provider with name ${name}`);
-    }
-  }
-
-  public async getActiveProvider(): Promise<BaseNodeProvider> {
-    const provider = this._providers.get(this.activeProviderName);
-    if (!provider) {
-      throw new Error(`Bitcoin provider with name ${this.activeProviderName} not found`);
-    }
-    return provider;
-  }
-
-  /**
-   * Get provider by name without auto-connect by default
-   */
-  public async getProviderByName(name: string, autoConnect = false): Promise<BaseNodeProvider> {
-    const provider = this._providers.get(name);
-    if (!provider) {
-      throw new Error(`Bitcoin provider with name ${name} not found`);
-    }
-
-    // If the requested provider is already active, return it
-    if (this.activeProviderName === name) {
-      this.log.debug('Requested Bitcoin provider is already active', {
-        args: { name },
-      });
-      return provider;
-    }
-
-    // Only try to connect if explicitly requested
-    if (!autoConnect) {
-      return provider;
-    }
-
-    this.log.debug('Trying to connect requested Bitcoin provider', {
-      args: { name },
-    });
-
-    // Stop current monitoring during switch
-    this.stopHealthMonitoring();
-    this.stopReconnection();
-
-    // Trying to connect to the requested provider
-    const isConnected = await this.tryConnectProvider(provider);
-    if (!isConnected) {
-      // Restart monitoring of current provider if switch failed
-      this.startHealthMonitoring();
-      throw new Error(`Failed to connect to Bitcoin provider with name ${name}`);
-    }
-
-    // Disconnect the current active provider if necessary
-    if (this.activeProviderName && this.activeProviderName !== name) {
-      const current = this._providers.get(this.activeProviderName)!;
-      this.log.debug('Disconnecting current active Bitcoin provider', {
-        args: { name: this.activeProviderName },
-      });
-      try {
-        await current.disconnect();
-        this.log.info(`Disconnected from Bitcoin provider: ${current.constructor.name}`, {
-          args: { oldProvider: this.activeProviderName },
-        });
-      } catch (error) {
-        this.log.debug('Error while disconnecting old Bitcoin provider', {
-          args: error,
-        });
-      }
-    }
-
-    // Update the active provider
-    this.activeProviderName = name;
-    this.log.info(`Connected to Bitcoin provider: ${provider.constructor.name}`, {
-      args: { name },
-    });
-
-    // Start monitoring for new provider
-    this.startHealthMonitoring();
-
-    return provider;
-  }
-
   private async tryConnectProvider(provider: BaseNodeProvider): Promise<boolean> {
     try {
       await provider.connect();

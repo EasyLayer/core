@@ -1,7 +1,6 @@
 import { ethers } from 'ethers';
 import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
-import type { Hash } from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import { EvmRateLimiter } from './rate-limiter';
 import type {
@@ -42,6 +41,9 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     this.network = options.network;
     this.responseTimeout = options.responseTimeout ?? 5000;
 
+    // Set WebSocket availability flag
+    this._hasWebSocketUrl = !!this.wsUrl;
+
     // Create ethers Network object from our NetworkConfig
     const ethersNetwork = new ethers.Network(this.network.nativeCurrencySymbol, this.network.chainId);
 
@@ -54,7 +56,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
     // Initialize WebSocket if URL provided
     if (this.wsUrl) {
-      this._wsClient = new ethers.WebSocketProvider(this.wsUrl, ethersNetwork);
+      this.initializeWebSocket();
     }
 
     // Initialize rate limiter
@@ -72,34 +74,63 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     };
   }
 
-  get wsClient() {
-    return this._wsClient;
+  /**
+   * Initialize WebSocket connection with event handlers
+   */
+  private initializeWebSocket(): void {
+    if (!this.wsUrl) return;
+
+    try {
+      const ethersNetwork = new ethers.Network(this.network.nativeCurrencySymbol, this.network.chainId);
+      this._wsClient = new ethers.WebSocketProvider(this.wsUrl, ethersNetwork);
+
+      // Set up WebSocket event handlers
+      this._wsClient.websocket.on('open', () => {
+        this._isWebSocketConnected = true;
+      });
+
+      this._wsClient.websocket.on('close', () => {
+        this._isWebSocketConnected = false;
+      });
+
+      this._wsClient.websocket.on('error', (error: any) => {
+        this._isWebSocketConnected = false;
+        // Don't throw here, just log for debugging
+      });
+    } catch (error) {
+      this._isWebSocketConnected = false;
+      // Don't throw during initialization, provider can still work with HTTP
+    }
+  }
+
+  /**
+   * Check WebSocket connection state without making requests
+   */
+  healthcheckWebSocket(): boolean {
+    if (!this._hasWebSocketUrl || !this._wsClient) {
+      return false;
+    }
+
+    // Check WebSocket ready state
+    const ws = this._wsClient.websocket;
+    return ws && ws.readyState === ws.READY_STATE_OPEN && this._isWebSocketConnected;
+  }
+
+  /**
+   * Handle connection errors and attempt recovery
+   */
+  async handleConnectionError(error: any, methodName: string): Promise<void> {
+    // This method is called by the connection manager when operations fail
+    throw error; // Re-throw to let connection manager handle provider switching
   }
 
   public async healthcheck(): Promise<boolean> {
     try {
       const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
 
-      // Try WebSocket first if available, fallback to HTTP
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
-
-      await this.rateLimiter.execute(requests, batchCall);
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  public async healthcheckWebSocket(): Promise<boolean> {
-    if (!this._wsClient) {
-      return false;
-    }
-
-    try {
-      await this._wsClient.getBlockNumber();
-      return true;
+      // Always use HTTP for health checks to avoid WebSocket dependency
+      const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
+      return !!results[0];
     } catch (error) {
       return false;
     }
@@ -123,28 +154,58 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
     } catch (error) {
       throw new Error(`Chain validation failed: ${error}`);
     }
+
+    // Initialize WebSocket if configured
+    if (this._hasWebSocketUrl && !this._wsClient) {
+      this.initializeWebSocket();
+    }
   }
 
   public async disconnect(): Promise<void> {
     await this.rateLimiter.stop();
+
     if (this._wsClient) {
       this._wsClient.destroy();
+      this._wsClient = undefined;
+      this._isWebSocketConnected = false;
     }
+
+    this._httpClient.destroy();
   }
 
   public async reconnectWebSocket(): Promise<void> {
-    if (!this.wsUrl) {
+    if (!this._hasWebSocketUrl || !this.wsUrl) {
       throw new Error('WebSocket URL not available for reconnection');
     }
 
+    // Cleanup existing WebSocket
     if (this._wsClient) {
       this._wsClient.destroy();
+      this._wsClient = undefined;
+      this._isWebSocketConnected = false;
     }
 
-    // Create ethers Network object from our NetworkConfig
-    const ethersNetwork = new ethers.Network(this.network.nativeCurrencySymbol, this.network.chainId);
+    // Reinitialize WebSocket
+    this.initializeWebSocket();
 
-    this._wsClient = new ethers.WebSocketProvider(this.wsUrl, ethersNetwork);
+    // Wait a bit for connection to establish
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    if (!this.healthcheckWebSocket()) {
+      throw new Error('Failed to reconnect WebSocket');
+    }
+  }
+
+  /**
+   * Execute request with automatic error handling and provider switching
+   */
+  private async executeWithErrorHandling<T>(operation: () => Promise<T>, methodName: string): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      await this.handleConnectionError(error, methodName);
+      throw error; // This will trigger provider switching in connection manager
+    }
   }
 
   /**
@@ -190,8 +251,8 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
    * Batch WebSocket call method for multiple requests via WebSocket
    */
   private async _batchWsCall(calls: Array<{ method: string; params: any[] }>): Promise<any[]> {
-    if (!this._wsClient) {
-      throw new Error('WebSocket client not available');
+    if (!this._wsClient || !this.healthcheckWebSocket()) {
+      throw new Error('WebSocket client not available or not connected');
     }
 
     const results = await Promise.all(calls.map((call) => this._wsClient!.send(call.method, call.params)));
@@ -213,7 +274,11 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
    * Returns a subscription object with unsubscribe method
    */
   public subscribeToNewBlocks(callback: (blockNumber: number) => void): { unsubscribe: () => void } {
-    if (!this._wsClient) {
+    if (!this._hasWebSocketUrl) {
+      throw new Error('WebSocket is not configured for this provider');
+    }
+
+    if (!this._wsClient || !this.healthcheckWebSocket()) {
       throw new Error('WebSocket not available for subscriptions');
     }
 
@@ -235,18 +300,18 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
   // ===== BLOCK METHODS =====
 
   public async getBlockHeight(): Promise<number> {
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = [{ method: 'eth_blockNumber', params: [] as any[] }];
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      // Prefer WebSocket if available and connected, otherwise use HTTP
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const results = await this.rateLimiter.execute(requests, batchCall);
       return parseInt(results[0], 16);
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getBlockHeight', { provider: this.type, httpUrl: this.httpUrl });
-    }
+    }, 'getBlockHeight');
   }
 
   public async getManyBlocksByHeights(
@@ -257,15 +322,17 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, fullTransactions],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      // Prefer WebSocket if available and connected, otherwise use HTTP
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
@@ -285,13 +352,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
         return normalizedBlock;
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-        fullTransactions,
-      });
-    }
+    }, 'getManyBlocksByHeights');
   }
 
   public async getManyBlocksByHashes(
@@ -302,33 +363,28 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({
         method: 'eth_getBlockByHash',
         params: [hash, fullTransactions],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
-
-      const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       // Preserve order: rawBlocks[i] corresponds to hashes[i]
       // Don't filter - return null for missing blocks
+      const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
+
       return rawBlocks.map((block) => {
         if (block === null || block === undefined || block.error) {
           return null;
         }
         return this.normalizeRawBlock(block);
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksByHashes', {
-        provider: this.type,
-        totalHashes: hashes.length,
-        fullTransactions,
-      });
-    }
+    }, 'getManyBlocksByHashes');
   }
 
   public async getManyBlocksStatsByHeights(heights: number[]): Promise<(UniversalBlockStats | null)[]> {
@@ -336,15 +392,16 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockByNumber',
         params: [`0x${height.toString(16)}`, false],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
@@ -364,12 +421,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
 
         return normalizedStats;
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksStatsByHeights', {
-        provider: this.type,
-        totalHeights: heights.length,
-      });
-    }
+    }, 'getManyBlocksStatsByHeights');
   }
 
   public async getManyBlocksReceipts(heights: number[]): Promise<UniversalTransactionReceipt[][]> {
@@ -377,15 +429,16 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       return [];
     }
 
-    try {
+    return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({
         method: 'eth_getBlockReceipts',
         params: [`0x${height.toString(16)}`],
       }));
 
-      const batchCall = this._wsClient
-        ? (calls: typeof requests) => this._batchWsCall(calls)
-        : (calls: typeof requests) => this._batchRpcCall(calls);
+      const batchCall =
+        this._wsClient && this.healthcheckWebSocket()
+          ? (calls: typeof requests) => this._batchWsCall(calls)
+          : (calls: typeof requests) => this._batchRpcCall(calls);
 
       const rawBlocksReceipts = await this.rateLimiter.execute(requests, batchCall);
 
@@ -409,12 +462,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
           return normalizedReceipt;
         });
       });
-    } catch (error) {
-      BlockchainErrorHandler.handleError(error, 'getManyBlocksReceipts', {
-        provider: this.type,
-        totalBlocks: heights.length,
-      });
-    }
+    }, 'getManyBlocksReceipts');
   }
 
   // ===== NORMALIZATION METHODS =====
@@ -433,7 +481,7 @@ export class EtherJSProvider extends BaseNodeProvider<EtherJSProviderOptions> {
       size: parseInt(rawBlock.size, 16),
       gasLimit,
       gasUsed,
-      gasUsedPercentage: Math.round(gasUsedPercentage * 100) / 100, // Round to 2 decimal places
+      gasUsedPercentage: Math.round(gasUsedPercentage * 100) / 100,
       timestamp: parseInt(rawBlock.timestamp, 16),
       transactionCount: rawBlock.transactions?.length || 0,
       baseFeePerGas: rawBlock.baseFeePerGas,
