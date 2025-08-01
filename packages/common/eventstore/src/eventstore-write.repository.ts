@@ -426,6 +426,11 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
   private async onSaveUpdateSnapshot(aggregate: T) {
     try {
+      // Check if snapshots are enabled for this aggregate
+      if (!aggregate.snapshotsEnabled) {
+        return;
+      }
+
       if (aggregate.versionsFromSnapshot < this.snapshotInterval) {
         return;
       }
@@ -445,6 +450,11 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
           version: aggregate.version,
         },
       });
+
+      // Prune old snapshots if enabled for this aggregate
+      if (aggregate.pruneOldSnapshots) {
+        await this.pruneOldSnapshots(aggregate.aggregateId, snapshot.blockHeight);
+      }
     } catch (error) {
       if (error instanceof QueryFailedError) {
         const driverError = error.driverError as any;
@@ -512,6 +522,77 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     }
 
     await query.execute();
+  }
+
+  /**
+   * Removes all snapshots for the given aggregate that have blockHeight lower than the current snapshot.
+   * This helps to save storage space by keeping only the latest snapshot.
+   *
+   * @param aggregateId - The ID of the aggregate
+   * @param currentBlockHeight - The block height of the current (latest) snapshot
+   */
+  private async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number): Promise<void> {
+    try {
+      const repository = this.getRepository('snapshots');
+
+      // Delete all snapshots with blockHeight lower than current
+      const result = await repository
+        .createQueryBuilder()
+        .delete()
+        .where('aggregateId = :aggregateId', { aggregateId })
+        .andWhere('blockHeight < :blockHeight', { blockHeight: currentBlockHeight })
+        .execute();
+
+      this.log.debug('Old snapshots pruned', {
+        args: {
+          aggregateId,
+          currentBlockHeight,
+          deletedCount: result.affected || 0,
+        },
+      });
+    } catch (error) {
+      this.log.debug('Error during old snapshots pruning', {
+        methodName: 'pruneOldSnapshots',
+        args: { error, aggregateId, currentBlockHeight },
+      });
+    }
+  }
+
+  /**
+   * Prunes (deletes) old events for the given aggregate up to the specified block height.
+   * Only events with blockHeight < pruneToBlockHeight will be deleted.
+   *
+   * @param aggregate - The aggregate to prune events for
+   * @param pruneToBlockHeight - Delete all events below this block height
+   * @returns Promise with number of deleted events
+   *
+   * @throws Error if aggregate doesn't allow events pruning
+   * @throws Error if no snapshot exists at or after pruneToBlockHeight for safety
+   */
+  async pruneEventsToBlockHeight(aggregate: T, pruneToBlockHeight: number): Promise<void> {
+    // Check if pruning is allowed for this aggregate
+    if (!aggregate.allowEventsPruning) {
+      throw new Error(`Event pruning is disabled for aggregate: ${aggregate.aggregateId}`);
+    }
+
+    // Execute the pruning
+    const repository = this.getRepository(aggregate.aggregateId);
+
+    const result = await repository
+      .createQueryBuilder()
+      .delete()
+      .where('blockHeight < :blockHeight', { blockHeight: pruneToBlockHeight })
+      .execute();
+
+    const deletedCount = result.affected || 0;
+
+    this.log.info('Events pruned successfully', {
+      args: {
+        aggregateId: aggregate.aggregateId,
+        prunedToBlock: pruneToBlockHeight,
+        deletedEvents: deletedCount,
+      },
+    });
   }
 
   private handleDatabaseError(error: any, aggregate: T): void {

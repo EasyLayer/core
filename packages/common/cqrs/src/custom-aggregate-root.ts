@@ -28,10 +28,36 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   protected _lastBlockHeight: number;
   private _versionsFromSnapshot: number = 0;
 
-  constructor(aggregateId: string, lastBlockHeight = -1) {
+  // Snapshot control parameters
+  private _snapshotsEnabled: boolean = true;
+  private _pruneOldSnapshots: boolean = false;
+
+  // Event pruning control parameter
+  private _allowEventsPruning: boolean = false;
+
+  constructor(
+    aggregateId: string,
+    lastBlockHeight = -1,
+    options?: {
+      snapshotsEnabled?: boolean;
+      pruneOldSnapshots?: boolean;
+      allowEventsPruning?: boolean;
+    }
+  ) {
     if (!aggregateId) throw new Error('aggregateId is required');
     this._aggregateId = aggregateId;
     this._lastBlockHeight = lastBlockHeight;
+
+    // Set snapshot options if provided
+    if (options?.snapshotsEnabled !== undefined) {
+      this._snapshotsEnabled = options.snapshotsEnabled;
+    }
+    if (options?.pruneOldSnapshots !== undefined) {
+      this._pruneOldSnapshots = options.pruneOldSnapshots;
+    }
+    if (options?.allowEventsPruning !== undefined) {
+      this._allowEventsPruning = options.allowEventsPruning;
+    }
   }
 
   get aggregateId() {
@@ -46,6 +72,38 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   get versionsFromSnapshot() {
     return this._versionsFromSnapshot;
   }
+
+  /**
+   * Indicates whether old events can be pruned for this aggregate.
+   * When enabled, old events beyond the retention period can be safely deleted
+   * to save storage space, provided there are appropriate snapshots.
+   * When disabled, all events are preserved for complete audit trail.
+   *
+   * IMPORTANT: Event pruning should only be enabled for aggregates that:
+   * 1. Can safely reconstruct state from any point in event history
+   * 2. Don't require complete event audit trail for compliance
+   */
+  get allowEventsPruning(): boolean {
+    return this._allowEventsPruning;
+  }
+
+  /**
+   * Indicates whether snapshots should be created for this aggregate.
+   * When disabled, the aggregate will only rely on event sourcing for state reconstruction.
+   */
+  get snapshotsEnabled(): boolean {
+    return this._snapshotsEnabled;
+  }
+
+  /**
+   * Indicates whether old snapshots should be automatically pruned when creating new ones.
+   * When enabled, only the latest snapshot is kept to save storage space.
+   * When disabled, all snapshots are preserved for historical access.
+   */
+  get pruneOldSnapshots(): boolean {
+    return this._pruneOldSnapshots;
+  }
+
   // Method to reset snapshot counter (called after creating snapshot)
   public resetSnapshotCounter(): void {
     this._versionsFromSnapshot = 0;

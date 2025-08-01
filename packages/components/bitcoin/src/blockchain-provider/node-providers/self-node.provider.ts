@@ -2,7 +2,13 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
-import type { NetworkConfig, UniversalBlock, UniversalTransaction, UniversalBlockStats } from './interfaces';
+import type {
+  NetworkConfig,
+  UniversalBlock,
+  UniversalTransaction,
+  UniversalBlockStats,
+  UniversalMempoolTransaction,
+} from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import { HexTransformer } from './hex-transformer';
 import { RateLimiter } from './rate-limiter';
@@ -506,6 +512,16 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     }, 'getNetworkInfo');
   }
 
+  public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const results = await this.rateLimiter.execute(
+        [{ method: 'estimatesmartfee', params: [confTarget, estimateMode] }],
+        (calls) => this._batchRpcCall(calls)
+      );
+      return results[0];
+    }, 'estimateSmartFee');
+  }
+
   public async getMempoolInfo(): Promise<any> {
     return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute([{ method: 'getmempoolinfo', params: [] }], (calls) =>
@@ -524,14 +540,16 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     }, 'getRawMempool');
   }
 
-  public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
+  public async getMempoolEntries(txids: string[]): Promise<(UniversalMempoolTransaction | null)[]> {
     return this.executeWithErrorHandling(async () => {
-      const results = await this.rateLimiter.execute(
-        [{ method: 'estimatesmartfee', params: [confTarget, estimateMode] }],
-        (calls) => this._batchRpcCall(calls)
-      );
-      return results[0];
-    }, 'estimateSmartFee');
+      const requests = txids.map((txid) => ({ method: 'getmempoolentry', params: [txid] }));
+      const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
+
+      return results.map((entry, index) => {
+        if (entry === null) return null;
+        return this.normalizeMempoolEntry(txids[index]!, entry);
+      });
+    }, 'getMempoolEntries');
   }
 
   // ===== NORMALIZATION METHODS (RAW RPC TO UNIVERSAL) =====
@@ -636,6 +654,38 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       avgtxsize: rawStats.avgtxsize,
       total_stripped_size: rawStats.total_stripped_size,
       witness_txs: rawStats.witness_txs,
+    };
+  }
+
+  /**
+   * Normalize raw Bitcoin Core mempool entry response to MempoolTransaction
+   */
+  private normalizeMempoolEntry(txid: string, entry: any): UniversalMempoolTransaction {
+    return {
+      txid,
+      wtxid: entry.wtxid,
+      size: entry.size || 0,
+      vsize: entry.vsize || 0,
+      weight: entry.weight || 0,
+      fee: entry.fee || 0,
+      modifiedfee: entry.modifiedfee || 0,
+      time: entry.time || Math.floor(Date.now() / 1000),
+      height: entry.height || -1,
+      depends: entry.depends || [],
+      descendantcount: entry.descendantcount || 0,
+      descendantsize: entry.descendantsize || 0,
+      descendantfees: entry.descendantfees || 0,
+      ancestorcount: entry.ancestorcount || 0,
+      ancestorsize: entry.ancestorsize || 0,
+      ancestorfees: entry.ancestorfees || 0,
+      fees: {
+        base: entry.fees?.base || entry.fee || 0,
+        modified: entry.fees?.modified || entry.modifiedfee || 0,
+        ancestor: entry.fees?.ancestor || entry.ancestorfees || 0,
+        descendant: entry.fees?.descendant || entry.descendantfees || 0,
+      },
+      bip125_replaceable: entry['bip125-replaceable'] || false,
+      unbroadcast: entry.unbroadcast || false,
     };
   }
 }

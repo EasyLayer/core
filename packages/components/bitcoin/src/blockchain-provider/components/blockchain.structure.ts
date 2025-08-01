@@ -47,9 +47,11 @@ export class Blockchain {
   private _size: number = 0;
   // _maxSize - Maximum number of blocks allowed in the blockchain at any given time.
   private _maxSize: number;
+  private _baseBlockHeight: number;
 
-  constructor({ maxSize }: { maxSize: number }) {
+  constructor({ maxSize, baseBlockHeight = -1 }: { maxSize: number; baseBlockHeight?: number }) {
     this._maxSize = maxSize;
+    this._baseBlockHeight = baseBlockHeight;
   }
 
   get head() {
@@ -99,7 +101,7 @@ export class Blockchain {
 
   /**
    * Gets the height of the last block in the chain.
-   * @returns {number} The height of the last block, or -1 if the chain is empty.
+   * @returns {number} The height of the last block, or this._baseBlockHeight if the chain is empty.
    * Complexity: O(1)
    */
   // eslint-disable-next-line getter-return
@@ -262,17 +264,17 @@ export class Blockchain {
    * The block with the given height becomes the new tail of the chain.
    *
    * @param {number} height - The height up to which the chain should be truncated.
-   *                          Passing `-1` will clear the entire chain.
+   *                          Passing this._baseBlockHeight will clear the entire chain.
    * @returns {boolean} Returns `true` if truncation was successful or the chain is already in the desired state, `false` otherwise.
    * Complexity O(n), where n is the number of blocks to check from the tail to the specified height.
    */
   public truncateToBlock(height: number): boolean {
-    if (height < -1) {
+    if (height < this._baseBlockHeight) {
       // Invalid height value
       return false;
     }
 
-    if (height === -1) {
+    if (height === this._baseBlockHeight) {
       // Special case: clearing the entire chain
       if (this._head) {
         this._head = null;
@@ -285,7 +287,7 @@ export class Blockchain {
     }
 
     if (!this._tail) {
-      // Chain is empty and height is not -1
+      // Chain is empty and height is not this._baseBlockHeight
       // Cannot truncate to a specific height
       return false;
     }

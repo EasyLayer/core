@@ -13,20 +13,90 @@ export class Network extends AggregateRoot {
   private __maxSize: number;
   public chain: Blockchain;
 
-  constructor({ maxSize, aggregateId }: { maxSize: number; aggregateId: string }) {
-    super(aggregateId);
+  constructor({
+    maxSize,
+    aggregateId,
+    blockHeight,
+    options,
+  }: {
+    maxSize: number;
+    aggregateId: string;
+    blockHeight: number;
+    options?: {
+      snapshotsEnabled?: boolean;
+      pruneOldSnapshots?: boolean;
+      allowEventsPruning?: boolean;
+    };
+  }) {
+    super(aggregateId, blockHeight, options);
 
     this.__maxSize = maxSize;
     // IMPORTANT: 'maxSize' must be NOT LESS than the number of blocks in a single batch when iterating over BlocksQueue.
     // The number of blocks in a batch depends on the block size,
     // so we must take the smallest blocks in the network,
     // and make sure that they fit into a single batch less than the value of 'maxSize' .
-    this.chain = new Blockchain({ maxSize });
+    this.chain = new Blockchain({ maxSize, baseBlockHeight: blockHeight });
   }
+
+  // ===== GETTERS =====
 
   // Getter for current block height in the chain
   public get currentBlockHeight(): number | undefined {
     return this.chain.lastBlockHeight;
+  }
+
+  /**
+   * Gets current chain statistics
+   * Complexity: O(1)
+   */
+  public getChainStats(): {
+    size: number;
+    maxSize: number;
+    currentHeight?: number;
+    firstHeight?: number;
+    isEmpty: boolean;
+    isFull: boolean;
+  } {
+    return {
+      size: this.chain.size,
+      maxSize: this.__maxSize,
+      currentHeight: this.chain.lastBlockHeight,
+      firstHeight: this.chain.head?.block.blockNumber,
+      isEmpty: this.chain.size === 0,
+      isFull: this.chain.size >= this.__maxSize,
+    };
+  }
+
+  /**
+   * Gets the last block in chain
+   * Complexity: O(1)
+   */
+  public getLastBlock(): LightBlock | undefined {
+    return this.chain.lastBlock;
+  }
+
+  /**
+   * Gets specific block by height
+   * Complexity: O(n) where n = number of blocks in chain
+   */
+  public getBlockByHeight(height: number): LightBlock | null {
+    return this.chain.findBlockByHeight(height);
+  }
+
+  /**
+   * Gets last N blocks in chronological order
+   * Complexity: O(n) where n = requested count
+   */
+  public getLastNBlocks(count: number): LightBlock[] {
+    return this.chain.getLastNBlocks(count);
+  }
+
+  /**
+   * Gets all blocks in chain
+   * Complexity: O(n) where n = number of blocks in chain
+   */
+  public getAllBlocks(): LightBlock[] {
+    return this.chain.toArray();
   }
 
   protected toJsonPayload(): any {
@@ -38,7 +108,10 @@ export class Network extends AggregateRoot {
 
   protected fromSnapshot(state: any): void {
     if (state.chain && Array.isArray(state.chain)) {
-      this.chain = new Blockchain({ maxSize: this.__maxSize });
+      this.chain = new Blockchain({
+        maxSize: this.__maxSize,
+        baseBlockHeight: this._lastBlockHeight,
+      });
       this.chain.fromArray(state.chain);
       // Recovering links in Blockchain
       restoreChainLinks(this.chain.head);
@@ -59,8 +132,6 @@ export class Network extends AggregateRoot {
 
   // Method to clear all blockchain data(for database cleaning)
   public async clearChain({ requestId }: { requestId: string }) {
-    this.chain.truncateToBlock(-1); // Clear all blocks
-
     await this.apply(
       new EvmNetworkClearedEvent({
         aggregateId: this.aggregateId,
@@ -179,5 +250,9 @@ export class Network extends AggregateRoot {
     // Here we cut full at once in height
     // This method is idempotent
     this.chain.truncateToBlock(Number(blockHeight));
+  }
+
+  private onEvmNetworkClearedEvent({ payload }: EvmNetworkClearedEvent) {
+    this.chain.truncateToBlock(-1);
   }
 }
