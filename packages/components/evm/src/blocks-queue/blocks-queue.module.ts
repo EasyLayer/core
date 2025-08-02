@@ -11,7 +11,6 @@ export interface BlocksQueueModuleOptions {
   basePreloadCount: number;
   maxBlockHeight: number;
   maxQueueSize: number;
-  minTransferSize: number;
   queueLoaderStrategyName: string;
   queueLoaderRequestBlocksBatchSize: number;
   queueIteratorBlocksBatchSize: number;

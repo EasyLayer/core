@@ -1,5 +1,12 @@
 import type { Transaction, TransactionReceipt } from './transaction.interfaces';
 
+export type LightBlock = {
+  blockNumber: number;
+  hash: string;
+  parentHash: string;
+  transactions: string[];
+};
+
 export interface Withdrawal {
   index: string;
   validatorIndex: string;

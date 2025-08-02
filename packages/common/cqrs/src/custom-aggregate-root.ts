@@ -18,7 +18,7 @@ export type HistoryEvent<E extends BasicEvent<EventBasePayload>> = {
 
 interface StoredEvent<E extends BasicEvent<EventBasePayload>> {
   event: E;
-  isSaved: boolean;
+  isSaved: boolean; // Saved to database (and these events should be pblished)
 }
 
 export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>> {
@@ -124,39 +124,52 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     await this.publish(event);
   }
 
+  /**
+   * Publish all uncommitted events and then clear them
+   * This is the main commit method called from repository
+   */
   public async commit(): Promise<void> {
     const events = this.getUncommittedEvents();
-    await this.publishAll(events);
-    this.uncommit();
+    if (events.length > 0) {
+      await this.publishAll(events);
+    }
+    this.uncommit(); // Clear all events after successful publish
   }
 
   /**
-   * Returns all events (both saved and unsaved)
+   * Get events that are saved but not yet published (uncommitted)
+   * These are all saved events since uncommit() clears published ones
    */
   public getUncommittedEvents(): E[] {
-    return this[INTERNAL_EVENTS].map((wrapper) => wrapper.event);
+    return this[INTERNAL_EVENTS].filter((wrapper) => wrapper.isSaved).map((wrapper) => wrapper.event);
   }
 
   /**
-   * Clears all stored events
+   * Clear all stored events
+   * Called after successful publish or for rollback scenarios
    */
   public uncommit(): void {
     this[INTERNAL_EVENTS].length = 0;
   }
 
   /**
-   * Returns only events not yet saved to the database,
-   * marking them as saved in the process
+   * Get events that need to be saved to database
+   * Does NOT change state - just returns unsaved events
    */
   public getUnsavedEvents(): E[] {
-    const result: E[] = [];
+    return this[INTERNAL_EVENTS].filter((wrapper) => !wrapper.isSaved).map((wrapper) => wrapper.event);
+  }
+
+  /**
+   * Mark events as saved to database
+   * Call this ONLY after successful database save
+   */
+  public markEventsAsSaved(): void {
     for (const wrapper of this[INTERNAL_EVENTS]) {
       if (!wrapper.isSaved) {
-        result.push(wrapper.event);
         wrapper.isSaved = true;
       }
     }
-    return result;
   }
 
   public async loadFromHistory<T extends E>(history: HistoryEvent<T>[]): Promise<void> {
@@ -169,6 +182,10 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     }
   }
 
+  /**
+   * Apply new event (not from history)
+   * Events start as unsaved
+   */
   public async apply<T extends E>(
     event: T,
     optionsOrIsFromHistory?: boolean | { fromHistory?: boolean; skipHandler?: boolean; status?: EventStatus }
@@ -186,14 +203,21 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     }
 
     if (!isFromHistory) {
-      // IMPORTANT: when we add event first time - isSaved = false
-      this[INTERNAL_EVENTS].push({ event, isSaved: false });
+      // New event: not saved
+      this[INTERNAL_EVENTS].push({
+        event,
+        isSaved: false,
+      });
+    } else if (isFromHistory && status === EventStatus.UNPUBLISHED) {
+      // From history: saved but not published - add to array for future publishing
+      this[INTERNAL_EVENTS].push({
+        event,
+        isSaved: true,
+      });
     }
 
-    if (isFromHistory && status === EventStatus.UNPUBLISHED) {
-      // IMPORTANT: when we add event from history - this means it come from db
-      this[INTERNAL_EVENTS].push({ event, isSaved: true });
-    }
+    // IMPORTANT: If status is PUBLISHED or RECEIVED, we don't add to array
+    // These events are already published, we only need them for state reconstruction
 
     if (!skipHandler) {
       const handler = this.getEventHandler(event);
@@ -230,11 +254,9 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     aggregateId: string;
     version: number;
     blockHeight: number;
-    payload: any;
+    payload: Record<string, any>;
   }): void {
-    const deserializedPayload = JSON.parse(payload);
-
-    this.constructor = { name: deserializedPayload.__type } as typeof Object.constructor;
+    this.constructor = { name: payload.__type } as typeof Object.constructor;
 
     if (!aggregateId) {
       throw new Error('aggregate Id is missed');
@@ -257,7 +279,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     // but a method inside an instance of the base aggregate.
     // const instance = Object.create(CustomAggregateRoot.prototype);
     // Object.assign(this, instance);
-    this.fromSnapshot(deserializedPayload);
+    this.fromSnapshot(payload);
   }
 
   // IMPORTANT: This method can be overridden by user for custom transformations

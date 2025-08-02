@@ -20,7 +20,6 @@ describe('BlocksQueueModule', () => {
     maxBlockHeight: 1,
     queueLoaderRequestBlocksBatchSize: 10 * 1024 * 1024,
     maxQueueSize: 1024,
-    minTransferSize: 1024,
     queueLoaderStrategyName: 'pull',
     queueIteratorBlocksBatchSize: 2,
     basePreloadCount: 1 * 1024 * 1024,

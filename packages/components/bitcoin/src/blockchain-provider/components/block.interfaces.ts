@@ -1,5 +1,11 @@
 import type { Transaction } from './transaction.interfaces';
 
+export interface LightBlock {
+  height: number;
+  hash: string;
+  previousblockhash: string;
+  tx: string[];
+}
 export interface Block {
   height: number; // REQUIRED - always must be known
   hash: string;

@@ -1,6 +1,6 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
-import { Blockchain, restoreChainLinks } from '../../blockchain-provider';
+import { Blockchain } from '../../blockchain-provider';
 import {
   EvmNetworkInitializedEvent,
   EvmNetworkBlocksAddedEvent,
@@ -9,6 +9,9 @@ import {
 } from '../events';
 import { BlockchainValidationError } from './errors';
 
+/**
+ * Network for EVM blockchain storage with fast height lookups.
+ */
 export class Network extends AggregateRoot {
   private __maxSize: number;
   public chain: Blockchain;
@@ -101,20 +104,19 @@ export class Network extends AggregateRoot {
 
   protected toJsonPayload(): any {
     return {
-      // Convert Blockchain to an array of blocks
+      // Convert Blockchain to an array of blocks for serialization
       chain: this.chain.toArray(),
+      maxSize: this.__maxSize,
     };
   }
 
   protected fromSnapshot(state: any): void {
     if (state.chain && Array.isArray(state.chain)) {
       this.chain = new Blockchain({
-        maxSize: this.__maxSize,
+        maxSize: state.maxSize || this.__maxSize,
         baseBlockHeight: this._lastBlockHeight,
       });
       this.chain.fromArray(state.chain);
-      // Recovering links in Blockchain
-      restoreChainLinks(this.chain.head);
     }
 
     Object.setPrototypeOf(this, Network.prototype);

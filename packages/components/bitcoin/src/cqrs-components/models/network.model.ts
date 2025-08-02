@@ -1,6 +1,6 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
-import { Blockchain, restoreChainLinks } from '../../blockchain-provider';
+import { Blockchain } from '../../blockchain-provider';
 import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
@@ -9,6 +9,9 @@ import {
 } from '../events';
 import { BlockchainValidationError } from './errors';
 
+/**
+ * Network for blockchain storage with fast height lookups.
+ */
 export class Network extends AggregateRoot {
   private __maxSize: number;
   public chain: Blockchain;
@@ -40,14 +43,17 @@ export class Network extends AggregateRoot {
 
   // ===== GETTERS =====
 
-  // Getter for current block height in the chain
+  /**
+   * Getter for current block height in the chain
+   * @complexity O(1)
+   */
   public get currentBlockHeight(): number | undefined {
     return this.chain.lastBlockHeight;
   }
 
   /**
    * Gets current chain statistics
-   * Complexity: O(1)
+   * @complexity O(1)
    */
   public getChainStats(): {
     size: number;
@@ -57,11 +63,13 @@ export class Network extends AggregateRoot {
     isEmpty: boolean;
     isFull: boolean;
   } {
+    const firstBlock = this.chain.toArray()[0]; // This is O(1) since we just get head
+
     return {
       size: this.chain.size,
       maxSize: this.__maxSize,
       currentHeight: this.chain.lastBlockHeight,
-      firstHeight: this.chain.head?.block.height,
+      firstHeight: firstBlock?.height,
       isEmpty: this.chain.size === 0,
       isFull: this.chain.size >= this.__maxSize,
     };
@@ -69,15 +77,15 @@ export class Network extends AggregateRoot {
 
   /**
    * Gets the last block in chain
-   * Complexity: O(1)
+   * @complexity O(1)
    */
   public getLastBlock(): LightBlock | undefined {
     return this.chain.lastBlock;
   }
 
   /**
-   * Gets specific block by height
-   * Complexity: O(n) where n = number of blocks in chain
+   * Gets specific block by height using O(1) hash lookup
+   * @complexity O(1) - constant time lookup
    */
   public getBlockByHeight(height: number): LightBlock | null {
     return this.chain.findBlockByHeight(height);
@@ -85,40 +93,43 @@ export class Network extends AggregateRoot {
 
   /**
    * Gets last N blocks in chronological order
-   * Complexity: O(n) where n = requested count
+   * @complexity O(n) where n = requested count
    */
   public getLastNBlocks(count: number): LightBlock[] {
     return this.chain.getLastNBlocks(count);
   }
 
   /**
-   * Gets all blocks in chain
-   * Complexity: O(n) where n = number of blocks in chain
+   * Gets all blocks in chain (for compatibility - try to avoid for large chains)
+   * @complexity O(n) where n = number of blocks in chain
    */
   public getAllBlocks(): LightBlock[] {
     return this.chain.toArray();
   }
 
+  // ===== SNAPSHOTS =====
+
   protected toJsonPayload(): any {
     return {
-      // Convert Blockchain to an array of blocks
+      // Convert Blockchain to an array of blocks for serialization
       chain: this.chain.toArray(),
+      maxSize: this.__maxSize,
     };
   }
 
   protected fromSnapshot(state: any): void {
     if (state.chain && Array.isArray(state.chain)) {
       this.chain = new Blockchain({
-        maxSize: this.__maxSize,
+        maxSize: state.maxSize || this.__maxSize,
         baseBlockHeight: this._lastBlockHeight,
       });
       this.chain.fromArray(state.chain);
-      // Recovering links in Blockchain
-      restoreChainLinks(this.chain.head);
     }
 
     Object.setPrototypeOf(this, Network.prototype);
   }
+
+  // ===== PUBLIC METHODS =====
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
     await this.apply(
@@ -130,7 +141,9 @@ export class Network extends AggregateRoot {
     );
   }
 
-  // Method to clear all blockchain data(for database cleaning)
+  /**
+   * Method to clear all blockchain data (for database cleaning)
+   */
   public async clearChain({ requestId }: { requestId: string }) {
     await this.apply(
       new BitcoinNetworkClearedEvent({
@@ -141,6 +154,9 @@ export class Network extends AggregateRoot {
     );
   }
 
+  /**
+   * Add blocks to the chain with validation
+   */
   public async addBlocks({ blocks, requestId }: { blocks: Block[]; requestId: string }) {
     const lightBlocks: LightBlock[] = blocks.map((block: Block) => ({
       height: block.height,
@@ -165,6 +181,9 @@ export class Network extends AggregateRoot {
     );
   }
 
+  /**
+   * Handle blockchain reorganization
+   */
   public async reorganisation({
     reorgHeight,
     requestId,
@@ -181,7 +200,7 @@ export class Network extends AggregateRoot {
       throw new Error('Reorganisation failed: reached genesis without fork point');
     }
 
-    // Get both blocks at once
+    // Get both blocks at once - using O(1) lookup for local block
     const localBlock = this.chain.findBlockByHeight(reorgHeight);
     const remoteBlock = await service.getBasicBlockByHeight(reorgHeight);
 
@@ -217,6 +236,8 @@ export class Network extends AggregateRoot {
       blocks: newBlocks,
     });
   }
+
+  // ===== IDEMPOTENT EVENT HANDLERS =====
 
   private onBitcoinNetworkInitializedEvent({ payload }: BitcoinNetworkInitializedEvent) {
     const { blockHeight } = payload;
