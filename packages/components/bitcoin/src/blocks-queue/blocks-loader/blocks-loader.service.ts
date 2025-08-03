@@ -10,12 +10,17 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   private _isLoading: boolean = false;
   private _loadingStrategy: BlocksLoadingStrategy | null = null;
   private _timer: ExponentialTimer | null = null;
+  private readonly _monitoringInterval: number;
 
   constructor(
     private readonly log: AppLogger,
     private readonly blockchainProviderService: BlockchainProviderService,
     private readonly config: any
-  ) {}
+  ) {
+    // Calculate monitoring interval once in constructor
+    // Half of block time, minimum 30 seconds
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
+  }
 
   get isLoading(): boolean {
     return this._isLoading;
@@ -60,22 +65,28 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
 
-          // IMPORTANT: We expect that strategy load all blocks to currentNetworkHeight for one method call
+          // IMPORTANT: We expect that strategy loads all blocks to currentNetworkHeight for one method call
           await this._loadingStrategy?.load(currentNetworkHeight);
-          this.log.debug('Strategy.load completed, resetting interval');
 
-          resetInterval();
+          // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
+          // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
-          this.log.debug('Loading blocks on pause, reason: ', {
+          this.log.debug('Loading blocks failed, retrying immediately', {
             args: { error },
           });
+
           await this._loadingStrategy?.stop();
+
+          // ERROR CASE: Reset interval to retry immediately
+          // because error means we didn't load blocks to currentHeight so we need to try again ASAP
+          // Next attempt will be exponential: 1000ms -> 10000ms -> 100000ms -> up to maxInterval
+          resetInterval();
         }
       },
       {
-        interval: 500,
-        maxInterval: 3000,
-        multiplier: 2,
+        interval: 1000, // Start with 1000ms for first attempts
+        maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
+        multiplier: 10, // Exponential backoff multiplier
       }
     );
 

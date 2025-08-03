@@ -15,6 +15,7 @@ export interface BlocksQueueModuleOptions {
   queueLoaderRequestBlocksBatchSize: number;
   queueIteratorBlocksBatchSize: number;
   blockSize: number;
+  blockTimeMs: number;
 }
 
 @Module({})
