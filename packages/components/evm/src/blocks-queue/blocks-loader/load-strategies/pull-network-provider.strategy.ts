@@ -39,7 +39,9 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
 
     // Check if we have reached the current network height
     if (this.queue.lastHeight >= currentNetworkHeight) {
-      throw new Error('Reached current network height');
+      // IMPORTANT: we return as successfull without an error
+      return;
+      // throw new Error('Reached current network height');
     }
 
     // Check if the queue is full

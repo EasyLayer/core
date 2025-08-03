@@ -29,7 +29,7 @@ export class EventStoreModule {
     // Initialize transactional context before setting up the database connections
     initializeTransactionalContext();
 
-    const snapshotEntity = createSnapshotsEntity();
+    const snapshotEntity = createSnapshotsEntity(config.type);
 
     // Dynamically creating schemas from aggregates
     const dynamicEntities = aggregates.map((agg) => createEventDataEntity(agg.aggregateId, config.type));
@@ -37,6 +37,14 @@ export class EventStoreModule {
     const entities = [...dynamicEntities, snapshotEntity];
 
     const dataSourceOptions = {
+      ...(config.type === 'postgres'
+        ? {
+            extra: {
+              min: 5,
+              max: 20,
+            },
+          }
+        : {}),
       ...restOptions,
       name,
       entities,
@@ -94,7 +102,7 @@ export class EventStoreModule {
             // TODO: move its somewhere
             // Apply PRAGMA settings (for improve writing) for SQLite
             if (restOptions.type === 'sqlite') {
-              await dataSource.query('PRAGMA cache_size = 2000;'); // ~8 МБ
+              await dataSource.query('PRAGMA cache_size = -64000;'); // 64MB МБ
               await dataSource.query('PRAGMA temp_store = MEMORY;'); // DEFAULT
               await dataSource.query('PRAGMA locking_mode = EXCLUSIVE;');
               await dataSource.query('PRAGMA mmap_size = 67108864;'); // 64 МБ
@@ -123,7 +131,7 @@ export class EventStoreModule {
         {
           provide: EventStoreReadRepository,
           useFactory: async (logger, dataSource) => {
-            return new EventStoreReadRepository(logger, dataSource, name);
+            return new EventStoreReadRepository(logger, dataSource);
           },
           inject: [AppLogger, getDataSourceToken(name)],
         },

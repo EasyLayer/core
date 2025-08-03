@@ -2,7 +2,14 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
-import type { NetworkConfig, UniversalBlock, UniversalTransaction, UniversalBlockStats } from './interfaces';
+import type {
+  NetworkConfig,
+  UniversalBlock,
+  UniversalTransaction,
+  UniversalBlockStats,
+  UniversalMempoolTransaction,
+  UniversalMempoolInfo,
+} from './interfaces';
 import { NodeProviderTypes } from './interfaces';
 import { HexTransformer } from './hex-transformer';
 import { RateLimiter } from './rate-limiter';
@@ -506,24 +513,6 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
     }, 'getNetworkInfo');
   }
 
-  public async getMempoolInfo(): Promise<any> {
-    return this.executeWithErrorHandling(async () => {
-      const results = await this.rateLimiter.execute([{ method: 'getmempoolinfo', params: [] }], (calls) =>
-        this._batchRpcCall(calls)
-      );
-      return results[0];
-    }, 'getMempoolInfo');
-  }
-
-  public async getRawMempool(verbose: boolean = false): Promise<any> {
-    return this.executeWithErrorHandling(async () => {
-      const results = await this.rateLimiter.execute([{ method: 'getrawmempool', params: [verbose] }], (calls) =>
-        this._batchRpcCall(calls)
-      );
-      return results[0];
-    }, 'getRawMempool');
-  }
-
   public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
     return this.executeWithErrorHandling(async () => {
       const results = await this.rateLimiter.execute(
@@ -532,6 +521,60 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       );
       return results[0];
     }, 'estimateSmartFee');
+  }
+
+  public async getMempoolInfo(): Promise<UniversalMempoolInfo> {
+    return this.executeWithErrorHandling(async () => {
+      const results = await this.rateLimiter.execute([{ method: 'getmempoolinfo', params: [] }], (calls) =>
+        this._batchRpcCall(calls)
+      );
+
+      const rawInfo = results[0];
+
+      if (!rawInfo) {
+        throw new Error('Failed to get mempool info');
+      }
+
+      return this.normalizeMempoolInfo(rawInfo);
+    }, 'getMempoolInfo');
+  }
+
+  public async getRawMempool(verbose: boolean = false): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const results = await this.rateLimiter.execute([{ method: 'getrawmempool', params: [verbose] }], (calls) =>
+        this._batchRpcCall(calls)
+      );
+
+      const rawResult = results[0];
+
+      if (!verbose) {
+        return rawResult; // string[]
+      }
+
+      if (rawResult && typeof rawResult === 'object') {
+        const normalizedMempool: { [txid: string]: UniversalMempoolTransaction } = {};
+
+        for (const [txid, rawEntry] of Object.entries(rawResult)) {
+          normalizedMempool[txid] = this.normalizeMempoolEntry(txid, rawEntry);
+        }
+
+        return normalizedMempool;
+      }
+
+      return rawResult;
+    }, 'getRawMempool');
+  }
+
+  public async getMempoolEntries(txids: string[]): Promise<(UniversalMempoolTransaction | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const requests = txids.map((txid) => ({ method: 'getmempoolentry', params: [txid] }));
+      const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
+
+      return results.map((entry, index) => {
+        if (entry === null) return null;
+        return this.normalizeMempoolEntry(txids[index]!, entry);
+      });
+    }, 'getMempoolEntries');
   }
 
   // ===== NORMALIZATION METHODS (RAW RPC TO UNIVERSAL) =====
@@ -636,6 +679,117 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
       avgtxsize: rawStats.avgtxsize,
       total_stripped_size: rawStats.total_stripped_size,
       witness_txs: rawStats.witness_txs,
+    };
+  }
+
+  // Helper method in class:
+  private coinToSmallestUnit(coinAmount: number): number {
+    return Math.round(coinAmount * Math.pow(10, this.network.nativeCurrencyDecimals));
+  }
+
+  /**
+   * Normalize raw Bitcoin Core mempool entry response to MempoolTransaction
+   */
+  private normalizeMempoolEntry(txid: string, entry: any): UniversalMempoolTransaction {
+    // Extract fee values
+    const baseFee = entry.fees?.base ?? entry.fee;
+    const modifiedFee = entry.fees?.modified ?? entry.modifiedfee;
+    const ancestorFee = entry.fees?.ancestor ?? entry.ancestorfees;
+    const descendantFee = entry.fees?.descendant ?? entry.descendantfees;
+
+    // Validation - if no base fee, this is a problem!
+    if (baseFee === undefined || baseFee === null) {
+      throw new Error(`Missing base fee for transaction ${txid}`);
+    }
+
+    if (!entry.vsize || entry.vsize <= 0) {
+      throw new Error(`Invalid vsize for transaction ${txid}: ${entry.vsize}`);
+    }
+
+    // Convert to smallest unit if values are in coin format (< 1 indicates coin format)
+    const baseFeeInSmallestUnit = baseFee < 1 ? this.coinToSmallestUnit(baseFee) : baseFee;
+    const modifiedFeeInSmallestUnit =
+      modifiedFee !== undefined && modifiedFee < 1 ? this.coinToSmallestUnit(modifiedFee) : modifiedFee;
+    const ancestorFeeInSmallestUnit =
+      ancestorFee !== undefined && ancestorFee < 1 ? this.coinToSmallestUnit(ancestorFee) : ancestorFee;
+    const descendantFeeInSmallestUnit =
+      descendantFee !== undefined && descendantFee < 1 ? this.coinToSmallestUnit(descendantFee) : descendantFee;
+
+    return {
+      txid,
+      wtxid: entry.wtxid,
+      size: entry.size, // Required field
+      vsize: entry.vsize, // Required field
+      weight: entry.weight, // Required field
+      fee: baseFeeInSmallestUnit, // Required field
+      modifiedfee: modifiedFeeInSmallestUnit ?? baseFeeInSmallestUnit, // Fallback to base fee
+      time: entry.time ?? Math.floor(Date.now() / 1000),
+      height: entry.height ?? -1,
+      depends: entry.depends ?? [],
+      descendantcount: entry.descendantcount ?? 0,
+      descendantsize: entry.descendantsize ?? 0,
+      descendantfees: descendantFeeInSmallestUnit ?? baseFeeInSmallestUnit,
+      ancestorcount: entry.ancestorcount ?? 0,
+      ancestorsize: entry.ancestorsize ?? 0,
+      ancestorfees: ancestorFeeInSmallestUnit ?? baseFeeInSmallestUnit,
+      fees: {
+        base: baseFeeInSmallestUnit, // Required field
+        modified: modifiedFeeInSmallestUnit ?? baseFeeInSmallestUnit,
+        ancestor: ancestorFeeInSmallestUnit ?? baseFeeInSmallestUnit,
+        descendant: descendantFeeInSmallestUnit ?? baseFeeInSmallestUnit,
+      },
+      bip125_replaceable: entry['bip125-replaceable'] ?? false,
+      unbroadcast: entry.unbroadcast ?? false,
+    };
+  }
+
+  /**
+   * Normalize raw Bitcoin Core mempool info response to UniversalMempoolInfo
+   * Converts fees from BTC to satoshis for consistency
+   * Validates that all required fields are present
+   */
+  private normalizeMempoolInfo(rawInfo: any): UniversalMempoolInfo {
+    // Validate required fields
+    if (typeof rawInfo.size !== 'number') {
+      throw new Error('Missing or invalid size in mempool info');
+    }
+
+    if (typeof rawInfo.bytes !== 'number') {
+      throw new Error('Missing or invalid bytes in mempool info');
+    }
+
+    if (typeof rawInfo.maxmempool !== 'number') {
+      throw new Error('Missing or invalid maxmempool in mempool info');
+    }
+
+    if (rawInfo.mempoolminfee === undefined || rawInfo.mempoolminfee === null) {
+      throw new Error('Missing mempoolminfee in mempool info');
+    }
+
+    if (rawInfo.minrelaytxfee === undefined || rawInfo.minrelaytxfee === null) {
+      throw new Error('Missing minrelaytxfee in mempool info');
+    }
+
+    // Convert BTC amounts to satoshis
+    const totalFee =
+      rawInfo.total_fee !== undefined && rawInfo.total_fee !== null ? this.coinToSmallestUnit(rawInfo.total_fee) : 0;
+
+    // Convert fee rates from BTC/kvB to sat/vB
+    // Bitcoin Core returns fee rates in BTC per 1000 virtual bytes
+    // We want sat per virtual byte: (BTC/kvB) * (100,000,000 sat/BTC) / (1000 vB/kvB) = sat/vB
+    const mempoolMinFee = Math.round((rawInfo.mempoolminfee * 100000000) / 1000);
+    const minRelayTxFee = Math.round((rawInfo.minrelaytxfee * 100000000) / 1000);
+
+    return {
+      loaded: rawInfo.loaded === true, // Explicitly check for true
+      size: rawInfo.size,
+      bytes: rawInfo.bytes,
+      usage: rawInfo.usage || rawInfo.bytes, // usage might be missing in older versions
+      total_fee: totalFee,
+      maxmempool: rawInfo.maxmempool,
+      mempoolminfee: mempoolMinFee,
+      minrelaytxfee: minRelayTxFee,
+      unbroadcastcount: rawInfo.unbroadcastcount || 0, // This field was added later, can default
     };
   }
 }

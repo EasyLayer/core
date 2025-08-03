@@ -224,7 +224,7 @@ describe('BlocksQueue', () => {
     });
 
     it('should throw an error when dequeuing unknown block', async () => {
-      await expect(queue.dequeue('123')).rejects.toThrow(`Block not found or hash mismatch: 123`);
+      await expect(queue.dequeue('123')).rejects.toThrow(`Block not found: 123`);
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(-1);
       expect(queue.currentSize).toBe(0);

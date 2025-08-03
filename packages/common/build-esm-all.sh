@@ -1,6 +1,5 @@
 #!/bin/bash
-excluded_dirs=("transport-e2e-tests/")
-# excluded_dirs=("transport-e2e-tests/" "node_modules/" "dist/")
+excluded_dirs=("test/")
 
 for d in */; do
   if [ -f "$d/package.json" ]; then

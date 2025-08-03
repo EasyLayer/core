@@ -69,11 +69,11 @@ describe('PullNetworkProviderStrategy', () => {
       await expect(strategy.load(110)).rejects.toThrow('Reached max block height');
     });
 
-    it('should throw error when current network height is reached', async () => {
-      mockQueue.lastHeight = 110;
+    // it('should throw error when current network height is reached', async () => {
+    //   mockQueue.lastHeight = 110;
 
-      await expect(strategy.load(110)).rejects.toThrow('Reached current network height');
-    });
+    //   await expect(strategy.load(110)).rejects.toThrow('Reached current network height');
+    // });
 
     it('should throw error when queue is full', async () => {
       mockQueue.isQueueFull = true;
