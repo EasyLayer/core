@@ -3,7 +3,7 @@ import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
 import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './node-providers';
 import { BitcoinNormalizer } from './normalizer';
-import { Block, Transaction, BlockStats, MempoolTransaction } from './components';
+import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
 @Injectable()
 export class BlockchainProviderService {
@@ -352,7 +352,7 @@ export class BlockchainProviderService {
     });
   }
 
-  public async getMempoolInfo(): Promise<any> {
+  public async getMempoolInfo(): Promise<MempoolInfo> {
     return this.executeProviderMethod('getMempoolInfo', async (provider) => {
       return await provider.getMempoolInfo();
     });

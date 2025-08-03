@@ -1,157 +1,39 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { BlockchainProviderService, MempoolTransaction } from '../../blockchain-provider';
-import type { BitcoinMempoolSynchronizedEvent } from '../events';
+import type { BlockchainProviderService, MempoolTransaction, LightBlock } from '../../blockchain-provider';
 import {
   BitcoinMempoolInitializedEvent,
   BitcoinMempoolSyncProcessedEvent,
   BitcoinMempoolClearedEvent,
+  BitcoinMempoolSynchronizedEvent,
 } from '../events';
+import { MempoolNotLoadedError, MempoolSizeMismatchError } from './errors';
 
 /**
- * Helper utilities for optimized Mempool operations
- */
-export class MempoolHelpers {
-  /**
-   * Hash string to 32-bit integer for fast lookups
-   * Uses FNV-1a hash algorithm for better distribution
-   */
-  static hashString(str: string): number {
-    let hash = 2166136261; // FNV offset basis
-    for (let i = 0; i < str.length; i++) {
-      hash ^= str.charCodeAt(i);
-      hash = (hash * 16777619) >>> 0; // FNV prime, convert to unsigned 32-bit
-    }
-    return hash;
-  }
-
-  /**
-   * Serialize transaction to binary format
-   * Uses efficient JSON + TextEncoder
-   */
-  static serializeTransaction(tx: MempoolTransaction): Uint8Array {
-    const json = JSON.stringify(tx);
-    return new TextEncoder().encode(json);
-  }
-
-  /**
-   * Deserialize transaction from binary format
-   * Uses TextDecoder + JSON.parse
-   */
-  static deserializeTransaction(data: Uint8Array): MempoolTransaction {
-    const json = new TextDecoder().decode(data);
-    return JSON.parse(json);
-  }
-
-  /**
-   * Calculate fee rate for transaction
-   * Returns sat/vB or 0 if vsize is invalid
-   */
-  static calculateFeeRate(transaction: MempoolTransaction): number {
-    return transaction.vsize > 0 ? transaction.fees.base / transaction.vsize : 0;
-  }
-
-  /**
-   * Round fee rate to specified precision for indexing
-   * Default precision is 0.1 sat/vB
-   */
-  static roundFeeRate(feeRate: number, precision: number = 10): number {
-    return Math.floor(feeRate * precision) / precision;
-  }
-
-  /**
-   * Safe get from TypedArray with bounds checking
-   */
-  static safeGet(view: Float32Array, index: number, defaultValue: number = 0): number {
-    return index >= 0 && index < view.length ? view[index] ?? defaultValue : defaultValue;
-  }
-
-  /**
-   * Safe set to TypedArray with bounds checking
-   */
-  static safeSet(view: Float32Array, index: number, value: number): boolean {
-    if (index >= 0 && index < view.length) {
-      view[index] = value;
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Calculate total memory usage for arrays
-   */
-  static calculateMemoryUsage(buffers: ArrayBuffer[]): number {
-    return buffers.reduce((total, buffer) => total + buffer.byteLength, 0);
-  }
-
-  /**
-   * Estimate serialized transaction size (for pre-allocation)
-   */
-  static estimateTransactionSize(transaction: MempoolTransaction): number {
-    // Rough estimate: base JSON overhead + transaction data
-    const baseSize = 200; // JSON overhead
-    const txSize = transaction.vsize || 250; // Default if vsize missing
-    return baseSize + txSize;
-  }
-
-  /**
-   * Merge adjacent free spaces in memory to reduce fragmentation
-   * Sorts by offset and combines consecutive blocks
-   */
-  static mergeFreeSpaces(freeSpaceMap: Map<number, number>): void {
-    const sortedSpaces = Array.from(freeSpaceMap.entries()).sort((a, b) => a[0] - b[0]);
-    freeSpaceMap.clear();
-
-    for (let i = 0; i < sortedSpaces.length; i++) {
-      const currentSpace = sortedSpaces[i];
-      if (!currentSpace) continue;
-
-      let [offset, length] = currentSpace;
-
-      // Merge with subsequent adjacent spaces
-      while (i + 1 < sortedSpaces.length) {
-        const nextSpace = sortedSpaces[i + 1];
-        if (!nextSpace) break;
-
-        if (offset + length === nextSpace[0]) {
-          length += nextSpace[1];
-          i++;
-        } else {
-          break;
-        }
-      }
-
-      freeSpaceMap.set(offset, length);
-    }
-  }
-}
-
-/**
- * Optimized Bitcoin Mempool using TypedArrays for high-performance transaction storage.
+ * Optimized Bitcoin Mempool using hash-based Map storage.
  *
- * Key optimizations:
- * 1. Binary storage: TypedArrays instead of JavaScript objects (4-8x memory savings)
- * 2. O(1) lookups: Hash-based indexes for txid and fee rate searches
- * 3. Batch operations: SIMD-like processing for fee rate updates
- * 4. Memory efficiency: Compact binary serialization of transaction data
- * 5. Dynamic memory management: No artificial limits, grows with mempool size
+ * Memory Optimization Strategy:
+ * - Use 32-bit hashes instead of 64-byte txid strings (saves ~2MB for 34k transactions)
+ * - Store JavaScript objects directly (no JSON serialization overhead)
+ * - Track ALL loaded transactions, store only those meeting fee requirements
  *
- * Storage Structure:
- * - Metadata: TypedArray with txid_hash, fee_rate, size, timestamp, data_offset, data_length
- * - Data: Binary buffer with serialized transaction JSON
- * - Indexes: Maps for fast O(1) lookups by txid_hash and fee_rate
+ * Memory Usage for 34k transactions (~265MB raw data):
+ * - Transaction objects: ~170-204MB (main storage)
+ * - Map overhead: ~816KB (Map entries)
+ * - Hash mappings: ~3.1MB (txidHash -> original txid)
+ * - Tracking data: ~2.7MB (loaded txids metadata)
+ * - Fee rate index: ~200KB (pruning optimization)
+ * Total: ~177-211MB (67-80% efficiency vs raw blockchain data)
  *
- * txidHashIndex: 123456789 -> metadata_index (5)
- *                             ↓
- * txMetadataView: [123456789, 150.5, 250, 1643723400000, 1024, 180]
- *                   ↓                                    ↓     ↓
- * txidStringIndex: 123456789 -> "a1b2c3d4e5f6..."      offset length
- *                                                       ↓     ↓
- * txDataView: [binary data of full transaction]    position 1024, 180 bytes
+ * Performance Characteristics:
+ * - Add transaction: O(1)
+ * - Find transaction: O(1)
+ * - Remove transaction: O(1)
+ * - Prune by fee rate: O(n) where n = transactions to remove
  */
 export class Mempool extends AggregateRoot {
-  private minFeeRate: number; // sat/vB (satoshi per virtual byte)
-  private fullSyncThreshold: number; // if txids < this, use getRawMempool(true)
-  private syncThresholdPercent: number = 0.9; // 90% loaded = synchronized
+  private minFeeRate: number;
+  private fullSyncTimeoutMs: number = 20000; // 10 seconds timeout for getRawMempool(true)
+  private syncThresholdPercent: number = 0.9;
 
   // Dynamic batching parameters
   private currentBatchSize: number = 150;
@@ -159,58 +41,44 @@ export class Mempool extends AggregateRoot {
   private lastSyncDuration: number = 0;
 
   // State tracking
-  private isSynchronized: boolean = false;
+  private isSynchronized: boolean = false; // becomes true when syncThresholdPercent of txids are loaded (once per app run)
 
-  // Dynamic binary storage (grows as needed)
-  private initialMetadataSize: number = 50000; // Initial capacity for metadata
-  private initialDataSize: number = 100 * 1024 * 1024; // Initial 100MB for transaction data
+  // Track all txids that should be in mempool (from node)
+  // Key: txidHash (4 bytes), Value: true (just tracking existence)
+  private allTxidsFromNode: Map<number, boolean> = new Map();
 
-  // TypedArrays for transaction metadata (6 values per transaction)
-  private txMetadataBuffer: ArrayBuffer;
-  private txMetadataView: Float32Array; // [txid_hash, fee_rate, size, timestamp, data_offset, data_length]
-  private txDataBuffer: ArrayBuffer; // Binary storage for serialized transactions
-  private txDataView: Uint8Array;
+  // Core storage with 32-bit hash optimization
+  // Key: txidHash (4 bytes), Value: MempoolTransaction object (~4-6KB each)
+  private transactions: Map<number, MempoolTransaction> = new Map();
 
-  // Counters and pointers
-  private currentTxCount: number = 0;
-  private dataOffset: number = 0;
-  private metadataCapacity: number = 0; // Current capacity in metadata entries
+  // Track ALL loaded transactions (including those filtered by fee rate)
+  // This allows us to know what we've already processed without re-downloading
+  private loadedTxids: Map<number, { timestamp: number; feeRate: number }> = new Map();
 
-  // Fast lookup indexes - O(1) operations
-  private txidHashIndex: Map<number, number> = new Map(); // txid_hash -> metadata_index
-  private feeRateIndex: Map<number, Set<number>> = new Map(); // rounded_fee_rate -> Set<metadata_index>
+  // Reverse mapping for API compatibility (when we need original txid strings)
+  // Key: txidHash (4 bytes), Value: original txid string (64 bytes)
+  private hashToTxid: Map<number, string> = new Map();
 
-  // Original txid storage for full API compatibility
-  private txidStringIndex: Map<number, string> = new Map(); // txid_hash -> original_txid_string
+  // No age-based cleanup - only remove when confirmed in blocks or not in mempool
 
-  // Free space management for efficient memory reuse
-  private freeSpaceMap: Map<number, number> = new Map(); // offset -> length
-
-  // Tracking loaded txids to avoid re-downloading (legacy compatibility)
-  private loadedTxids = new Map<string, { timestamp: number; feeRate: number }>();
-  private loadedTxidsMaxAge = 24 * 60 * 60 * 1000; // 24 hours
-
-  // Constants
-  private static readonly METADATA_FIELDS = 6; // Fields per transaction in metadata
-  private feeRatePrecision: number = 10; // Round fee rates to 0.1 precision (configurable)
+  // Fee rate indexing for efficient pruning operations
+  // Key: rounded fee rate, Value: Set of txidHash values
+  private feeRateIndex: Map<number, Set<number>> = new Map();
+  private feeRatePrecision: number = 10; // Round to 0.1 sat/vB precision
 
   constructor({
     aggregateId,
     blockHeight,
-    minFeeRate = 10,
-    fullSyncThreshold = 1000,
+    minFeeRate = 1, // Conservative default - don't filter too aggressively
+    fullSyncTimeoutMs = 20000, // 10 seconds timeout for full sync attempt
     feeRatePrecision = 10,
-    initialMetadataSize = 50000,
-    initialDataSize = 100 * 1024 * 1024,
     options,
   }: {
     aggregateId: string;
     blockHeight: number;
     minFeeRate?: number;
-    fullSyncThreshold?: number;
+    fullSyncTimeoutMs?: number;
     feeRatePrecision?: number;
-    initialMetadataSize?: number;
-    initialDataSize?: number;
     options?: {
       snapshotsEnabled?: boolean;
       pruneOldSnapshots?: boolean;
@@ -220,281 +88,144 @@ export class Mempool extends AggregateRoot {
     super(aggregateId, blockHeight, options);
 
     this.minFeeRate = minFeeRate;
-    this.fullSyncThreshold = fullSyncThreshold;
+    this.fullSyncTimeoutMs = fullSyncTimeoutMs;
     this.feeRatePrecision = feeRatePrecision;
-    this.initialMetadataSize = initialMetadataSize;
-    this.initialDataSize = initialDataSize;
-    this.metadataCapacity = initialMetadataSize;
-
-    // Initialize TypedArrays for binary storage
-    // Each transaction: txid_hash(4) + fee_rate(4) + size(4) + timestamp(4) + data_offset(4) + data_length(4) = 24 bytes
-    this.txMetadataBuffer = new ArrayBuffer(initialMetadataSize * Mempool.METADATA_FIELDS * 4);
-    this.txMetadataView = new Float32Array(this.txMetadataBuffer);
-
-    // Binary buffer for serialized transaction data
-    this.txDataBuffer = new ArrayBuffer(initialDataSize);
-    this.txDataView = new Uint8Array(this.txDataBuffer);
   }
 
-  // ========== OPTIMIZED CORE OPERATIONS ==========
+  // ========== CORE OPERATIONS ==========
 
   /**
-   * Add transaction to optimized binary storage
-   * Grows buffers dynamically if needed
-   * @complexity O(1) - constant time insertion (amortized)
+   * Hash txid string to 32-bit integer for memory efficiency.
+   * Uses a simple but fast hash algorithm with good distribution.
+   *
+   * Memory savings: 64 bytes (string) -> 4 bytes (number) = 60 bytes per txid
+   * For 34k transactions: 60 * 34,000 = ~2MB saved
    */
-  private addTransactionOptimized(txid: string, transaction: MempoolTransaction): boolean {
-    const txidHash = MempoolHelpers.hashString(txid);
-    const feeRate = MempoolHelpers.calculateFeeRate(transaction);
+  private hashTxid(txid: string): number {
+    let hash = 0;
+    for (let i = 0; i < txid.length; i++) {
+      hash = ((hash << 5) - hash + txid.charCodeAt(i)) & 0xffffffff;
+    }
+    return hash >>> 0; // Convert to unsigned 32-bit integer
+  }
 
-    // Skip transactions below minimum fee rate
+  /**
+   * Add transaction with fee filtering but track ALL loaded txids.
+   *
+   * Strategy:
+   * 1. Always track that we loaded this transaction (prevents re-downloading)
+   * 2. Only store transaction object if fee rate meets minimum requirement
+   * 3. Update fee rate index for efficient pruning operations
+   *
+   * @param txid Original transaction ID string
+   * @param transaction Full transaction object
+   * @returns true if transaction was stored, false if filtered by fee rate
+   *
+   * @complexity O(1) - constant time insertion
+   */
+  private addTransaction(txid: string, transaction: MempoolTransaction): boolean {
+    const txidHash = this.hashTxid(txid);
+    const feeRate = this.calculateFeeRate(transaction);
+
+    // Always track that we loaded this transaction
+    // This prevents re-downloading the same transaction multiple times
+    this.loadedTxids.set(txidHash, {
+      timestamp: Date.now(),
+      feeRate,
+    });
+
+    // Store reverse mapping for API compatibility
+    this.hashToTxid.set(txidHash, txid);
+
+    // Only store transaction if fee rate meets minimum requirement
     if (feeRate < this.minFeeRate) {
-      return false;
+      return false; // Tracked but not stored - saves memory
     }
 
-    // Check if we need to grow metadata buffer
-    if (this.currentTxCount >= this.metadataCapacity) {
-      this.growMetadataBuffer();
-    }
-
-    // Serialize transaction to binary format
-    const serializedTx = MempoolHelpers.serializeTransaction(transaction);
-
-    // Allocate space for transaction data (grows buffer if needed)
-    const dataOffset = this.allocateDataSpace(serializedTx.length);
-    if (dataOffset === -1) {
-      return false; // This shouldn't happen with dynamic growth
-    }
-
-    // Store transaction data
-    this.txDataView.set(serializedTx, dataOffset);
-
-    // Store metadata in TypedArray
-    const metadataIndex = this.currentTxCount * Mempool.METADATA_FIELDS;
-    const timestamp = Date.now();
-
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex, txidHash);
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 1, feeRate);
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 2, transaction.vsize);
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 3, timestamp);
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 4, dataOffset);
-    MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 5, serializedTx.length);
-
-    // Update fast lookup indexes
-    this.txidHashIndex.set(txidHash, this.currentTxCount);
-    this.txidStringIndex.set(txidHash, txid); // Store original txid string
-    this.addToFeeRateIndex(feeRate, this.currentTxCount);
-
-    this.currentTxCount++;
+    // Store high-fee transactions for fast access
+    this.transactions.set(txidHash, transaction);
+    this.addToFeeRateIndex(feeRate, txidHash);
 
     return true;
   }
 
   /**
-   * Find transaction by txid using O(1) hash lookup
-   * @complexity O(1) - constant time lookup
+   * Remove transaction and cleanup all related indexes.
+   *
+   * @param txid Original transaction ID string
+   * @returns true if transaction was found and removed
+   *
+   * @complexity O(1) - constant time removal
    */
-  private findTransactionOptimized(txid: string): MempoolTransaction | null {
-    const txidHash = MempoolHelpers.hashString(txid);
-    const metadataIndex = this.txidHashIndex.get(txidHash);
+  private removeTransaction(txid: string): boolean {
+    const txidHash = this.hashTxid(txid);
+    const transaction = this.transactions.get(txidHash);
 
-    if (metadataIndex === undefined) {
-      return null;
+    if (!transaction) {
+      // Still remove from tracking even if not stored
+      this.loadedTxids.delete(txidHash);
+      this.hashToTxid.delete(txidHash);
+      this.allTxidsFromNode.delete(txidHash);
+      return false;
     }
 
-    return this.getTransactionByMetadataIndex(metadataIndex);
+    const feeRate = this.calculateFeeRate(transaction);
+
+    // Remove from all storage and indexes
+    this.transactions.delete(txidHash);
+    this.loadedTxids.delete(txidHash);
+    this.hashToTxid.delete(txidHash);
+    this.allTxidsFromNode.delete(txidHash);
+    this.removeFromFeeRateIndex(feeRate, txidHash);
+
+    return true;
   }
 
   /**
-   * Get transactions by fee rate range using O(1) index lookup
-   * @complexity O(k) where k = number of matching transactions
+   * Calculate fee rate safely handling edge cases.
+   *
+   * @param transaction Transaction object
+   * @returns Fee rate in sat/vB, 0 if invalid vsize
    */
-  private getTransactionsByFeeRateRangeOptimized(minFee: number, maxFee: number): MempoolTransaction[] {
-    const results: MempoolTransaction[] = [];
-
-    // Iterate only through relevant fee rate buckets - much faster than O(n)
-    for (const [feeRate, metadataIndices] of this.feeRateIndex) {
-      if (feeRate >= minFee && feeRate <= maxFee) {
-        for (const metadataIndex of metadataIndices) {
-          const tx = this.getTransactionByMetadataIndex(metadataIndex);
-          if (tx) results.push(tx);
-        }
-      }
-    }
-
-    return results;
+  private calculateFeeRate(transaction: MempoolTransaction): number {
+    return transaction.vsize > 0 ? transaction.fees.base / transaction.vsize : 0;
   }
 
   /**
-   * Efficient pruning of low fee transactions
-   * @complexity O(n) where n = number of transactions (but with SIMD-like processing)
+   * Round fee rate to specified precision for indexing.
+   * This reduces the number of unique fee rate buckets for efficient grouping.
+   *
+   * @param feeRate Raw fee rate
+   * @returns Rounded fee rate (default precision: 0.1 sat/vB)
    */
-  private pruneLowFeeTransactionsOptimized(newMinFeeRate: number): number {
-    let prunedCount = 0;
-    const indicesToRemove: number[] = [];
-
-    // Fast scan through TypedArray using SIMD-like operations
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const feeRate = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 1, 0);
-
-      if (feeRate < newMinFeeRate) {
-        indicesToRemove.push(i);
-        prunedCount++;
-      }
-    }
-
-    // Remove transactions efficiently
-    this.removeTransactionsByIndices(indicesToRemove);
-    this.minFeeRate = newMinFeeRate;
-
-    return prunedCount;
+  private roundFeeRate(feeRate: number): number {
+    return Math.floor(feeRate * this.feeRatePrecision) / this.feeRatePrecision;
   }
 
   /**
-   * Batch update fee rates using SIMD-like operations
-   * @complexity O(n) but with vectorized processing
+   * Add transaction to fee rate index for efficient pruning operations.
+   * Groups transactions by rounded fee rate for batch operations.
    */
-  private batchUpdateFeeRatesOptimized(multiplier: number): void {
-    // Process fee rates in batches for better CPU cache utilization
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const oldFeeRate = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 1, 0);
-      const newFeeRate = oldFeeRate * multiplier;
-
-      // Update metadata
-      MempoolHelpers.safeSet(this.txMetadataView, metadataIndex + 1, newFeeRate);
-
-      // Update fee rate index
-      this.removeFromFeeRateIndex(oldFeeRate, i);
-      this.addToFeeRateIndex(newFeeRate, i);
-    }
-  }
-
-  // ========== DYNAMIC BUFFER MANAGEMENT ==========
-
-  /**
-   * Grow metadata buffer when capacity is reached
-   */
-  private growMetadataBuffer(): void {
-    const newCapacity = Math.ceil(this.metadataCapacity * 1.5);
-    const newBuffer = new ArrayBuffer(newCapacity * Mempool.METADATA_FIELDS * 4);
-    const newView = new Float32Array(newBuffer);
-
-    // Copy existing data
-    newView.set(this.txMetadataView);
-
-    // Update references
-    this.txMetadataBuffer = newBuffer;
-    this.txMetadataView = newView;
-    this.metadataCapacity = newCapacity;
-  }
-
-  /**
-   * Grow data buffer when space is needed
-   */
-  private growDataBuffer(requiredSpace: number): void {
-    const currentSize = this.txDataBuffer.byteLength;
-    const newSize = Math.max(currentSize * 1.5, currentSize + requiredSpace);
-
-    const newBuffer = new ArrayBuffer(newSize);
-    const newView = new Uint8Array(newBuffer);
-
-    // Copy existing data
-    newView.set(this.txDataView);
-
-    // Update references
-    this.txDataBuffer = newBuffer;
-    this.txDataView = newView;
-  }
-
-  /**
-   * Ensure buffer capacity for snapshot restoration
-   */
-  private ensureBufferCapacity(metadataCapacity: number, dataSize: number): void {
-    // Ensure metadata buffer is large enough
-    if (metadataCapacity > this.metadataCapacity) {
-      const newBuffer = new ArrayBuffer(metadataCapacity * Mempool.METADATA_FIELDS * 4);
-      const newView = new Float32Array(newBuffer);
-      newView.set(this.txMetadataView);
-
-      this.txMetadataBuffer = newBuffer;
-      this.txMetadataView = newView;
-      this.metadataCapacity = metadataCapacity;
-    }
-
-    // Ensure data buffer is large enough
-    if (dataSize > this.txDataBuffer.byteLength) {
-      const newBuffer = new ArrayBuffer(dataSize);
-      const newView = new Uint8Array(newBuffer);
-      newView.set(this.txDataView);
-
-      this.txDataBuffer = newBuffer;
-      this.txDataView = newView;
-    }
-  }
-
-  // ========== MEMORY MANAGEMENT ==========
-
-  /**
-   * Allocate space in data buffer with dynamic growth
-   */
-  private allocateDataSpace(requiredLength: number): number {
-    // Try to find free space first
-    for (const [offset, length] of this.freeSpaceMap) {
-      if (length >= requiredLength) {
-        this.freeSpaceMap.delete(offset);
-        if (length > requiredLength) {
-          // Add remaining space back to free map
-          this.freeSpaceMap.set(offset + requiredLength, length - requiredLength);
-        }
-        return offset;
-      }
-    }
-
-    // Check if we need to grow the buffer
-    if (this.dataOffset + requiredLength > this.txDataBuffer.byteLength) {
-      this.growDataBuffer(requiredLength);
-    }
-
-    // Allocate at the end
-    const offset = this.dataOffset;
-    this.dataOffset += requiredLength;
-    return offset;
-  }
-
-  /**
-   * Free space in data buffer
-   */
-  private freeDataSpace(offset: number, length: number): void {
-    this.freeSpaceMap.set(offset, length);
-    MempoolHelpers.mergeFreeSpaces(this.freeSpaceMap);
-  }
-
-  // ========== INDEX MANAGEMENT ==========
-
-  /**
-   * Add transaction to fee rate index
-   */
-  private addToFeeRateIndex(feeRate: number, metadataIndex: number): void {
-    const roundedFeeRate = MempoolHelpers.roundFeeRate(feeRate, this.feeRatePrecision);
+  private addToFeeRateIndex(feeRate: number, txidHash: number): void {
+    const roundedFeeRate = this.roundFeeRate(feeRate);
 
     if (!this.feeRateIndex.has(roundedFeeRate)) {
       this.feeRateIndex.set(roundedFeeRate, new Set());
     }
 
-    this.feeRateIndex.get(roundedFeeRate)!.add(metadataIndex);
+    this.feeRateIndex.get(roundedFeeRate)!.add(txidHash);
   }
 
   /**
-   * Remove transaction from fee rate index
+   * Remove transaction from fee rate index.
+   * Cleans up empty buckets to prevent memory leaks.
    */
-  private removeFromFeeRateIndex(feeRate: number, metadataIndex: number): void {
-    const roundedFeeRate = MempoolHelpers.roundFeeRate(feeRate, this.feeRatePrecision);
+  private removeFromFeeRateIndex(feeRate: number, txidHash: number): void {
+    const roundedFeeRate = this.roundFeeRate(feeRate);
     const feeRateSet = this.feeRateIndex.get(roundedFeeRate);
 
     if (feeRateSet) {
-      feeRateSet.delete(metadataIndex);
+      feeRateSet.delete(txidHash);
       if (feeRateSet.size === 0) {
         this.feeRateIndex.delete(roundedFeeRate);
       }
@@ -502,188 +233,212 @@ export class Mempool extends AggregateRoot {
   }
 
   /**
-   * Rebuild all indexes from current metadata
+   * Prune transactions below fee rate threshold.
+   * Uses fee rate index for efficient batch operations.
+   *
+   * @param newMinFeeRate New minimum fee rate threshold
+   * @returns Number of transactions pruned
+   *
+   * @complexity O(k) where k = number of transactions to remove
    */
-  private rebuildIndexes(): void {
-    this.txidHashIndex.clear();
-    this.feeRateIndex.clear();
-    // Note: txidStringIndex cannot be rebuilt from metadata alone
-    // Original txid strings are lost during rebuild - this is a limitation
+  public pruneLowFeeTransactions(newMinFeeRate: number): number {
+    let prunedCount = 0;
+    const hashesToRemove: number[] = [];
 
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-      const feeRate = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 1, 0);
-
-      this.txidHashIndex.set(txidHash, i);
-      this.addToFeeRateIndex(feeRate, i);
-    }
-  }
-
-  // ========== TRANSACTION REMOVAL ==========
-
-  /**
-   * Remove transactions by indices (compact the arrays)
-   */
-  private removeTransactionsByIndices(indicesToRemove: number[]): void {
-    // Sort indices in descending order to remove from end first
-    indicesToRemove.sort((a, b) => b - a);
-
-    for (const index of indicesToRemove) {
-      this.removeTransactionAtIndex(index);
-    }
-  }
-
-  /**
-   * Remove transaction at specific index and compact arrays
-   */
-  private removeTransactionAtIndex(index: number): void {
-    if (index >= this.currentTxCount) return;
-
-    const metadataIndex = index * Mempool.METADATA_FIELDS;
-
-    // Free data space
-    const dataOffset = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 4, 0);
-    const dataLength = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 5, 0);
-    this.freeDataSpace(dataOffset, dataLength);
-
-    // Remove from indexes
-    const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-    const feeRate = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex + 1, 0);
-
-    this.txidHashIndex.delete(txidHash);
-    this.txidStringIndex.delete(txidHash); // Remove original txid string mapping
-    this.removeFromFeeRateIndex(feeRate, index);
-
-    // Shift remaining metadata entries
-    const remainingEntries = this.currentTxCount - index - 1;
-    if (remainingEntries > 0) {
-      const sourceStart = (index + 1) * Mempool.METADATA_FIELDS;
-      const targetStart = index * Mempool.METADATA_FIELDS;
-
-      for (let i = 0; i < remainingEntries * Mempool.METADATA_FIELDS; i++) {
-        const sourceValue = MempoolHelpers.safeGet(this.txMetadataView, sourceStart + i, 0);
-        MempoolHelpers.safeSet(this.txMetadataView, targetStart + i, sourceValue);
+    // Find all transactions below threshold using fee rate index
+    for (const [feeRate, txidHashSet] of this.feeRateIndex) {
+      if (feeRate < newMinFeeRate) {
+        hashesToRemove.push(...txidHashSet);
       }
     }
 
-    this.currentTxCount--;
+    // Remove them using original txid strings
+    for (const txidHash of hashesToRemove) {
+      const originalTxid = this.hashToTxid.get(txidHash);
+      if (originalTxid && this.removeTransaction(originalTxid)) {
+        prunedCount++;
+      }
+    }
 
-    // Rebuild indexes since indices have changed
-    this.rebuildIndexes();
+    this.minFeeRate = newMinFeeRate;
+    return prunedCount;
   }
 
-  // ========== HELPER METHODS ==========
-
   /**
-   * Get transaction by metadata index
+   * Remove confirmed transactions from loadedTxids tracking.
+   * Called when processing blocks to clean up confirmed transactions.
+   *
+   * @param confirmedTxids Array of transaction IDs that were confirmed in blocks
    */
-  private getTransactionByMetadataIndex(metadataIndex: number): MempoolTransaction | null {
-    if (metadataIndex >= this.currentTxCount) return null;
-
-    const baseIndex = metadataIndex * Mempool.METADATA_FIELDS;
-    const dataOffset = MempoolHelpers.safeGet(this.txMetadataView, baseIndex + 4, 0);
-    const dataLength = MempoolHelpers.safeGet(this.txMetadataView, baseIndex + 5, 0);
-
-    const txData = this.txDataView.slice(dataOffset, dataOffset + dataLength);
-    return MempoolHelpers.deserializeTransaction(txData);
+  private removeConfirmedFromLoadedTxids(confirmedTxids: string[]): void {
+    for (const txid of confirmedTxids) {
+      const txidHash = this.hashTxid(txid);
+      this.loadedTxids.delete(txidHash);
+    }
   }
 
   /**
-   * Dynamically adjusts batch size based on previous sync timing
+   * Remove transactions that were confirmed in blocks.
+   * This is called when processing new blocks to clean up the mempool.
+   *
+   * @param confirmedTxids Array of transaction IDs that were confirmed
+   * @returns Number of transactions removed from mempool
+   */
+  public removeConfirmedTransactions(confirmedTxids: string[]): number {
+    let removedCount = 0;
+
+    for (const txid of confirmedTxids) {
+      if (this.removeTransaction(txid)) {
+        removedCount++;
+      }
+    }
+    return removedCount;
+  }
+
+  /**
+   * Adjust batch size based on previous sync performance.
+   * Dynamically optimizes sync performance based on timing history.
    */
   private adjustBatchSize(): void {
     if (this.previousSyncDuration > 0 && this.lastSyncDuration > 0) {
       const timingRatio = this.lastSyncDuration / this.previousSyncDuration;
 
       if (timingRatio > 1.2) {
-        // Current sync took significantly longer - increase batch size for better throughput
+        // Sync took longer - increase batch size for better throughput
         this.currentBatchSize = Math.round(this.currentBatchSize * 1.25);
       } else if (timingRatio < 0.8) {
-        // Current sync was significantly faster - can reduce batch size to avoid overwhelming
+        // Sync was faster - can reduce batch size to avoid overwhelming
         this.currentBatchSize = Math.max(10, Math.round(this.currentBatchSize * 0.75));
       }
     }
   }
 
   /**
-   * Cleanup old loaded txids tracking
+   * Smart transaction loading with timeout-based strategy.
+   * First tries getRawMempool(true) with timeout, then falls back to batched loading.
+   * If successful, uses fee rates to prioritize loading order.
    */
-  private cleanupOldLoadedTxids(): void {
-    const now = Date.now();
-    const expiredTxids: string[] = [];
+  private async loadTransactionsSmart(
+    txidsToLoad: string[],
+    service: BlockchainProviderService
+  ): Promise<{ loaded: Array<{ txid: string; transaction: MempoolTransaction }>; hasMore: boolean }> {
+    let loadedTransactions: Array<{ txid: string; transaction: MempoolTransaction }> = [];
+    let hasMore = false;
 
-    for (const [txid, loadInfo] of this.loadedTxids) {
-      if (now - loadInfo.timestamp > this.loadedTxidsMaxAge) {
-        expiredTxids.push(txid);
+    try {
+      // Try to get full mempool with timeout
+      const fullMempoolPromise = service.getRawMempool(true);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Full sync timeout')), this.fullSyncTimeoutMs)
+      );
+
+      const fullMempool = await Promise.race([fullMempoolPromise, timeoutPromise]);
+
+      // Success - we got full mempool data
+
+      // Extract fee rates and sort txids by priority (highest fee rate first)
+      const txidsWithFeeRates: Array<{ txid: string; feeRate: number; transaction: MempoolTransaction }> = [];
+
+      for (const txid of txidsToLoad) {
+        const txData = fullMempool[txid];
+        if (txData) {
+          const transaction = txData as MempoolTransaction;
+          const feeRate = transaction.vsize > 0 ? transaction.fees.base / transaction.vsize : 0;
+          txidsWithFeeRates.push({ txid, feeRate, transaction });
+        }
       }
+
+      // Sort by fee rate (highest first) for priority loading
+      txidsWithFeeRates.sort((a, b) => b.feeRate - a.feeRate);
+
+      // Take up to currentBatchSize transactions
+      const batchToProcess = txidsWithFeeRates.slice(0, this.currentBatchSize);
+      hasMore = txidsWithFeeRates.length > this.currentBatchSize;
+
+      loadedTransactions = batchToProcess.map(({ txid, transaction }) => ({ txid, transaction }));
+    } catch (error) {
+      // Timeout or error - fall back to batched loading without prioritization
+
+      const txidsToProcess = txidsToLoad.slice(0, this.currentBatchSize);
+      hasMore = txidsToLoad.length > this.currentBatchSize;
+
+      const result = await this.loadTransactionsBatched(txidsToProcess, service, this.currentBatchSize);
+      loadedTransactions = result.loaded;
     }
 
-    expiredTxids.forEach((txid) => this.loadedTxids.delete(txid));
+    return { loaded: loadedTransactions, hasMore };
   }
 
   /**
-   * Load transactions using getRawMempool(true) - 1 RPC call
+   * Load transactions using getMempoolEntries with batching - multiple RPC calls
    */
-  private async loadTransactionsFullSync(
-    txids: string[],
-    service: BlockchainProviderService
+  private async loadTransactionsBatched(
+    txidsToLoad: string[],
+    service: BlockchainProviderService,
+    batchSize: number
   ): Promise<{ loaded: Array<{ txid: string; transaction: MempoolTransaction }> }> {
     const loaded: Array<{ txid: string; transaction: MempoolTransaction }> = [];
 
-    try {
-      const fullMempool = await service.getRawMempool(true);
+    for (let i = 0; i < txidsToLoad.length; i += batchSize) {
+      const batch = txidsToLoad.slice(i, i + batchSize);
 
-      for (const [txid, txData] of Object.entries(fullMempool)) {
-        // Don't add transactions here - just collect them for the event
-        loaded.push({ txid, transaction: txData as MempoolTransaction });
+      try {
+        const entries = await service.getMempoolEntries(batch);
+
+        for (let j = 0; j < entries.length; j++) {
+          const entry = entries[j];
+          const txid = batch[j];
+
+          if (!entry || !txid) {
+            continue;
+          }
+
+          loaded.push({ txid, transaction: entry as MempoolTransaction });
+        }
+      } catch (batchError) {
+        // Skip failed batches, will retry next time
       }
-    } catch (error) {
-      // If full sync fails, we'll retry next time
     }
 
     return { loaded };
   }
 
-  // ========== LEGACY API COMPATIBILITY ==========
+  // ========== PUBLIC API ==========
 
   /**
-   * Gets all transaction IDs currently tracked in mempool
-   * @complexity O(n) where n = number of tracked transactions
+   * Get all current transaction IDs as strings.
+   * Converts internal hashes back to original txid strings.
+   *
+   * @returns Array of transaction ID strings
+   * @complexity O(n) where n = number of stored transactions
    */
   public getCurrentTxids(): string[] {
     const txids: string[] = [];
-
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-
-      // Get original txid string from hash
-      const originalTxid = this.txidStringIndex.get(txidHash);
+    for (const txidHash of this.transactions.keys()) {
+      const originalTxid = this.hashToTxid.get(txidHash);
       if (originalTxid) {
         txids.push(originalTxid);
       }
     }
-
     return txids;
   }
 
   /**
-   * Gets copy of all cached transactions (loaded and unloaded)
-   * Note: In optimized version, all stored transactions are "loaded"
-   * @complexity O(n) where n = number of tracked transactions
+   * Get all cached transactions as a Map.
+   * Returns stored transactions with original txid strings as keys.
+   *
+   * @returns Map of txid -> transaction object
+   * @complexity O(n) where n = number of stored transactions
    */
   public getCachedTransactions(): Map<string, MempoolTransaction | null> {
     const result = new Map<string, MempoolTransaction | null>();
 
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-      const tx = this.getTransactionByMetadataIndex(i);
-
-      const originalTxid = this.txidStringIndex.get(txidHash);
+    // Add all txids from node with their transaction data or null
+    for (const txidHash of this.allTxidsFromNode.keys()) {
+      const originalTxid = this.hashToTxid.get(txidHash);
       if (originalTxid) {
-        result.set(originalTxid, tx);
+        const transaction = this.transactions.get(txidHash) || null;
+        result.set(originalTxid, transaction);
       }
     }
 
@@ -691,54 +446,112 @@ export class Mempool extends AggregateRoot {
   }
 
   /**
-   * Gets only fully loaded transactions (all transactions in optimized version)
-   * @complexity O(n) where n = number of tracked transactions
+   * Get all loaded transactions (same as cached for this implementation).
+   *
+   * @returns Map of txid -> transaction object
    */
   public getLoadedTransactions(): Map<string, MempoolTransaction> {
     const result = new Map<string, MempoolTransaction>();
 
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-      const tx = this.getTransactionByMetadataIndex(i);
-
-      if (tx) {
-        const originalTxid = this.txidStringIndex.get(txidHash);
-        if (originalTxid) {
-          result.set(originalTxid, tx);
-        }
+    for (const [txidHash, transaction] of this.transactions) {
+      const originalTxid = this.hashToTxid.get(txidHash);
+      if (originalTxid) {
+        result.set(originalTxid, transaction);
       }
     }
 
     return result;
   }
 
+  /**
+   * Get metadata about all loaded transaction IDs.
+   * This includes transactions that were filtered out by fee rate.
+   *
+   * @returns Map of txid -> loading metadata
+   * @complexity O(n) where n = number of tracked transactions
+   */
   public getLoadedTxids(): Map<string, { timestamp: number; feeRate: number }> {
-    return new Map(this.loadedTxids);
+    const result = new Map<string, { timestamp: number; feeRate: number }>();
+
+    for (const [txidHash, loadInfo] of this.loadedTxids) {
+      const originalTxid = this.hashToTxid.get(txidHash);
+      if (originalTxid) {
+        result.set(originalTxid, loadInfo);
+      }
+    }
+
+    return result;
   }
 
+  /**
+   * Check if a transaction has been loaded (tracked).
+   * Returns true even if transaction was filtered by fee rate.
+   *
+   * @param txid Transaction ID to check
+   * @returns true if transaction was loaded/tracked
+   * @complexity O(1)
+   */
   public isTransactionLoaded(txid: string): boolean {
-    return this.loadedTxids.has(txid);
+    const txidHash = this.hashTxid(txid);
+    return this.loadedTxids.has(txidHash);
   }
 
+  /**
+   * Check if a transaction is stored in the mempool.
+   * Returns true only if transaction passed fee rate filtering.
+   *
+   * @param txid Transaction ID to check
+   * @returns true if transaction is stored
+   * @complexity O(1)
+   */
   public hasTransaction(txid: string): boolean {
-    return this.findTransactionOptimized(txid) !== null;
+    const txidHash = this.hashTxid(txid);
+    return this.transactions.has(txidHash);
   }
+
+  /**
+   * Get a specific transaction by its ID.
+   *
+   * @param txid Transaction ID to retrieve
+   * @returns Transaction object or undefined if not found
+   * @complexity O(1)
+   */
+  public getTransaction(txid: string): MempoolTransaction | undefined {
+    const txidHash = this.hashTxid(txid);
+    return this.transactions.get(txidHash);
+  }
+
+  /**
+   * Get multiple transactions by their IDs.
+   *
+   * @param txids Array of transaction IDs to retrieve
+   * @returns Array of transaction objects (undefined for not found)
+   * @complexity O(k) where k = number of requested transactions
+   */
+  public getTransactions(txids: string[]): (MempoolTransaction | undefined)[] {
+    return txids.map((txid) => this.getTransaction(txid));
+  }
+
+  // ========== STATUS AND METRICS ==========
 
   public isMempoolSynchronized(): boolean {
     return this.isSynchronized;
   }
 
   public getTransactionCount(): number {
-    return this.currentTxCount;
+    return this.transactions.size;
   }
 
   public getTotalTxidsCount(): number {
-    return this.currentTxCount;
+    return this.allTxidsFromNode.size;
   }
 
-  public getFullSyncThreshold(): number {
-    return this.fullSyncThreshold;
+  public getLoadedTxidsCount(): number {
+    return this.loadedTxids.size;
+  }
+
+  public getFullSyncTimeoutMs(): number {
+    return this.fullSyncTimeoutMs;
   }
 
   public getCurrentBatchSize(): number {
@@ -753,71 +566,87 @@ export class Mempool extends AggregateRoot {
     };
   }
 
+  /**
+   * Get comprehensive performance metrics for monitoring.
+   *
+   * @returns Object with memory usage and performance statistics
+   */
+  public getPerformanceMetrics(): {
+    memoryUsage: number;
+    transactionCount: number;
+    loadedTxidsCount: number;
+    avgTransactionSize: number;
+    feeRateIndexSize: number;
+    memoryEfficiency: number;
+  } {
+    // Rough memory estimation
+    const avgTxSize = 5000; // Estimated bytes per transaction object in memory
+    const memoryUsage = this.transactions.size * avgTxSize;
+    const rawDataSize = memoryUsage * 1.3; // Estimate raw blockchain data size
+
+    return {
+      memoryUsage,
+      transactionCount: this.transactions.size,
+      loadedTxidsCount: this.loadedTxids.size,
+      avgTransactionSize: avgTxSize,
+      feeRateIndexSize: this.feeRateIndex.size,
+      memoryEfficiency: memoryUsage / rawDataSize, // Efficiency vs raw data
+    };
+  }
+
   // ========== SNAPSHOTS ==========
 
   protected toJsonPayload(): any {
-    // Convert TypedArrays to regular arrays for JSON serialization
-    const metadataArray = Array.from(this.txMetadataView.slice(0, this.currentTxCount * Mempool.METADATA_FIELDS));
-    const dataArray = Array.from(this.txDataView.slice(0, this.dataOffset));
-
     return {
       minFeeRate: this.minFeeRate,
-      fullSyncThreshold: this.fullSyncThreshold,
+      fullSyncTimeoutMs: this.fullSyncTimeoutMs,
       syncThresholdPercent: this.syncThresholdPercent,
       currentBatchSize: this.currentBatchSize,
       previousSyncDuration: this.previousSyncDuration,
       lastSyncDuration: this.lastSyncDuration,
       isSynchronized: this.isSynchronized,
-      currentTxCount: this.currentTxCount,
-      dataOffset: this.dataOffset,
-      metadataCapacity: this.metadataCapacity,
       feeRatePrecision: this.feeRatePrecision,
-      txMetadata: metadataArray,
-      txData: dataArray,
-      txidStringMapping: Array.from(this.txidStringIndex.entries()), // Save original txid mappings
+      // Convert Maps to arrays for JSON serialization
+      allTxidsFromNode: Array.from(this.allTxidsFromNode.entries()),
+      transactions: Array.from(this.transactions.entries()),
       loadedTxids: Array.from(this.loadedTxids.entries()),
+      hashToTxid: Array.from(this.hashToTxid.entries()),
     };
   }
 
   protected fromSnapshot(state: any): void {
     // Restore primitive values
-    this.minFeeRate = state.minFeeRate || 10;
-    this.fullSyncThreshold = state.fullSyncThreshold || 1000;
+    this.minFeeRate = state.minFeeRate || 1;
+    this.fullSyncTimeoutMs = state.fullSyncTimeoutMs || 10000;
     this.syncThresholdPercent = state.syncThresholdPercent || 0.9;
     this.currentBatchSize = state.currentBatchSize || 150;
     this.previousSyncDuration = state.previousSyncDuration || 0;
     this.lastSyncDuration = state.lastSyncDuration || 0;
     this.isSynchronized = state.isSynchronized || false;
-    this.currentTxCount = state.currentTxCount || 0;
-    this.dataOffset = state.dataOffset || 0;
-    this.metadataCapacity = state.metadataCapacity || this.initialMetadataSize;
     this.feeRatePrecision = state.feeRatePrecision || 10;
 
-    // Ensure buffers are large enough for restored data
-    this.ensureBufferCapacity(this.metadataCapacity, this.dataOffset);
-
-    // Restore TypedArrays from serialized data
-    if (state.txMetadata && Array.isArray(state.txMetadata)) {
-      this.txMetadataView.set(state.txMetadata, 0);
-    }
-
-    if (state.txData && Array.isArray(state.txData)) {
-      this.txDataView.set(state.txData, 0);
-    }
-
+    // Restore Maps from arrays
+    this.allTxidsFromNode = new Map(state.allTxidsFromNode || []);
+    this.transactions = new Map(state.transactions || []);
     this.loadedTxids = new Map(state.loadedTxids || []);
+    this.hashToTxid = new Map(state.hashToTxid || []);
 
-    // Restore original txid string mappings
-    this.txidStringIndex = new Map(state.txidStringMapping || []);
-
-    // Rebuild indexes from metadata
-    this.rebuildIndexes();
+    // Rebuild fee rate index from current transactions
+    this.feeRateIndex.clear();
+    for (const [txidHash, transaction] of this.transactions) {
+      const feeRate = this.calculateFeeRate(transaction);
+      this.addToFeeRateIndex(feeRate, txidHash);
+    }
 
     Object.setPrototypeOf(this, Mempool.prototype);
   }
 
   // ========== STREAMING GETTERS ==========
 
+  /**
+   * Stream loaded transactions in batches for memory-efficient processing.
+   * Useful for exporting large datasets without loading everything into memory.
+   */
   public async *streamLoadedTransactions(batchSize: number = 100): AsyncGenerator<
     {
       batch: Array<{ txid: string; transaction: MempoolTransaction }>;
@@ -827,66 +656,34 @@ export class Mempool extends AggregateRoot {
     void,
     unknown
   > {
-    const transactions: Array<{ txid: string; transaction: MempoolTransaction }> = [];
+    const entries = Array.from(this.transactions.entries());
     let batchIndex = 0;
-    let processedCount = 0;
 
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
-      const tx = this.getTransactionByMetadataIndex(i);
+    for (let i = 0; i < entries.length; i += batchSize) {
+      const batchData = entries.slice(i, i + batchSize);
+      const batch = batchData
+        .map(([txidHash, transaction]) => {
+          const originalTxid = this.hashToTxid.get(txidHash);
+          return originalTxid ? { txid: originalTxid, transaction } : null;
+        })
+        .filter((item): item is { txid: string; transaction: MempoolTransaction } => item !== null);
 
-      if (tx) {
-        const originalTxid = this.txidStringIndex.get(txidHash);
-        if (originalTxid) {
-          transactions.push({ txid: originalTxid, transaction: tx });
-          processedCount++;
+      const hasMore = i + batchSize < entries.length;
 
-          if (transactions.length >= batchSize) {
-            const hasMore = processedCount < this.currentTxCount;
-
-            yield {
-              batch: [...transactions],
-              batchIndex,
-              hasMore,
-            };
-
-            transactions.length = 0;
-            batchIndex++;
-
-            await new Promise((resolve) => setImmediate(resolve));
-          }
-        }
-      }
-    }
-
-    if (transactions.length > 0) {
       yield {
-        batch: [...transactions],
+        batch,
         batchIndex,
-        hasMore: false,
+        hasMore,
       };
+
+      batchIndex++;
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 
-  public async *streamCachedTransactions(batchSize: number = 100): AsyncGenerator<
-    {
-      batch: Array<{ txid: string; transaction: MempoolTransaction | null }>;
-      batchIndex: number;
-      hasMore: boolean;
-    },
-    void,
-    unknown
-  > {
-    for await (const batchData of this.streamLoadedTransactions(batchSize)) {
-      yield {
-        batch: batchData.batch.map((item) => ({ ...item, transaction: item.transaction as MempoolTransaction | null })),
-        batchIndex: batchData.batchIndex,
-        hasMore: batchData.hasMore,
-      };
-    }
-  }
-
+  /**
+   * Stream current transaction IDs in batches.
+   */
   public async *streamCurrentTxids(batchSize: number = 1000): AsyncGenerator<
     {
       batch: string[];
@@ -896,90 +693,34 @@ export class Mempool extends AggregateRoot {
     void,
     unknown
   > {
-    const txids: string[] = [];
+    const txidHashes = Array.from(this.transactions.keys());
     let batchIndex = 0;
-    let processedCount = 0;
 
-    for (let i = 0; i < this.currentTxCount; i++) {
-      const metadataIndex = i * Mempool.METADATA_FIELDS;
-      const txidHash = MempoolHelpers.safeGet(this.txMetadataView, metadataIndex, 0);
+    for (let i = 0; i < txidHashes.length; i += batchSize) {
+      const hashBatch = txidHashes.slice(i, i + batchSize);
+      const batch = hashBatch
+        .map((hash) => this.hashToTxid.get(hash))
+        .filter((txid): txid is string => txid !== undefined);
 
-      const originalTxid = this.txidStringIndex.get(txidHash);
-      if (originalTxid) {
-        txids.push(originalTxid);
-        processedCount++;
+      const hasMore = i + batchSize < txidHashes.length;
 
-        if (txids.length >= batchSize) {
-          const hasMore = processedCount < this.currentTxCount;
-
-          yield {
-            batch: [...txids],
-            batchIndex,
-            hasMore,
-          };
-
-          txids.length = 0;
-          batchIndex++;
-
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-      }
-    }
-
-    if (txids.length > 0) {
       yield {
-        batch: [...txids],
+        batch,
         batchIndex,
-        hasMore: false,
+        hasMore,
       };
+
+      batchIndex++;
+      await new Promise((resolve) => setImmediate(resolve));
     }
   }
 
-  public async *streamLoadedTxidsInfo(batchSize: number = 1000): AsyncGenerator<
-    {
-      batch: Array<{ txid: string; loadInfo: { timestamp: number; feeRate: number } }>;
-      batchIndex: number;
-      hasMore: boolean;
-    },
-    void,
-    unknown
-  > {
-    const txidsInfo: Array<{ txid: string; loadInfo: { timestamp: number; feeRate: number } }> = [];
-    let batchIndex = 0;
-    let processedCount = 0;
-    const total = this.loadedTxids.size;
+  // ========== PUBLIC COMMAND METHODS ==========
 
-    for (const [txid, loadInfo] of this.loadedTxids) {
-      txidsInfo.push({ txid, loadInfo });
-      processedCount++;
-
-      if (txidsInfo.length >= batchSize) {
-        const hasMore = processedCount < total;
-
-        yield {
-          batch: [...txidsInfo],
-          batchIndex,
-          hasMore,
-        };
-
-        txidsInfo.length = 0;
-        batchIndex++;
-
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    }
-
-    if (txidsInfo.length > 0) {
-      yield {
-        batch: [...txidsInfo],
-        batchIndex,
-        hasMore: false,
-      };
-    }
-  }
-
-  // ========== PUBLIC METHODS ==========
-
+  /**
+   * Initialize mempool by getting current transaction list from node.
+   * Validates that we received all transactions from the node.
+   */
   public async init({
     requestId,
     currentNetworkHeight,
@@ -989,7 +730,18 @@ export class Mempool extends AggregateRoot {
     currentNetworkHeight: number;
     service: BlockchainProviderService;
   }) {
-    const allTxidsFromNode: string[] = await service.getRawMempool(false);
+    // Get mempool info and txids in parallel for validation
+    const [mempoolInfo, allTxidsFromNode] = await Promise.all([service.getMempoolInfo(), service.getRawMempool(false)]);
+
+    // Check if mempool is enabled in the node
+    if (!mempoolInfo.loaded) {
+      throw new MempoolNotLoadedError();
+    }
+
+    // Validate that we received all txids
+    if (allTxidsFromNode.length < mempoolInfo.size) {
+      throw new MempoolSizeMismatchError();
+    }
 
     await this.apply(
       new BitcoinMempoolInitializedEvent({
@@ -997,11 +749,14 @@ export class Mempool extends AggregateRoot {
         requestId,
         blockHeight: currentNetworkHeight,
         allTxidsFromNode,
-        isSynchronized: false,
+        isSynchronized: false, // Always reset to false on initialization
       })
     );
   }
 
+  /**
+   * Process mempool synchronization by loading transaction data.
+   */
   public async processSync({
     requestId,
     service,
@@ -1011,19 +766,55 @@ export class Mempool extends AggregateRoot {
     service: BlockchainProviderService;
     hasMoreToProcess?: boolean;
   }) {
+    // Only process if there's more to process
     if (!hasMoreToProcess) {
       return;
+    }
+
+    // Check if we should trigger synchronized event (once per app run)
+    if (!this.isSynchronized) {
+      const totalTxids = this.allTxidsFromNode.size;
+      const loadedCount = this.loadedTxids.size;
+      const loadedPercent = totalTxids > 0 ? loadedCount / totalTxids : 0;
+
+      if (loadedPercent >= this.syncThresholdPercent) {
+        await this.apply(
+          new BitcoinMempoolSynchronizedEvent({
+            aggregateId: this.aggregateId,
+            requestId,
+            blockHeight: this.lastBlockHeight,
+            isSynchronized: true,
+          })
+        );
+        return; // Exit after publishing synchronized event
+      }
     }
 
     const syncStartTime = Date.now();
     this.adjustBatchSize();
 
-    const needsSync = !this.isSynchronized;
-    let loadedTransactions: Array<{ txid: string; transaction: MempoolTransaction }> = [];
+    // Find txids that need to be loaded
+    const txidsToLoad: string[] = [];
+    for (const txidHash of this.allTxidsFromNode.keys()) {
+      // Skip if already loaded
+      if (this.loadedTxids.has(txidHash)) {
+        continue;
+      }
 
-    if (needsSync) {
-      const result = await this.loadTransactionsFullSync([], service);
+      const originalTxid = this.hashToTxid.get(txidHash);
+      if (originalTxid) {
+        txidsToLoad.push(originalTxid);
+      }
+    }
+
+    let loadedTransactions: Array<{ txid: string; transaction: MempoolTransaction }> = [];
+    let moreToProcess = false;
+
+    if (txidsToLoad.length > 0) {
+      // Use smart loading strategy with timeout and fee rate prioritization
+      const result = await this.loadTransactionsSmart(txidsToLoad, service);
       loadedTransactions = result.loaded;
+      moreToProcess = result.hasMore;
     }
 
     const syncEndTime = Date.now();
@@ -1036,21 +827,44 @@ export class Mempool extends AggregateRoot {
         requestId,
         blockHeight: this.lastBlockHeight,
         loadedTransactions,
-        hasMoreToProcess: false,
+        hasMoreToProcess: moreToProcess,
       })
     );
   }
 
+  /**
+   * Process new blocks and update mempool accordingly.
+   */
   public async processBlocksBatch({
     requestId,
     blocks,
     service,
   }: {
     requestId: string;
-    blocks: Array<{ height: number; hash: string }>;
+    blocks: LightBlock[];
     service: BlockchainProviderService;
   }) {
-    const allTxidsFromNode: string[] = await service.getRawMempool(false);
+    // Extract confirmed transactions from blocks to remove from tracking
+    const confirmedTxids: string[] = [];
+    for (const block of blocks) {
+      if (block.tx) {
+        confirmedTxids.push(...block.tx);
+      }
+    }
+
+    // Remove confirmed transactions from loadedTxids tracking
+    if (confirmedTxids.length > 0) {
+      this.removeConfirmedFromLoadedTxids(confirmedTxids);
+    }
+
+    // Get mempool info and txids in parallel for validation
+    const [mempoolInfo, allTxidsFromNode] = await Promise.all([service.getMempoolInfo(), service.getRawMempool(false)]);
+
+    // Validate that we received all txids
+    if (allTxidsFromNode.length < mempoolInfo.size) {
+      throw new MempoolSizeMismatchError();
+    }
+
     const latestBlockHeight = blocks.length > 0 ? blocks[blocks.length - 1]!.height : this.lastBlockHeight;
 
     await this.apply(
@@ -1059,11 +873,13 @@ export class Mempool extends AggregateRoot {
         requestId,
         blockHeight: latestBlockHeight,
         allTxidsFromNode,
-        isSynchronized: false,
       })
     );
   }
 
+  /**
+   * Process blockchain reorganization.
+   */
   public async processReorganisation({
     requestId,
     blocks,
@@ -1073,7 +889,14 @@ export class Mempool extends AggregateRoot {
     blocks: Array<{ height: number; hash: string }>;
     service: BlockchainProviderService;
   }) {
-    const allTxidsFromNode: string[] = await service.getRawMempool(false);
+    // Get mempool info and txids in parallel for validation
+    const [mempoolInfo, allTxidsFromNode] = await Promise.all([service.getMempoolInfo(), service.getRawMempool(false)]);
+
+    // Validate that we received all txids
+    if (allTxidsFromNode.length < mempoolInfo.size) {
+      throw new MempoolSizeMismatchError();
+    }
+
     const reorgBlockHeight = blocks.length > 0 ? blocks[0]!.height : this.lastBlockHeight;
 
     await this.apply(
@@ -1082,11 +905,13 @@ export class Mempool extends AggregateRoot {
         requestId,
         blockHeight: reorgBlockHeight,
         allTxidsFromNode,
-        isSynchronized: false,
       })
     );
   }
 
+  /**
+   * Clear the entire mempool.
+   */
   public async clearMempool({ requestId }: { requestId: string }) {
     await this.apply(
       new BitcoinMempoolClearedEvent({
@@ -1097,129 +922,62 @@ export class Mempool extends AggregateRoot {
     );
   }
 
-  // ========== PERFORMANCE AND MONITORING ==========
-
-  /**
-   * Get performance metrics for monitoring
-   */
-  public getPerformanceMetrics(): {
-    memoryUsage: number;
-    transactionCount: number;
-    dataUtilization: number;
-    indexEfficiency: number;
-    freeSpaceFragmentation: number;
-    avgTransactionSize: number;
-  } {
-    const metadataMemory = this.txMetadataBuffer.byteLength;
-    const dataMemory = this.txDataBuffer.byteLength;
-    const totalMemory = metadataMemory + dataMemory;
-
-    const dataUtilization = this.dataOffset / this.txDataBuffer.byteLength;
-    const indexEfficiency = this.txidHashIndex.size / this.metadataCapacity;
-
-    const totalFreeSpace = Array.from(this.freeSpaceMap.values()).reduce((sum, size) => sum + size, 0);
-    const freeSpaceFragmentation = this.freeSpaceMap.size > 0 ? totalFreeSpace / this.dataOffset : 0;
-
-    const avgTransactionSize = this.currentTxCount > 0 ? this.dataOffset / this.currentTxCount : 0;
-
-    return {
-      memoryUsage: totalMemory,
-      transactionCount: this.currentTxCount,
-      dataUtilization,
-      indexEfficiency,
-      freeSpaceFragmentation,
-      avgTransactionSize,
-    };
-  }
-
-  /**
-   * Get detailed memory statistics
-   */
-  public getMemoryStats(): {
-    metadataBufferSize: number;
-    dataBufferSize: number;
-    metadataUsed: number;
-    dataUsed: number;
-    freeSpaceCount: number;
-    totalFreeSpace: number;
-    efficiency: number;
-  } {
-    const metadataUsed = this.currentTxCount * Mempool.METADATA_FIELDS * 4; // 4 bytes per float32
-    const totalFreeSpace = Array.from(this.freeSpaceMap.values()).reduce((sum, size) => sum + size, 0);
-    const totalAllocated = this.txMetadataBuffer.byteLength + this.txDataBuffer.byteLength;
-    const totalUsed = metadataUsed + this.dataOffset;
-
-    return {
-      metadataBufferSize: this.txMetadataBuffer.byteLength,
-      dataBufferSize: this.txDataBuffer.byteLength,
-      metadataUsed,
-      dataUsed: this.dataOffset,
-      freeSpaceCount: this.freeSpaceMap.size,
-      totalFreeSpace,
-      efficiency: totalAllocated > 0 ? totalUsed / totalAllocated : 0,
-    };
-  }
-
   // ========== EVENT HANDLERS (IDEMPOTENT) ==========
 
   private onBitcoinMempoolInitializedEvent({ payload }: BitcoinMempoolInitializedEvent) {
-    const { allTxidsFromNode } = payload;
+    const { allTxidsFromNode, isSynchronized } = payload;
 
-    // Reset synchronization status
-    this.isSynchronized = false;
+    // Always reset synchronization status if explicitly set to false
+    if (isSynchronized === false) {
+      this.isSynchronized = false;
+    }
 
-    // Cleanup old loaded txids
-    this.cleanupOldLoadedTxids();
+    // Build new txid tracking from node data
+    const newAllTxidsFromNode = new Map<number, boolean>();
+    const newHashToTxid = new Map<number, string>();
 
-    // Get current txids from our optimized storage
-    const currentTxids = new Set(this.getCurrentTxids());
-    const nodeTxids = new Set(allTxidsFromNode);
+    // Add all txids from node
+    for (const txid of allTxidsFromNode) {
+      const txidHash = this.hashTxid(txid);
+      newAllTxidsFromNode.set(txidHash, true);
+      newHashToTxid.set(txidHash, txid);
+    }
 
-    // Find transactions to remove (not on node anymore)
-    const txidsToRemove: string[] = [];
-    for (const currentTxid of currentTxids) {
-      if (!nodeTxids.has(currentTxid)) {
-        txidsToRemove.push(currentTxid);
+    // Remove transactions and tracking data for txids no longer in mempool
+    const currentTxidHashes = new Set(this.allTxidsFromNode.keys());
+    const nodeTxidHashes = new Set(newAllTxidsFromNode.keys());
+
+    for (const txidHash of currentTxidHashes) {
+      if (!nodeTxidHashes.has(txidHash)) {
+        // Remove transaction if exists
+        const transaction = this.transactions.get(txidHash);
+        if (transaction) {
+          const feeRate = this.calculateFeeRate(transaction);
+          this.removeFromFeeRateIndex(feeRate, txidHash);
+          this.transactions.delete(txidHash);
+        }
+
+        // Remove tracking data (confirmed in block or expired from node mempool)
+        this.loadedTxids.delete(txidHash);
+        this.hashToTxid.delete(txidHash);
       }
     }
 
-    // Remove outdated transactions
-    for (const txidToRemove of txidsToRemove) {
-      const txidHash = MempoolHelpers.hashString(txidToRemove);
-      const metadataIndex = this.txidHashIndex.get(txidHash);
+    // Update state with new data
+    this.allTxidsFromNode = newAllTxidsFromNode;
 
-      if (metadataIndex !== undefined) {
-        this.removeTransactionAtIndex(metadataIndex);
-      }
+    // Merge hashToTxid maps (keep existing + add new)
+    for (const [hash, txid] of newHashToTxid) {
+      this.hashToTxid.set(hash, txid);
     }
-
-    // Note: New transactions will be loaded during next sync process
-    // We don't clear everything, just remove what's no longer needed
   }
 
   private onBitcoinMempoolSyncProcessedEvent({ payload }: BitcoinMempoolSyncProcessedEvent) {
     const { loadedTransactions } = payload;
 
-    // Add all loaded transactions to our optimized storage
+    // Process all loaded transactions using addTransaction method
     for (const { txid, transaction } of loadedTransactions) {
-      // Check if transaction is already stored
-      if (!this.hasTransaction(txid)) {
-        const success = this.addTransactionOptimized(txid, transaction);
-
-        if (success) {
-          // Update legacy tracking
-          const feeRate = MempoolHelpers.calculateFeeRate(transaction);
-          this.loadedTxids.set(txid, { timestamp: Date.now(), feeRate });
-        }
-      }
-    }
-
-    // Update synchronization status based on loaded transaction count
-    const loadedCount = this.getTransactionCount();
-    const threshold = Math.floor(this.fullSyncThreshold * this.syncThresholdPercent);
-
-    if (loadedCount >= threshold) {
-      this.isSynchronized = true;
+      this.addTransaction(txid, transaction);
     }
   }
 
@@ -1230,13 +988,11 @@ export class Mempool extends AggregateRoot {
 
   private onBitcoinMempoolClearedEvent({ payload }: BitcoinMempoolClearedEvent) {
     // Clear all data structures
-    this.currentTxCount = 0;
-    this.dataOffset = 0;
-    this.txidHashIndex.clear();
-    this.txidStringIndex.clear(); // Clear original txid mappings
-    this.feeRateIndex.clear();
-    this.freeSpaceMap.clear();
+    this.allTxidsFromNode.clear();
+    this.transactions.clear();
     this.loadedTxids.clear();
+    this.hashToTxid.clear();
+    this.feeRateIndex.clear();
 
     // Reset state variables
     this.isSynchronized = false;

@@ -1,6 +1,8 @@
+import type { LightBlock } from '../../blockchain-provider';
+
 export interface IProcessMempoolReorganisationCommand {
   requestId: string;
-  blocks: Array<{ height: number; hash: string }>;
+  blocks: LightBlock[];
 }
 
 export class ProcessMempoolReorganisationCommand {

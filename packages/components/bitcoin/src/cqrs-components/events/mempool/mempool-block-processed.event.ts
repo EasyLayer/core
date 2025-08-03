@@ -2,7 +2,6 @@ import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqr
 
 export interface BitcoinMempoolBlockProcessedEventPayload extends EventBasePayload {
   allTxidsFromNode: string[];
-  isSynchronized: boolean;
 }
 
 @SystemEvent()

@@ -4,6 +4,7 @@ import type {
   UniversalBlockStats,
   UniversalTransaction,
   UniversalMempoolTransaction,
+  UniversalMempoolInfo,
 } from './interfaces';
 
 export interface BaseNodeProviderOptions {
@@ -117,7 +118,7 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getNetworkInfo() must be implemented by provider');
   }
 
-  async getMempoolInfo(): Promise<any> {
+  async getMempoolInfo(): Promise<UniversalMempoolInfo> {
     throw new Error('Method getMempoolInfo() must be implemented by provider');
   }
 
