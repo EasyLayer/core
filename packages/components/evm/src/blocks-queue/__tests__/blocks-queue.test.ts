@@ -230,7 +230,7 @@ describe('EVM BlocksQueue', () => {
       const block = createEvmBlock(1); // Should be 0
       
       await expect(queue.enqueue(block)).rejects.toThrow(
-        'Can\'t enqueue block. Block height: 1, Queue last height: -1'
+        'Can\'t enqueue block. Block number: 1, Queue last height: -1'
       );
     });
 
@@ -296,7 +296,7 @@ describe('EVM BlocksQueue', () => {
 
       const block2 = createEvmBlock(2);
       await expect(queue.enqueue(block2)).rejects.toThrow(
-        /isMaxHeightReached: true/
+        `Can't enqueue block. Max height reached: ${queue.maxBlockHeight}`
       );
     });
   });
@@ -322,7 +322,7 @@ describe('EVM BlocksQueue', () => {
 
     it('should throw error when dequeuing unknown block', async () => {
       await expect(queue.dequeue('0x123')).rejects.toThrow(
-        'Block not found or hash mismatch: 0x123'
+        'Block not found: 0x123'
       );
     });
   });

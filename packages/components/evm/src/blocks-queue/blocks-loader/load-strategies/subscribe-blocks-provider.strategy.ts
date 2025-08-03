@@ -50,8 +50,8 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
           this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
             try {
               if (this.queue.isMaxHeightReached) {
-                this._subscription?.unsubscribe();
-                reject(new Error('Reached max block height'));
+                // this._subscription?.unsubscribe();
+                // reject(new Error('Reached max block height'));
                 return;
               }
 

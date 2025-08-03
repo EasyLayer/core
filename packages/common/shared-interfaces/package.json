@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/shared-interfaces",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "",
   "private": true,
   "type": "commonjs",
@@ -16,6 +16,12 @@
   "author": "Yaroslav Pavliuk",
   "license": "",
   "packageManager": "yarn@4.5.0",
+  "dependencies": {
+    "@nestjs/common": "10.2.10",
+    "reflect-metadata": "0.1.14",
+    "rxjs": "7.8.1",
+    "uuid": "9.0.1"
+  },
   "devDependencies": {
     "@rollup/plugin-typescript": "11.1.6",
     "@types/node": "20.10.4",

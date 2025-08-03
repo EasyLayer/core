@@ -1,6 +1,6 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
-import { Blockchain, restoreChainLinks } from '../../blockchain-provider';
+import { Blockchain } from '../../blockchain-provider';
 import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
@@ -9,43 +9,127 @@ import {
 } from '../events';
 import { BlockchainValidationError } from './errors';
 
+/**
+ * Network for blockchain storage with fast height lookups.
+ */
 export class Network extends AggregateRoot {
   private __maxSize: number;
   public chain: Blockchain;
 
-  constructor({ maxSize, aggregateId }: { maxSize: number; aggregateId: string }) {
-    super(aggregateId);
+  constructor({
+    maxSize,
+    aggregateId,
+    blockHeight,
+    options,
+  }: {
+    maxSize: number;
+    aggregateId: string;
+    blockHeight: number;
+    options?: {
+      snapshotsEnabled?: boolean;
+      pruneOldSnapshots?: boolean;
+      allowEventsPruning?: boolean;
+    };
+  }) {
+    super(aggregateId, blockHeight, options);
 
     this.__maxSize = maxSize;
     // IMPORTANT: 'maxSize' must be NOT LESS than the number of blocks in a single batch when iterating over BlocksQueue.
     // The number of blocks in a batch depends on the block size,
     // so we must take the smallest blocks in the network,
     // and make sure that they fit into a single batch less than the value of 'maxSize' .
-    this.chain = new Blockchain({ maxSize });
+    this.chain = new Blockchain({ maxSize, baseBlockHeight: blockHeight });
   }
 
-  // Getter for current block height in the chain
+  // ===== GETTERS =====
+
+  /**
+   * Getter for current block height in the chain
+   * @complexity O(1)
+   */
   public get currentBlockHeight(): number | undefined {
     return this.chain.lastBlockHeight;
   }
 
+  /**
+   * Gets current chain statistics
+   * @complexity O(1)
+   */
+  public getChainStats(): {
+    size: number;
+    maxSize: number;
+    currentHeight?: number;
+    firstHeight?: number;
+    isEmpty: boolean;
+    isFull: boolean;
+  } {
+    const firstBlock = this.chain.toArray()[0]; // This is O(1) since we just get head
+
+    return {
+      size: this.chain.size,
+      maxSize: this.__maxSize,
+      currentHeight: this.chain.lastBlockHeight,
+      firstHeight: firstBlock?.height,
+      isEmpty: this.chain.size === 0,
+      isFull: this.chain.size >= this.__maxSize,
+    };
+  }
+
+  /**
+   * Gets the last block in chain
+   * @complexity O(1)
+   */
+  public getLastBlock(): LightBlock | undefined {
+    return this.chain.lastBlock;
+  }
+
+  /**
+   * Gets specific block by height using O(1) hash lookup
+   * @complexity O(1) - constant time lookup
+   */
+  public getBlockByHeight(height: number): LightBlock | null {
+    return this.chain.findBlockByHeight(height);
+  }
+
+  /**
+   * Gets last N blocks in chronological order
+   * @complexity O(n) where n = requested count
+   */
+  public getLastNBlocks(count: number): LightBlock[] {
+    return this.chain.getLastNBlocks(count);
+  }
+
+  /**
+   * Gets all blocks in chain (for compatibility - try to avoid for large chains)
+   * @complexity O(n) where n = number of blocks in chain
+   */
+  public getAllBlocks(): LightBlock[] {
+    return this.chain.toArray();
+  }
+
+  // ===== SNAPSHOTS =====
+
   protected toJsonPayload(): any {
     return {
-      // Convert Blockchain to an array of blocks
+      // Convert Blockchain to an array of blocks for serialization
       chain: this.chain.toArray(),
+      maxSize: this.__maxSize,
     };
   }
 
   protected fromSnapshot(state: any): void {
     if (state.chain && Array.isArray(state.chain)) {
-      this.chain = new Blockchain({ maxSize: this.__maxSize });
+      this.chain = new Blockchain({
+        maxSize: state.maxSize || this.__maxSize,
+        baseBlockHeight: this._lastBlockHeight,
+      });
       this.chain.fromArray(state.chain);
-      // Recovering links in Blockchain
-      restoreChainLinks(this.chain.head);
     }
 
     Object.setPrototypeOf(this, Network.prototype);
   }
+
+  // ===== PUBLIC METHODS =====
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
     await this.apply(
@@ -57,10 +141,10 @@ export class Network extends AggregateRoot {
     );
   }
 
-  // Method to clear all blockchain data(for database cleaning)
+  /**
+   * Method to clear all blockchain data (for database cleaning)
+   */
   public async clearChain({ requestId }: { requestId: string }) {
-    this.chain.truncateToBlock(-1); // Clear all blocks
-
     await this.apply(
       new BitcoinNetworkClearedEvent({
         aggregateId: this.aggregateId,
@@ -70,6 +154,9 @@ export class Network extends AggregateRoot {
     );
   }
 
+  /**
+   * Add blocks to the chain with validation
+   */
   public async addBlocks({ blocks, requestId }: { blocks: Block[]; requestId: string }) {
     const lightBlocks: LightBlock[] = blocks.map((block: Block) => ({
       height: block.height,
@@ -94,6 +181,9 @@ export class Network extends AggregateRoot {
     );
   }
 
+  /**
+   * Handle blockchain reorganization
+   */
   public async reorganisation({
     reorgHeight,
     requestId,
@@ -110,7 +200,7 @@ export class Network extends AggregateRoot {
       throw new Error('Reorganisation failed: reached genesis without fork point');
     }
 
-    // Get both blocks at once
+    // Get both blocks at once - using O(1) lookup for local block
     const localBlock = this.chain.findBlockByHeight(reorgHeight);
     const remoteBlock = await service.getBasicBlockByHeight(reorgHeight);
 
@@ -147,6 +237,8 @@ export class Network extends AggregateRoot {
     });
   }
 
+  // ===== IDEMPOTENT EVENT HANDLERS =====
+
   private onBitcoinNetworkInitializedEvent({ payload }: BitcoinNetworkInitializedEvent) {
     const { blockHeight } = payload;
 
@@ -180,5 +272,9 @@ export class Network extends AggregateRoot {
     // Here we cut full at once in height
     // This method is idempotent
     this.chain.truncateToBlock(Number(blockHeight));
+  }
+
+  private onBitcoinNetworkClearedEvent({ payload }: BitcoinNetworkClearedEvent) {
+    this.chain.truncateToBlock(-1); // Clear all blocks
   }
 }

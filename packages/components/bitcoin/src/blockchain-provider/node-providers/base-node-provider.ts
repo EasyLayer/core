@@ -1,4 +1,11 @@
-import type { RateLimits, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './interfaces';
+import type {
+  RateLimits,
+  UniversalBlock,
+  UniversalBlockStats,
+  UniversalTransaction,
+  UniversalMempoolTransaction,
+  UniversalMempoolInfo,
+} from './interfaces';
 
 export interface BaseNodeProviderOptions {
   uniqName: string;
@@ -111,12 +118,16 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getNetworkInfo() must be implemented by provider');
   }
 
-  async getMempoolInfo(): Promise<any> {
+  async getMempoolInfo(): Promise<UniversalMempoolInfo> {
     throw new Error('Method getMempoolInfo() must be implemented by provider');
   }
 
-  async getRawMempool(verbose?: boolean): Promise<any> {
+  async getRawMempool(): Promise<any> {
     throw new Error('Method getRawMempool() must be implemented by provider');
+  }
+
+  async getMempoolEntries(txid: string[]): Promise<(UniversalMempoolTransaction | null)[]> {
+    throw new Error('Method getMempoolEntries() must be implemented by provider');
   }
 
   async estimateSmartFee(confTarget: number, estimateMode?: string): Promise<any> {
