@@ -69,10 +69,10 @@ describe('CustomAggregateRoot', () => {
         aggregateId: 'test-id',
         version: 5,
         blockHeight: 500,
-        payload: JSON.stringify({
+        payload: {
           __type: 'TestAggregate',
           value: 500,
-        }),
+        },
       };
 
       aggregate.loadFromSnapshot(snapshot);
@@ -88,7 +88,7 @@ describe('CustomAggregateRoot', () => {
         aggregateId: '',
         version: 5,
         blockHeight: 500,
-        payload: '{}',
+        payload: {},
       };
 
       expect(() => aggregate.loadFromSnapshot(invalidSnapshot)).toThrow('aggregate Id is missed');
@@ -96,14 +96,21 @@ describe('CustomAggregateRoot', () => {
   });
 
   describe('commit() and uncommit()', () => {
-    it('should clear events after commit', async () => {
+    it('should save and commit events correctly', async () => {
       const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
+      
+      // Apply event
       await aggregate.apply(event);
-
+      expect(aggregate.getUnsavedEvents()).toHaveLength(1);
+      expect(aggregate.getUncommittedEvents()).toHaveLength(0);
+      
+      // Mark as saved (simulate database save)
+      aggregate.markEventsAsSaved();
+      expect(aggregate.getUnsavedEvents()).toHaveLength(0);
       expect(aggregate.getUncommittedEvents()).toHaveLength(1);
-
+      
+      // Commit (publish and clear)
       await aggregate.commit();
-
       expect(aggregate.getUncommittedEvents()).toHaveLength(0);
     });
   });

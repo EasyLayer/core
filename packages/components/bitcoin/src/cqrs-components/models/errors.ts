@@ -21,33 +21,3 @@ export class BlockchainValidationError extends BaseError<ErrorParams> {
     super(message, params);
   }
 }
-
-export interface MempoolNotLoadedErrorParams extends ErrorParams {
-  loaded: boolean;
-  nodeInfo?: any;
-}
-
-export class MempoolNotLoadedError extends BaseError<MempoolNotLoadedErrorParams> {
-  constructor({
-    message = 'Mempool is not loaded/enabled in Bitcoin Core node',
-    params = {} as MempoolNotLoadedErrorParams,
-  }: ErrorOptions<MempoolNotLoadedErrorParams> = {}) {
-    super(message, params);
-  }
-}
-
-export interface MempoolSizeMismatchErrorParams extends ErrorParams {
-  expectedSize: number;
-  actualSize: number;
-  operation: string;
-  mempoolInfo?: any;
-}
-
-export class MempoolSizeMismatchError extends BaseError<MempoolSizeMismatchErrorParams> {
-  constructor({
-    message = 'Mempool size mismatch - node returned incomplete transaction list',
-    params = {} as MempoolSizeMismatchErrorParams,
-  }: ErrorOptions<MempoolSizeMismatchErrorParams> = {}) {
-    super(message, params);
-  }
-}
