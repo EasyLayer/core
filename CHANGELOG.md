@@ -1,3 +1,9 @@
+## <small>0.9.4 (2025-08-05)</small>
+
+* feat: added bitcoin mempool cqrs componnets; ([c8c9c84](https://github.com/EasyLayer/core/commit/c8c9c84))
+
+
+
 ## <small>0.9.3 (2025-08-03)</small>
 
 * refactor: fixed loading blocks timers; ([bfcd503](https://github.com/EasyLayer/core/commit/bfcd503))
