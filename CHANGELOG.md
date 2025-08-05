@@ -1,3 +1,9 @@
+## <small>0.9.5 (2025-08-05)</small>
+
+* refactor: added reorg command for bitcoin mempool; ([4179f3a](https://github.com/EasyLayer/core/commit/4179f3a))
+
+
+
 ## <small>0.9.4 (2025-08-05)</small>
 
 * feat: added bitcoin mempool cqrs componnets; ([c8c9c84](https://github.com/EasyLayer/core/commit/c8c9c84))
