@@ -44,7 +44,6 @@
     "bip32": "4.0.0",
     "bip39": "3.1.0",
     "bitcoinjs-lib": "6.1.6",
-    "bitcore-p2p": "10.10.7",
     "bottleneck": "2.19.5",
     "class-validator": "0.14.0",
     "class-validator-jsonschema": "5.0.0",
