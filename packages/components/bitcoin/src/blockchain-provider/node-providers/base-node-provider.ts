@@ -50,6 +50,15 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw error;
   }
 
+  // ===== SUBSCRIPTION METHODS (Optional - only for providers that support it) =====
+
+  /**
+   * Subscribe to new block events (P2P providers only)
+   * @param callback - Function called with new block hash
+   * @returns Subscription object with unsubscribe method
+   */
+  subscribeToNewBlocks?(callback: (blockHash: string) => void): { unsubscribe: () => void };
+
   // ===== BASIC BLOCKCHAIN METHODS =====
 
   async getBlockHeight(): Promise<number> {

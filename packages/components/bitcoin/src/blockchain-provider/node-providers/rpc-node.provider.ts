@@ -14,19 +14,18 @@ import { NodeProviderTypes } from './interfaces';
 import { HexTransformer } from './hex-transformer';
 import { RateLimiter } from './rate-limiter';
 
-export interface SelfNodeProviderOptions extends BaseNodeProviderOptions {
+export interface RPCNodeProviderOptions extends BaseNodeProviderOptions {
   baseUrl: string;
   network: NetworkConfig;
-  /** Response timeout in milliseconds (default: 5000) */
   responseTimeout?: number;
 }
 
-export const createSelfNodeProvider = (options: SelfNodeProviderOptions): SelfNodeProvider => {
-  return new SelfNodeProvider(options);
+export const createRPCNodeProvider = (options: RPCNodeProviderOptions): RPCNodeProvider => {
+  return new RPCNodeProvider(options);
 };
 
-export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> {
-  readonly type: NodeProviderTypes = NodeProviderTypes.SELFNODE;
+export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
+  readonly type: NodeProviderTypes = NodeProviderTypes.RPC;
   private baseUrl: string;
   private username?: string;
   private password?: string;
@@ -35,7 +34,7 @@ export class SelfNodeProvider extends BaseNodeProvider<SelfNodeProviderOptions> 
   private network: NetworkConfig;
   private rateLimiter: RateLimiter;
 
-  constructor(options: SelfNodeProviderOptions) {
+  constructor(options: RPCNodeProviderOptions) {
     super(options);
 
     // Parse the baseUrl to extract username and password

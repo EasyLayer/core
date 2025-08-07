@@ -4,7 +4,7 @@ import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { ConnectionManager } from './connection-manager';
 import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from './utils';
-import { createProvider, ProviderOptions, NetworkConfig, RateLimits } from './node-providers';
+import { createProvider, ProviderOptions, ProviderNodeOptions, NetworkConfig, RateLimits } from './node-providers';
 
 export interface BlockchainProviderModuleOptions {
   providers: ProviderOptions[];
@@ -23,12 +23,16 @@ export class BlockchainProviderModule {
         return await providerOptions.useFactory();
       } else if (providerOptions.connection) {
         const { connection } = providerOptions;
-        return createProvider({
+
+        // Create properly typed provider options
+        const fullProviderOptions: ProviderNodeOptions = {
           ...connection,
           uniqName: `${connection.type.toUpperCase()}_${uuidv4()}`,
           rateLimits,
           network,
-        });
+        } as ProviderNodeOptions;
+
+        return createProvider(fullProviderOptions);
       } else {
         throw new Error('Provider configuration is invalid.');
       }
@@ -50,7 +54,7 @@ export class BlockchainProviderModule {
       providers: [
         {
           provide: BlockchainProviderService,
-          useFactory: (logger, connectionManager) => {
+          useFactory: (logger: AppLogger, connectionManager: ConnectionManager) => {
             return new BlockchainProviderService(logger, connectionManager, network);
           },
           inject: [AppLogger, ConnectionManager],

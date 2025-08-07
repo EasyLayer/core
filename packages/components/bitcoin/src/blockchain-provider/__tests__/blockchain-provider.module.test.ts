@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BlockchainProviderModule, BlockchainProviderModuleOptions } from '../blockchain-provider.module';
 import { BlockchainProviderService } from '../blockchain-provider.service';
 import { ConnectionManager } from '../connection-manager';
+import { NodeProviderTypes } from '../node-providers';
 
 describe('BlockchainProviderModule', () => {
   let module: TestingModule;
@@ -14,9 +15,9 @@ describe('BlockchainProviderModule', () => {
     providers: [
       {
         connection: {
-          type: 'selfnode' as any,
-          baseUrl: 'http://localhost'
-        }
+          type: NodeProviderTypes.RPC,
+          baseUrl: 'http://localhost',
+        } as any
       } 
     ]
   }

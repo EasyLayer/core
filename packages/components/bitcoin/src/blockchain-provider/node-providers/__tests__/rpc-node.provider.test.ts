@@ -1,4 +1,4 @@
-import { SelfNodeProvider } from '../self-node.provider';
+import { RPCNodeProvider } from '../rpc-node.provider';
 import type { NetworkConfig, UniversalBlock, UniversalTransaction, UniversalBlockStats } from '../interfaces';
 
 // Mock network config for testing
@@ -17,11 +17,11 @@ const mockNetworkConfig: NetworkConfig = {
   targetBlockTime: 600
 };
 
-describe('SelfNodeProvider Normalization Methods', () => {
-  let provider: SelfNodeProvider;
+describe('RPCNodeProvider Normalization Methods', () => {
+  let provider: RPCNodeProvider;
 
   beforeEach(() => {
-    provider = new SelfNodeProvider({
+    provider = new RPCNodeProvider({
       baseUrl: 'http://localhost:8332',
       network: mockNetworkConfig,
       uniqName: 'test-provider',

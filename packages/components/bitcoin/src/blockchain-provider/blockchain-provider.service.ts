@@ -5,6 +5,12 @@ import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTrans
 import { BitcoinNormalizer } from './normalizer';
 import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
+/**
+ * A Subscription is a Promise that resolves once unsubscribed, and also provides
+ * an `unsubscribe()` method to cancel the underlying subscription.
+ */
+export type Subscription = Promise<void> & { unsubscribe: () => void };
+
 @Injectable()
 export class BlockchainProviderService {
   private readonly normalizer: BitcoinNormalizer;
@@ -55,6 +61,52 @@ export class BlockchainProviderService {
         throw recoveryError;
       }
     }
+  }
+
+  /**
+   * Subscribes to new block events via P2P provider (ZMQ or P2P inventory)
+   *
+   * @param callback - Function to be invoked whenever a new block hash is received
+   * @returns A Subscription (Promise<void> & { unsubscribe(): void })
+   */
+  public subscribeToNewBlocks(callback: (blockHash: string) => void): Subscription {
+    let resolveSubscription!: () => void;
+    let rejectSubscription!: (error: Error) => void;
+
+    const subscriptionPromise = new Promise<void>((resolve, reject) => {
+      resolveSubscription = resolve;
+      rejectSubscription = reject;
+    }) as Subscription;
+
+    this._connectionManager
+      .getActiveProvider()
+      .then((provider) => {
+        // Check if provider supports block subscriptions
+        if (typeof provider.subscribeToNewBlocks !== 'function') {
+          rejectSubscription(new Error('Active provider does not support block subscriptions'));
+          return;
+        }
+
+        try {
+          const subscription = provider.subscribeToNewBlocks(callback);
+
+          subscriptionPromise.unsubscribe = () => {
+            subscription.unsubscribe();
+            resolveSubscription();
+          };
+        } catch (error) {
+          rejectSubscription(error as Error);
+        }
+      })
+      .catch((error) => {
+        this.log.error('Failed to get provider for subscription', {
+          args: { error },
+          methodName: 'subscribeToNewBlocks()',
+        });
+        rejectSubscription(error as Error);
+      });
+
+    return subscriptionPromise;
   }
 
   // ===== BASIC INFO METHODS =====

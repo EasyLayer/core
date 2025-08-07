@@ -2,7 +2,7 @@ import Bottleneck from 'bottleneck';
 import type { RateLimits } from './interfaces';
 
 /**
- * Internal rate limiter for SelfNodeProvider
+ * Internal rate limiter for RPCNodeProvider
  * All requests are executed as batches, even single requests
  */
 export class RateLimiter {
