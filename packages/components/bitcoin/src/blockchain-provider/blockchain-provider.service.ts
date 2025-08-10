@@ -5,6 +5,12 @@ import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTrans
 import { BitcoinNormalizer } from './normalizer';
 import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
+/**
+ * A Subscription is a Promise that resolves once unsubscribed, and also provides
+ * an `unsubscribe()` method to cancel the underlying subscription.
+ */
+export type Subscription = Promise<void> & { unsubscribe: () => void };
+
 @Injectable()
 export class BlockchainProviderService {
   private readonly normalizer: BitcoinNormalizer;
@@ -57,6 +63,62 @@ export class BlockchainProviderService {
     }
   }
 
+  /**
+   * Subscribes to new block events via provider (ZMQ for RPC, P2P for P2P)
+   * Automatically uses the best available subscription method from active provider
+   *
+   * @param callback - Function to be invoked whenever a new block is received
+   * @returns A Subscription (Promise<void> & { unsubscribe(): void })
+   */
+  public subscribeToNewBlocks(callback: (block: Block) => void): Subscription {
+    let resolveSubscription!: () => void;
+    let rejectSubscription!: (error: Error) => void;
+
+    const subscriptionPromise = new Promise<void>((resolve, reject) => {
+      resolveSubscription = resolve;
+      rejectSubscription = reject;
+    }) as Subscription;
+
+    this._connectionManager
+      .getActiveProvider()
+      .then((provider) => {
+        // Check if provider supports block subscriptions
+        if (typeof provider.subscribeToNewBlocks !== 'function') {
+          rejectSubscription(new Error('Active provider does not support block subscriptions'));
+          return;
+        }
+
+        try {
+          // Subscribe to UniversalBlock and normalize at service level
+          const subscription = provider.subscribeToNewBlocks((universalBlock: UniversalBlock) => {
+            try {
+              // Normalize UniversalBlock to Block at service level
+              const normalizedBlock = this.normalizer.normalizeBlock(universalBlock);
+              callback(normalizedBlock);
+            } catch (error) {
+              this.log.warn('Failed to normalize block in subscription', { args: { error } });
+            }
+          });
+
+          subscriptionPromise.unsubscribe = () => {
+            subscription.unsubscribe();
+            resolveSubscription();
+          };
+        } catch (error) {
+          rejectSubscription(error as Error);
+        }
+      })
+      .catch((error) => {
+        this.log.error('Failed to get provider for subscription', {
+          args: { error },
+          methodName: 'subscribeToNewBlocks()',
+        });
+        rejectSubscription(error as Error);
+      });
+
+    return subscriptionPromise;
+  }
+
   // ===== BASIC INFO METHODS =====
 
   /**
@@ -104,17 +166,19 @@ export class BlockchainProviderService {
    * @param height - block height
    * @param useHex - if true, uses hex parsing for better performance and complete transaction data
    * @param verbosity - verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle - if true, verifies Merkle root of transactions
    * @returns normalized block or null if block doesn't exist
    */
   public async getOneBlockByHeight(
     height: string | number,
     useHex: boolean = false,
-    verbosity: number = 1
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
   ): Promise<Block | null> {
     return this.executeProviderMethod('getOneBlockByHeight', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHeights([Number(height)]);
+        const universalBlocks = await provider.getManyBlocksHexByHeights([Number(height)], verifyMerkle);
         const universalBlock = universalBlocks[0];
 
         if (!universalBlock) {
@@ -124,7 +188,7 @@ export class BlockchainProviderService {
         return this.normalizer.normalizeBlock(universalBlock);
       } else {
         // Get structured block data - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], verbosity);
+        const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], verbosity, verifyMerkle);
         const rawBlock = rawBlocks[0];
 
         if (!rawBlock) {
@@ -142,13 +206,19 @@ export class BlockchainProviderService {
    * @param hash - block hash
    * @param useHex - if true, uses hex parsing for better performance and complete transaction data
    * @param verbosity - verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle - if true, verifies Merkle root of transactions
    * @returns normalized block or null if block doesn't exist
    */
-  public async getOneBlockByHash(hash: string, useHex: boolean = false, verbosity: number = 1): Promise<Block | null> {
+  public async getOneBlockByHash(
+    hash: string,
+    useHex: boolean = false,
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
+  ): Promise<Block | null> {
     return this.executeProviderMethod('getOneBlockByHash', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHashes([hash]);
+        const universalBlocks = await provider.getManyBlocksHexByHashes([hash], verifyMerkle);
         const universalBlock = universalBlocks[0];
 
         if (!universalBlock) {
@@ -168,7 +238,7 @@ export class BlockchainProviderService {
         return this.normalizer.normalizeBlock(universalBlock);
       } else {
         // Get structured block data - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHashes([hash], verbosity);
+        const rawBlocks = await provider.getManyBlocksByHashes([hash], verbosity, verifyMerkle);
         const rawBlock = rawBlocks[0];
 
         if (!rawBlock) {
@@ -186,16 +256,21 @@ export class BlockchainProviderService {
    * @param heights - array of block heights
    * @param useHex - if true, uses hex parsing for better performance and complete transaction data
    * @param verbosity - verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle - if true, verifies Merkle root of transactions
    */
   public async getManyBlocksByHeights(
     heights: string[] | number[],
     useHex: boolean = false,
-    verbosity: number = 1
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeProviderMethod('getManyBlocksByHeights', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHeights(heights.map((item) => Number(item)));
+        const universalBlocks = await provider.getManyBlocksHexByHeights(
+          heights.map((item) => Number(item)),
+          verifyMerkle
+        );
 
         // Filter out null blocks and normalize
         const validBlocks = universalBlocks.filter((block: any): block is UniversalBlock => block !== null);
@@ -204,7 +279,8 @@ export class BlockchainProviderService {
         // Get structured blocks - GUARANTEES HEIGHT
         const rawBlocks = await provider.getManyBlocksByHeights(
           heights.map((item) => Number(item)),
-          verbosity
+          verbosity,
+          verifyMerkle
         );
 
         // Filter out null blocks and normalize
@@ -220,16 +296,18 @@ export class BlockchainProviderService {
    * @param hashes - array of block hashes
    * @param useHex - if true, uses hex parsing for better performance and complete transaction data
    * @param verbosity - verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle - if true, verifies Merkle root of transactions
    */
   public async getManyBlocksByHashes(
     hashes: string[],
     useHex: boolean = false,
-    verbosity: number = 1
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeProviderMethod('getManyBlocksByHashes', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHashes(hashes);
+        const universalBlocks = await provider.getManyBlocksHexByHashes(hashes, verifyMerkle);
 
         // Get heights for valid blocks using public provider method
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
@@ -258,7 +336,7 @@ export class BlockchainProviderService {
         return this.normalizer.normalizeManyBlocks(completeBlocks);
       } else {
         // Get structured blocks - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHashes(hashes, verbosity);
+        const rawBlocks = await provider.getManyBlocksByHashes(hashes, verbosity, verifyMerkle);
 
         // Filter out null blocks and normalize
         const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
@@ -404,35 +482,35 @@ export class BlockchainProviderService {
   // ===== CONVENIENCE METHODS FOR BETTER API =====
 
   /**
-   * High-performance method: Gets a fully parsed block with all transactions
-   * This is the fastest way to get complete block with all transactions
+   * High-performance method: Gets a fully parsed block with all transactions and Merkle verification
+   * This is the fastest and most secure way to get complete block with all transactions
    * @returns block or null if doesn't exist
    */
-  public async getFullBlockByHeight(height: string | number): Promise<Block | null> {
-    return this.getOneBlockByHeight(height, true); // Force hex parsing
+  public async getFullBlockByHeight(height: string | number, verifyMerkle: boolean = false): Promise<Block | null> {
+    return this.getOneBlockByHeight(height, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
   }
 
   /**
-   * High-performance method: Gets a fully parsed block with all transactions
+   * High-performance method: Gets a fully parsed block with all transactions and Merkle verification
    * @returns block or null if doesn't exist
    */
-  public async getFullBlockByHash(hash: string): Promise<Block | null> {
-    return this.getOneBlockByHash(hash, true); // Force hex parsing
+  public async getFullBlockByHash(hash: string, verifyMerkle: boolean = false): Promise<Block | null> {
+    return this.getOneBlockByHash(hash, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
   }
 
   /**
-   * High-performance method: Gets multiple fully parsed blocks with all transactions
-   * This is the most efficient way to get multiple complete blocks
+   * High-performance method: Gets multiple fully parsed blocks with all transactions and Merkle verification
+   * This is the most efficient and secure way to get multiple complete blocks
    */
-  public async getFullBlocksByHeights(heights: string[] | number[]): Promise<Block[]> {
-    return this.getManyBlocksByHeights(heights, true); // Force hex parsing
+  public async getFullBlocksByHeights(heights: string[] | number[], verifyMerkle: boolean = false): Promise<Block[]> {
+    return this.getManyBlocksByHeights(heights, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
   }
 
   /**
-   * High-performance method: Gets multiple fully parsed blocks with all transactions
+   * High-performance method: Gets multiple fully parsed blocks with all transactions and Merkle verification
    */
-  public async getFullBlocksByHashes(hashes: string[]): Promise<Block[]> {
-    return this.getManyBlocksByHashes(hashes, true); // Force hex parsing
+  public async getFullBlocksByHashes(hashes: string[], verifyMerkle: boolean = false): Promise<Block[]> {
+    return this.getManyBlocksByHashes(hashes, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
   }
 
   /**

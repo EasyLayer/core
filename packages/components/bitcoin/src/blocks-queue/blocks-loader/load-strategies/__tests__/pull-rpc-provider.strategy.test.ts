@@ -1,5 +1,5 @@
 import { BlockchainProviderService, Block } from '../../../../blockchain-provider';
-import { PullNetworkProviderStrategy } from '../pull-network-provider.strategy';
+import { PullRpcProviderStrategy } from '../pull-rpc-provider.strategy';
 import { AppLogger } from '@easylayer/common/logger';
 import { BlocksQueue } from '../../../blocks-queue';
 
@@ -29,8 +29,8 @@ function createTestBlock(height: number, hash: string, size: number): Block {
   };
 }
 
-describe('PullNetworkProviderStrategy', () => {
-  let strategy: PullNetworkProviderStrategy;
+describe('PullRpcProviderStrategy', () => {
+  let strategy: PullRpcProviderStrategy;
   let mockLogger: jest.Mocked<AppLogger>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
   let queue: BlocksQueue<Block>;
@@ -60,7 +60,7 @@ describe('PullNetworkProviderStrategy', () => {
       getManyBlocksByHeights: jest.fn(),
     } as any;
 
-    strategy = new PullNetworkProviderStrategy(
+    strategy = new PullRpcProviderStrategy(
       mockLogger,
       mockProvider,
       queue,
@@ -79,12 +79,6 @@ describe('PullNetworkProviderStrategy', () => {
       
       await expect(strategy.load(200)).rejects.toThrow('Reached max block height');
     });
-
-    // it('should throw when current network height is reached', async () => {
-    //   (queue as any)._lastHeight = 50;
-      
-    //   await expect(strategy.load(50)).rejects.toThrow('Reached current network height');
-    // });
 
     it('should return early when queue is overloaded after preload', async () => {
       (queue as any)._lastHeight = 0;
@@ -117,7 +111,7 @@ describe('PullNetworkProviderStrategy', () => {
       await strategy.load(10);
       
       expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2, 3, 4]);
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true);
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true, undefined, true);
       expect(queue.length).toBe(2);
       expect(queue.lastHeight).toBe(2);
     });
@@ -269,7 +263,7 @@ describe('PullNetworkProviderStrategy', () => {
       
       const result = await (strategy as any).loadBlocks(infos, 3);
       
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true);
+      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true, undefined, true);
       expect(result).toEqual(blocks);
     });
 

@@ -5,8 +5,8 @@ import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/ex
 import type { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import {
-  PullNetworkProviderStrategy,
-  SubscribeBlocksProviderStrategy,
+  PullRpcProviderStrategy,
+  SubscribeWsProviderStrategy,
   BlocksLoadingStrategy,
   StrategyNames,
 } from './load-strategies';
@@ -115,13 +115,13 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     };
 
     this._strategies.set(
-      StrategyNames.PULL,
-      new PullNetworkProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+      StrategyNames.RPC_PULL,
+      new PullRpcProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
     );
 
     this._strategies.set(
-      StrategyNames.SUBSCRIBE,
-      new SubscribeBlocksProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+      StrategyNames.WS_SUBSCRIBE,
+      new SubscribeWsProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
     );
   }
 
@@ -130,8 +130,8 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     const configStrategy = this.config.queueLoaderStrategyName;
 
     // If config is PULL - always use PULL
-    if (configStrategy === StrategyNames.PULL) {
-      return this._strategies.get(StrategyNames.PULL)!;
+    if (configStrategy === StrategyNames.RPC_PULL) {
+      return this._strategies.get(StrategyNames.RPC_PULL)!;
     }
 
     // If config is SUBSCRIBE but big height difference - use PULL
@@ -140,11 +140,11 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       const threshold = this.config.strategyThreshold || 20;
 
       if (heightDifference > threshold) {
-        return this._strategies.get(StrategyNames.PULL)!;
+        return this._strategies.get(StrategyNames.RPC_PULL)!;
       }
     }
 
-    // Default to use configured strategy (SUBSCRIBE)
-    return this._strategies.get(StrategyNames.SUBSCRIBE)!;
+    // Default to use configured strategy
+    return this._strategies.get(StrategyNames.WS_SUBSCRIBE)!;
   }
 }

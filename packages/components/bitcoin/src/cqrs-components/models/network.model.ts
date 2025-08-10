@@ -157,17 +157,8 @@ export class Network extends AggregateRoot {
   /**
    * Add blocks to the chain with validation
    */
-  public async addBlocks({ blocks, requestId }: { blocks: Block[]; requestId: string }) {
-    const lightBlocks: LightBlock[] = blocks.map((block: Block) => ({
-      height: block.height,
-      hash: block.hash,
-      previousblockhash: block.previousblockhash ?? '',
-      tx: (block.tx ?? []).map((tx: Transaction) => tx.hash),
-    }));
-
-    const isValid = this.chain.validateNextBlocks(lightBlocks);
-
-    if (!isValid) {
+  public async addBlocks({ blocks, requestId }: { blocks: LightBlock[]; requestId: string }) {
+    if (!this.chain.validateNextBlocks(blocks)) {
       throw new BlockchainValidationError();
     }
 
@@ -176,7 +167,7 @@ export class Network extends AggregateRoot {
         aggregateId: this.aggregateId,
         requestId,
         blockHeight: blocks[blocks.length - 1]?.height ?? -1,
-        blocks: lightBlocks,
+        blocks,
       })
     );
   }
@@ -261,6 +252,7 @@ export class Network extends AggregateRoot {
       blocks.map((block: LightBlock) => ({
         height: Number(block.height),
         hash: block.hash,
+        merkleroot: block.merkleroot,
         previousblockhash: block?.previousblockhash || '',
         tx: block.tx.map((txid: string) => txid),
       }))

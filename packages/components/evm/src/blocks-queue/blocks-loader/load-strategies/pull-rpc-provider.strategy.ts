@@ -4,8 +4,8 @@ import type { Block } from '../../../blockchain-provider';
 import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
 import { BlocksQueue } from '../../blocks-queue';
 
-export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.PULL;
+export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
+  readonly name: StrategyNames = StrategyNames.RPC_PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
   private _preloadedItemsQueue: Block[] = []; // Blocks + Transactions - Receipts
 
@@ -111,7 +111,7 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
     }
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
-    this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true); // true = with transactions
+    this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true, true); // true = with transactions
   }
 
   /**
@@ -284,7 +284,11 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
         const blockHeights: number[] = blocks.map((block: Block) => block.blockNumber);
 
         // Get all block receipts at once using eth_getBlockReceipts
-        const allBlocksReceipts = await this.blockchainProvider.getManyBlocksWithReceipts(blockHeights);
+        const allBlocksReceipts = await this.blockchainProvider.getManyBlocksWithReceipts(
+          blockHeights,
+          undefined,
+          true
+        );
         return allBlocksReceipts;
       } catch (error) {
         attempt++;

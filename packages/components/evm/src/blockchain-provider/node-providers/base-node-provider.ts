@@ -111,8 +111,15 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
 
   /**
    * Gets receipts for multiple blocks using batch eth_getBlockReceipts calls
+   * @param blockNumbers - Array of block numbers
+   * @param verifyTrie - Whether to verify receipts trie (optional)
+   * @param receiptsRoots - Expected receipts roots for verification (optional)
    */
-  async getManyBlocksReceipts(blockNumbers: number[]): Promise<UniversalTransactionReceipt[][]> {
+  async getManyBlocksReceipts(
+    blockNumbers: number[],
+    verifyTrie = false,
+    receiptsRoots?: (string | undefined)[]
+  ): Promise<UniversalTransactionReceipt[][]> {
     throw new Error('Method getManyBlocksReceipts() must be implemented by provider');
   }
 
@@ -122,7 +129,17 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
     throw new Error('Method getBlockHeight() must be implemented by provider');
   }
 
-  async getManyBlocksByHeights(heights: number[], fullTransactions?: boolean): Promise<(UniversalBlock | null)[]> {
+  /**
+   * Gets many blocks by heights with optional trie verification
+   * @param heights - Array of block heights
+   * @param fullTransactions - Whether to include full transaction objects
+   * @param verifyTrie - Whether to verify transactions trie (only works with fullTransactions=true)
+   */
+  async getManyBlocksByHeights(
+    heights: number[],
+    fullTransactions?: boolean,
+    verifyTrie?: boolean
+  ): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksByHeights() must be implemented by provider');
   }
 
@@ -132,5 +149,24 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
 
   async getManyBlocksByHashes(hashes: Hash[], fullTransactions?: boolean): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksByHashes() must be implemented by provider');
+  }
+
+  /**
+   * Gets multiple blocks with full transactions and receipts using batch calls.
+   * Optimized approach using batch calls for better performance.
+   * Guarantees blockNumber since heights are known from request.
+   * Node calls: 2 (1 batch for blocks + 1 batch for receipts)
+   *
+   * @param heights - Array of block heights (string or number)
+   * @param fullTransactions - Whether to include full transaction objects
+   * @param verifyTrie - Whether to verify both transactions and receipts tries
+   * @returns Array of blocks with attached receipts (null for missing blocks)
+   */
+  async getManyBlocksWithReceipts(
+    heights: string[] | number[],
+    fullTransactions = false,
+    verifyTrie = false
+  ): Promise<((UniversalBlock & { receipts: UniversalTransactionReceipt[] }) | null)[]> {
+    throw new Error('Method getManyBlocksWithReceipts() must be implemented by provider');
   }
 }

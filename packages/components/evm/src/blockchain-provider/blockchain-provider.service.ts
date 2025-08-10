@@ -61,13 +61,20 @@ export class BlockchainProviderService {
   }
 
   /**
+   * Enhanced subscription method with trie verification support
    * Subscribes to new block events via WebSocket using provider's native implementation
    * Returns complete blocks with transactions and receipts
    *
    * @param callback - Function to be invoked whenever a new block is received
+   * @param fullTransactions - Whether to include full transaction objects
+   * @param verifyTrie - Whether to verify merkle tries for transactions and receipts
    * @returns A Subscription (Promise<void> & { unsubscribe(): void })
    */
-  public subscribeToNewBlocks(callback: (block: Block) => void): Subscription {
+  public subscribeToNewBlocks(
+    callback: (block: Block) => void,
+    fullTransactions = true,
+    verifyTrie = false
+  ): Subscription {
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
@@ -88,7 +95,7 @@ export class BlockchainProviderService {
         try {
           const subscription = provider.subscribeToNewBlocks(async (blockNumber: number) => {
             try {
-              const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, true);
+              const blockWithReceipts = await this.getOneBlockWithReceipts(blockNumber, fullTransactions, verifyTrie);
               if (blockWithReceipts) {
                 callback(blockWithReceipts);
               }
@@ -126,30 +133,30 @@ export class BlockchainProviderService {
    * Guarantees blockNumber since height is known from request.
    * Node calls: 2 (1 for block + 1 for receipts if block has transactions, otherwise just 1)
    */
-  public async getOneBlockWithReceipts(height: string | number, fullTransactions = false): Promise<Block | null> {
+  public async getOneBlockWithReceipts(
+    height: string | number,
+    fullTransactions = false,
+    verifyTrie = false
+  ): Promise<Block | null> {
     return this.executeProviderMethod('getOneBlockWithReceipts', async (provider) => {
       const numericHeight = Number(height);
 
-      // Get block with transactions
-      const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions);
+      // Use the new unified method from provider
+      const blocksWithReceipts = await provider.getManyBlocksWithReceipts(
+        [numericHeight],
+        fullTransactions,
+        verifyTrie
+      );
 
-      if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
+      if (!blocksWithReceipts || blocksWithReceipts.length === 0 || !blocksWithReceipts[0]) {
         return null;
       }
 
-      let rawBlock = rawBlocks[0];
+      const rawBlock = blocksWithReceipts[0];
 
       // Ensure blockNumber is present - required for final Block interface
       if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
         rawBlock.blockNumber = numericHeight;
-      }
-
-      // Get receipts if block has transactions
-      if (rawBlock.transactions && rawBlock.transactions.length > 0) {
-        const rawReceiptsArray = await provider.getManyBlocksReceipts([numericHeight]);
-        rawBlock.receipts = rawReceiptsArray[0] || [];
-      } else {
-        rawBlock.receipts = [];
       }
 
       const normalizedBlock = this.normalizer.normalizeBlock(rawBlock);
@@ -158,30 +165,25 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple blocks with full transactions and receipts using eth_getBlockReceipts.
+   * Gets multiple blocks with full transactions and receipts using the provider's unified method.
    * Optimized approach using batch calls for better performance.
    * Guarantees blockNumber since heights are known from request.
    * Node calls: 2 (1 batch for blocks + 1 batch for receipts)
    */
-  public async getManyBlocksWithReceipts(heights: string[] | number[], fullTransactions = false): Promise<Block[]> {
+  public async getManyBlocksWithReceipts(
+    heights: string[] | number[],
+    fullTransactions = false,
+    verifyTrie = false
+  ): Promise<Block[]> {
     return this.executeProviderMethod('getManyBlocksWithReceipts', async (provider) => {
-      const numericHeights = heights.map((h) => Number(h));
+      // Use the new unified method from provider
+      const rawBlocksWithReceipts = await provider.getManyBlocksWithReceipts(heights, fullTransactions, verifyTrie);
 
-      const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
+      // Filter out null blocks and normalize
+      const validBlocks = rawBlocksWithReceipts.filter((block: any): block is UniversalBlock => block !== null);
 
-      // Filter out null blocks before processing receipts
-      const validRawBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
-      const allBlocksReceipts = await provider.getManyBlocksReceipts(numericHeights);
+      const normalizedBlocks = validBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
 
-      // Attach receipts to valid blocks, maintaining order
-      rawBlocks.forEach((rawBlock: any, index: any) => {
-        if (rawBlock) {
-          rawBlock.receipts = allBlocksReceipts[index] || [];
-        }
-      });
-
-      // Normalize only valid blocks
-      const normalizedBlocks = validRawBlocks.map((rawBlock: any) => this.normalizer.normalizeBlock(rawBlock));
       return normalizedBlocks;
     });
   }
@@ -268,10 +270,14 @@ export class BlockchainProviderService {
    * Guarantees blockNumber since height is known from request.
    * Node calls: 1 (eth_getBlockByNumber)
    */
-  public async getOneBlockByHeight(height: string | number, fullTransactions?: boolean): Promise<Block | null> {
+  public async getOneBlockByHeight(
+    height: string | number,
+    fullTransactions?: boolean,
+    verifyTrie?: boolean
+  ): Promise<Block | null> {
     return this.executeProviderMethod('getOneBlockByHeight', async (provider) => {
       const numericHeight = Number(height);
-      const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions);
+      const rawBlocks = await provider.getManyBlocksByHeights([numericHeight], fullTransactions, verifyTrie);
 
       if (!rawBlocks || rawBlocks.length === 0 || !rawBlocks[0]) {
         return null;
@@ -287,10 +293,14 @@ export class BlockchainProviderService {
    * Guarantees blockNumber since heights are known from request.
    * Node calls: 1 (batch eth_getBlockByNumber for all heights)
    */
-  public async getManyBlocksByHeights(heights: string[] | number[], fullTransactions?: boolean): Promise<Block[]> {
+  public async getManyBlocksByHeights(
+    heights: string[] | number[],
+    fullTransactions?: boolean,
+    verifyTrie?: boolean
+  ): Promise<Block[]> {
     return this.executeProviderMethod('getManyBlocksByHeights', async (provider) => {
       const numericHeights = heights.map((item) => Number(item));
-      const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions);
+      const rawBlocks = await provider.getManyBlocksByHeights(numericHeights, fullTransactions, verifyTrie);
 
       // Filter out null blocks and normalize
       const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
