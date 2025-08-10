@@ -1,15 +1,3 @@
-export interface MempoolInfo {
-  loaded: boolean; // Whether mempool is loaded
-  size: number; // Number of transactions in mempool
-  bytes: number; // Total size of all transactions in bytes
-  usage: number; // Total memory usage for mempool in bytes
-  total_fee: number; // Total fee in satoshis (converted from BTC)
-  maxmempool: number; // Maximum mempool size in bytes
-  mempoolminfee: number; // Minimum fee rate in sat/vB (converted from BTC/kvB)
-  minrelaytxfee: number; // Minimum relay fee rate in sat/vB (converted from BTC/kvB)
-  unbroadcastcount: number; // Number of unbroadcast transactions
-}
-
 export interface MempoolTransaction {
   // Basic transaction info
   txid: string;
@@ -44,4 +32,16 @@ export interface MempoolTransaction {
 
   // Unbroadcast flag
   unbroadcast?: boolean;
+}
+
+export interface MempoolInfo {
+  loaded: boolean; // Whether mempool is loaded
+  size: number; // Number of transactions in mempool
+  bytes: number; // Total size of all transactions in bytes
+  usage: number; // Total memory usage for mempool in bytes
+  total_fee: number; // Total fee in satoshis (converted from BTC)
+  maxmempool: number; // Maximum mempool size in bytes
+  mempoolminfee: number; // Minimum fee rate in sat/vB (converted from BTC/kvB)
+  minrelaytxfee: number; // Minimum relay fee rate in sat/vB (converted from BTC/kvB)
+  unbroadcastcount: number; // Number of unbroadcast transactions
 }

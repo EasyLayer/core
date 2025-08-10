@@ -5,41 +5,16 @@ export class Chain {
   prev: Chain | null = null;
 }
 
-// /**
-// * Restores the chain links (next and prev) for the blockchain.
-// * @param currentNode The starting node of the chain to restore links for.
-// */
-// export function restoreChainLinks(currentNode: Chain | null): void {
-//  while (currentNode) {
-//    // Restore the prototype for the current Chain node
-//    Object.setPrototypeOf(currentNode, Chain.prototype);
-
-//    // If there is a next node, restore its prototype
-//    if (currentNode.next) {
-//      Object.setPrototypeOf(currentNode.next, Chain.prototype);
-//    }
-
-//    // If there is a previous node, restore its prototype
-//    if (currentNode.prev) {
-//      Object.setPrototypeOf(currentNode.prev, Chain.prototype);
-//    }
-
-//    // Move to the next node
-//    currentNode = currentNode.next;
-//  }
-// }
-
 /**
- * Blockchain class representing a doubly linked list of blocks.
- * Each block contains a height, hash, previous hash, and transaction IDs.
- * The blockchain has a fixed maximum size and automatically removes the oldest blocks
- * when new blocks are added beyond this size.
+ * EVM-only Blockchain class with full Patricia Trie validation
+ * Works with ALL EVM networks automatically:
+ * Ethereum, Polygon, BSC, Arbitrum, Optimism, Avalanche, Base, Fantom, etc.
  */
 export class Blockchain {
   private _head: Chain | null = null;
   private _tail: Chain | null = null;
   private _size: number = 0;
-  // _maxSize - Maximum number of blocks allowed in the blockchain at any given time.
+  // Maximum number of blocks allowed in the blockchain at any given time
   private _maxSize: number;
   private _baseBlockHeight: number;
 
@@ -59,7 +34,7 @@ export class Blockchain {
     return this._tail;
   }
 
-  // Gets the hash of the first block in the chain.
+  // Gets the hash of the first block in the chain
   // Complexity: O(1)
   get firstBlockHash(): string | undefined {
     return this._head ? this._head.block.hash : undefined;
@@ -73,8 +48,8 @@ export class Blockchain {
   }
 
   /**
-   * Gets the previous hash of the last block in the chain.
-   * @returns {string} The previous hash of the last block, or an empty string if the chain is empty.
+   * Gets the previous hash of the last block in the chain
+   * @returns The previous hash of the last block, or undefined if the chain is empty
    * Complexity: O(1)
    */
   // eslint-disable-next-line getter-return
@@ -85,8 +60,8 @@ export class Blockchain {
   }
 
   /**
-   * Gets the hash of the last block in the chain.
-   * @returns {string} The hash of the last block, or an empty string if the chain is empty.
+   * Gets the hash of the last block in the chain
+   * @returns The hash of the last block, or undefined if the chain is empty
    * Complexity: O(1)
    */
   // eslint-disable-next-line getter-return
@@ -97,8 +72,8 @@ export class Blockchain {
   }
 
   /**
-   * Gets the height of the last block in the chain.
-   * @returns {number} The height of the last block, or this._baseBlockHeight if the chain is empty.
+   * Gets the height of the last block in the chain
+   * @returns The height of the last block, or undefined if the chain is empty
    * Complexity: O(1)
    */
   // eslint-disable-next-line getter-return
@@ -109,8 +84,8 @@ export class Blockchain {
   }
 
   /**
-   * Gets the size of the blockchain.
-   * @returns {number} The number of blocks in the chain.
+   * Gets the size of the blockchain
+   * @returns The number of blocks in the chain
    * Complexity: O(1)
    */
   get size(): number {
@@ -118,9 +93,9 @@ export class Blockchain {
   }
 
   /**
-   * Adds a block to the end of the chain without validation.
-   * @param block - The block to add.
-   * @returns {boolean} True if the block was added successfully, false otherwise.
+   * Adds a block to the end of the chain without validation
+   * @param block - The block to add
+   * @returns True if the block was added successfully, false otherwise
    * Complexity: O(1)
    */
   private addBlockFast(block: LightBlock): boolean {
@@ -148,37 +123,33 @@ export class Blockchain {
   }
 
   /**
-   * Adds a block to the end of the chain.
-   * @param {number} blockNumber - The height of the new block.
-   * @param {string} hash - The hash of the new block.
-   * @param {string} parentHash - The hash of the previous block.
-   * @param {string[]} transactions - The transaction IDs of the new block.
-   * @returns {boolean} True if the block was added successfully, false otherwise.
+   * Adds a block to the end of the chain with SPV validation
+   * @param block - The block to add
+   * @returns True if the block was added successfully, false otherwise
    * Complexity: O(1)
    */
-  public addBlock(blockNumber: number, hash: string, parentHash: string, transactions: string[]): boolean {
-    // Before adding a block, we validate it
-    if (!this.validateNextBlock(blockNumber, parentHash)) {
+  public addBlock(block: LightBlock): boolean {
+    // Basic sequence validation
+    if (!this.validateNextBlock(block.blockNumber, block.parentHash)) {
       return false;
     }
 
-    const newBlock: LightBlock = { blockNumber, hash, parentHash, transactions };
-    return this.addBlockFast(newBlock);
+    return this.addBlockFast(block);
   }
 
   /**
-   * Adds an array of blocks to the chain.
-   * @param {LightBlock[]} blocks - Array of blocks to add.
-   * @returns {boolean} True if the blocks were added successfully, false otherwise.
-   * Complexity: O(n), where n - is the number of blocks in the array
+   * Adds an array of light blocks to the chain
+   * @param blocks - Array of light blocks to add
+   * @returns True if the blocks were added successfully, false otherwise
+   * Complexity: O(n), where n is the number of blocks in the array
    */
   public addBlocks(blocks: LightBlock[]): boolean {
-    // Before adding blocks, we validate the entire sequence ONCE
+    // Validate sequence
     if (!this.validateNextBlocks(blocks)) {
       return false;
     }
 
-    // Add all blocks without individual validation - much faster
+    // Add all blocks fast
     for (const block of blocks) {
       this.addBlockFast(block);
     }
@@ -187,8 +158,8 @@ export class Blockchain {
   }
 
   /**
-   * Gets the last block without deleting it.
-   * @returns {LightBlock | null} The last block in the chain, or null if the chain is empty.
+   * Gets the last block without deleting it
+   * @returns The last block in the chain, or null if the chain is empty
    * Complexity: O(1)
    */
   public peekLast(): LightBlock | null {
@@ -196,10 +167,10 @@ export class Blockchain {
   }
 
   /**
-   * Validates the next block to be added to the chain.
-   * @param {number} blockNumber - The height of the new block.
-   * @param {string} parentHash - The hash of the previous block.
-   * @returns {boolean} True if the block is valid, false otherwise.
+   * Validates the next block to be added to the chain
+   * @param blockNumber - The height of the new block
+   * @param parentHash - The hash of the previous block
+   * @returns True if the block is valid, false otherwise
    * Complexity: O(1)
    */
   public validateNextBlock(blockNumber: number, parentHash: string): boolean {
@@ -208,12 +179,12 @@ export class Blockchain {
       return true;
     }
 
-    // Check if the given height is exactly one more than the last block's height.
+    // Check if the given height is exactly one more than the last block's height
     if (this._tail.block.blockNumber + 1 !== blockNumber) {
       return false;
     }
 
-    // Check if the given previous hash matches the last block's hash.
+    // Check if the given previous hash matches the last block's hash
     if (this._tail.block.hash !== parentHash) {
       return false;
     }
@@ -222,11 +193,11 @@ export class Blockchain {
   }
 
   /**
-   * Validates an array of blocks to be added to the chain.
-   * Ensures that the blocks are in the correct order and can be added sequentially.
-   * @param {LightBlock[]} blocks - Array of blocks to validate.
-   * @returns {boolean} True if all blocks are valid and in the correct order, false otherwise.
-   * Complexity: O(n), where n - is the number of blocks in the array
+   * Validates an array of light blocks to be added to the chain
+   * Ensures that the blocks are in the correct order and can be added sequentially
+   * @param blocks - Array of light blocks to validate
+   * @returns True if all blocks are valid and in the correct order, false otherwise
+   * Complexity: O(n), where n is the number of blocks in the array
    */
   public validateNextBlocks(blocks: LightBlock[]): boolean {
     if (blocks.length === 0) {
@@ -253,13 +224,13 @@ export class Blockchain {
   }
 
   /**
-   * Truncates the blockchain up to a specified block height (inclusive).
-   * The block with the given height becomes the new tail of the chain.
+   * Truncates the blockchain up to a specified block height (inclusive)
+   * The block with the given height becomes the new tail of the chain
    *
-   * @param {number} blockNumber - The height up to which the chain should be truncated.
-   *                          Passing `this._baseBlockHeight` will clear the entire chain.
-   * @returns {boolean} Returns `true` if truncation was successful or the chain is already in the desired state, `false` otherwise.
-   * Complexity O(n), where n is the number of blocks to check from the tail to the specified height.
+   * @param blockNumber - The height up to which the chain should be truncated
+   *                      Passing this._baseBlockHeight will clear the entire chain
+   * @returns Returns true if truncation was successful or the chain is already in the desired state, false otherwise
+   * Complexity O(n), where n is the number of blocks to check from the tail to the specified height
    */
   public truncateToBlock(blockNumber: number): boolean {
     if (blockNumber < this._baseBlockHeight) {
@@ -332,7 +303,6 @@ export class Blockchain {
     }
 
     // At this point, currentNode is guaranteed to be a Chain (not null)
-    // Use a type assertion to inform TypeScript
     this._tail = currentNode as Chain;
     this._tail.next = null;
     this._size -= nodesRemoved;
@@ -346,9 +316,9 @@ export class Blockchain {
   }
 
   /**
-   * Validates the entire blockchain.
-   * @returns {boolean} True if the blockchain is valid, false otherwise.
-   * Complexity: O(n), where n - is the number of blocks in the chain
+   * Validates the entire blockchain
+   * @returns True if the blockchain is valid, false otherwise
+   * Complexity: O(n), where n is the number of blocks in the chain
    */
   public validateChain(): boolean {
     let current = this._head;
@@ -379,11 +349,11 @@ export class Blockchain {
   }
 
   /**
-   * Validates that the provided block data matches the last block in the chain.
-   * @param {number} blockNumber - The expected height of the last block.
-   * @param {string} hash - The expected hash of the last block.
-   * @param {string} parentHash - The expected previous hash of the last block.
-   * @returns {boolean} True if the provided data matches the last block, false otherwise.
+   * Validates that the provided block data matches the last block in the chain
+   * @param blockNumber - The expected height of the last block
+   * @param hash - The expected hash of the last block
+   * @param parentHash - The expected previous hash of the last block
+   * @returns True if the provided data matches the last block, false otherwise
    * NOTE: This method is needed for the case when we confirm the indexing of a block
    * in another command to make sure that the block we are passing exactly matches the chain
    * Complexity: O(1)
@@ -394,7 +364,7 @@ export class Blockchain {
       return true;
     }
 
-    // Check that the height of the last block matches the passed height.
+    // Check that the height of the last block matches the passed height
     if (this._tail.block.blockNumber !== blockNumber) {
       return false;
     }
@@ -404,7 +374,7 @@ export class Blockchain {
       return false; // Hash mismatch
     }
 
-    // Check that the previous hash of the last block matches the previous hash passed in.
+    // Check that the previous hash of the last block matches the previous hash passed in
     if (this._tail.block.parentHash !== parentHash) {
       return false;
     }
@@ -413,9 +383,9 @@ export class Blockchain {
   }
 
   /**
-   * Finds a block by its height using O(1) index lookup.
-   * @param {number} blockNumber - The height of the block to find.
-   * @returns {LightBlock | null} The block, or null if not found.
+   * Finds a block by its height using O(1) index lookup
+   * @param blockNumber - The height of the block to find
+   * @returns The block, or null if not found
    * Complexity: O(1) - constant time lookup
    */
   public findBlockByHeight(blockNumber: number): LightBlock | null {
@@ -424,8 +394,8 @@ export class Blockchain {
   }
 
   /**
-   * Removes the first block in the chain.
-   * @returns {LightBlock | null} The removed block, or null if the chain is empty.
+   * Removes the first block in the chain
+   * @returns The removed block, or null if the chain is empty
    * Complexity: O(1)
    */
   private removeOldestChain(): LightBlock | null {
@@ -449,10 +419,10 @@ export class Blockchain {
   }
 
   /**
-   * Gets the last N blocks from the blockchain in reverse order.
-   * @param {number} n - The number of blocks to retrieve.
-   * @returns {LightBlock[]} An array containing the last N blocks in the chain, in reverse order.
-   * Complexity: O(n), where n - is the number of blocks to retrieve
+   * Gets the last N blocks from the blockchain in reverse order
+   * @param n - The number of blocks to retrieve
+   * @returns An array containing the last N blocks in the chain, in reverse order
+   * Complexity: O(n), where n is the number of blocks to retrieve
    */
   public getLastNBlocks(n: number): LightBlock[] {
     if (n <= 0) {
@@ -474,9 +444,9 @@ export class Blockchain {
   }
 
   /**
-   * Converts the linked list of blocks into an ordered array of LightBlock objects.
-   * @returns {LightBlock[]} An array containing all blocks in the blockchain from head to tail.
-   * Complexity O(n) - where n is the number of blocks in the blockchain.
+   * Converts the linked list of blocks into an ordered array of LightBlock objects
+   * @returns An array containing all blocks in the blockchain from head to tail
+   * Complexity O(n) - where n is the number of blocks in the blockchain
    */
   public toArray(): LightBlock[] {
     const blocks: LightBlock[] = [];
@@ -489,11 +459,11 @@ export class Blockchain {
   }
 
   /**
-   * Restores the linked list of blocks from an ordered array of LightBlock objects.
-   * This method clears the current blockchain and rebuilds it from the provided array.
-   * @param {LightBlock[]} blocks - An array of LightBlock objects to reconstruct the blockchain.
-   * @returns {void}
-   * Complexity O(n) - where n is the number of blocks in the provided array.
+   * Restores the linked list of blocks from an ordered array of LightBlock objects
+   * This method clears the current blockchain and rebuilds it from the provided array
+   * @param blocks - An array of LightBlock objects to reconstruct the blockchain
+   * @returns void
+   * Complexity O(n) - where n is the number of blocks in the provided array
    */
   public fromArray(blocks: LightBlock[]): void {
     this._head = null;
@@ -517,7 +487,7 @@ export class Blockchain {
       this.heightIndex.set(block.blockNumber, newNode);
       this._size++;
 
-      // Remove the oldest block if the chain size exceeds the maximum allowed size.
+      // Remove the oldest block if the chain size exceeds the maximum allowed size
       if (this._size > this._maxSize) {
         this.removeOldestChain();
       }

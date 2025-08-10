@@ -1,3 +1,3 @@
 export * from './load-strategy.interface';
-export * from './pull-network-provider.strategy';
-export * from './subscribe-blocks-provider.strategy';
+export * from './pull-rpc-provider.strategy';
+export * from './subscribe-ws-provider.strategy';

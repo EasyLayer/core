@@ -1,5 +1,4 @@
-import { PullNetworkProviderStrategy } from '../pull-network-provider.strategy';
-import { StrategyNames } from '../load-strategy.interface';
+import { PullRpcProviderStrategy } from '../pull-rpc-provider.strategy';
 
 const mockLogger = {
   debug: jest.fn(),
@@ -10,7 +9,7 @@ const mockLogger = {
 
 const mockBlockchainProvider = {
   getManyBlocksByHeights: jest.fn(),
-  getManyBlocksWithReceipts: jest.fn(), // Исправлено: правильный метод
+  getManyBlocksWithReceipts: jest.fn(),
   mergeReceiptsIntoBlocks: jest.fn(),
 };
 
@@ -40,8 +39,8 @@ const createMockReceipt = (txHash: string): any => ({
   logs: [],
 });
 
-describe('PullNetworkProviderStrategy', () => {
-  let strategy: PullNetworkProviderStrategy;
+describe('PullRpcProviderStrategy', () => {
+  let strategy: PullRpcProviderStrategy;
   const defaultConfig = {
     maxRequestBlocksBatchSize: 1024 * 1024, // 1MB
     basePreloadCount: 5,
@@ -54,7 +53,7 @@ describe('PullNetworkProviderStrategy', () => {
     mockQueue.isQueueFull = false;
     mockQueue.isQueueOverloaded.mockReturnValue(false);
     
-    strategy = new PullNetworkProviderStrategy(
+    strategy = new PullRpcProviderStrategy(
       mockLogger,
       mockBlockchainProvider as any,
       mockQueue as any,
@@ -69,12 +68,6 @@ describe('PullNetworkProviderStrategy', () => {
       await expect(strategy.load(110)).rejects.toThrow('Reached max block height');
     });
 
-    // it('should throw error when current network height is reached', async () => {
-    //   mockQueue.lastHeight = 110;
-
-    //   await expect(strategy.load(110)).rejects.toThrow('Reached current network height');
-    // });
-
     it('should throw error when queue is full', async () => {
       mockQueue.isQueueFull = true;
 
@@ -88,7 +81,7 @@ describe('PullNetworkProviderStrategy', () => {
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true);
+      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true, true);
       expect(mockLogger.debug).toHaveBeenCalledWith('The queue is overloaded');
       expect(mockBlockchainProvider.getManyBlocksWithReceipts).not.toHaveBeenCalled();
     });
@@ -98,20 +91,16 @@ describe('PullNetworkProviderStrategy', () => {
         createMockBlock(101, 2),
         createMockBlock(102, 1),
       ];
-      const mockBlocksReceipts = [
-        [createMockReceipt('0xtx101_0'), createMockReceipt('0xtx101_1')], // Block 101 receipts
-        [createMockReceipt('0xtx102_0')], // Block 102 receipts
-      ];
       const mockCompleteBlocks = mockBlocks.map(block => ({ ...block, receipts: [] }));
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocksReceipts);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockCompleteBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true);
-      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
+      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([101, 102, 103, 104, 105], true, true);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102], undefined, true);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
 
@@ -119,7 +108,7 @@ describe('PullNetworkProviderStrategy', () => {
       // First load - should preload
       const mockBlocks = [createMockBlock(101)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[]]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([]);
       mockQueue.isQueueOverloaded.mockReturnValue(true); // Skip receipts loading
 
       await strategy.load(110);
@@ -140,12 +129,12 @@ describe('PullNetworkProviderStrategy', () => {
       ];
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocksWithNoTx);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]); // Empty receipts arrays
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocksWithNoTx); // Return blocks with receipts
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102]);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102], undefined, true);
       expect(mockQueue.enqueue).toHaveBeenCalledTimes(2);
     });
 
@@ -154,12 +143,12 @@ describe('PullNetworkProviderStrategy', () => {
 
       const mockBlocks = [createMockBlock(109), createMockBlock(110)];
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([109, 110], true);
+      expect(mockBlockchainProvider.getManyBlocksByHeights).toHaveBeenCalledWith([109, 110], true, true);
     });
   });
 
@@ -186,36 +175,6 @@ describe('PullNetworkProviderStrategy', () => {
   });
 
   describe('dynamic preload count adjustment', () => {
-    // it('should increase preload count when loadReceipts takes longer', async () => {
-    //   // Set up timing history to trigger increase
-    //   (strategy as any)._previousLoadReceiptsDuration = 1000;
-    //   (strategy as any)._lastLoadReceiptsDuration = 1300; // 30% longer > 20%
-
-    //   const mockBlocks = Array.from({ length: 5 }, (_, i) => createMockBlock(101 + i));
-    //   mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-    //   mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(5).fill([]));
-    //   mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
-    //   mockQueue.enqueue.mockResolvedValue(undefined);
-
-    //   await strategy.load(110);
-
-    //   // Clear preloaded queue and trigger next preload
-    //   (strategy as any)._preloadedItemsQueue = [];
-    //   mockQueue.lastHeight = 105;
-
-    //   // Next load should request more blocks (increased preload count)
-    //   const moreBlocks = Array.from({ length: 7 }, (_, i) => createMockBlock(106 + i));
-    //   mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(moreBlocks);
-    //   mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(7).fill([]));
-    //   mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue([]);
-
-    //   await strategy.load(120);
-
-    //   // Should request more than initial 5 blocks
-    //   const lastCall = mockBlockchainProvider.getManyBlocksByHeights.mock.calls[1];
-    //   expect(lastCall[0].length).toBeGreaterThan(5);
-    // });
-
     it('should decrease preload count when loadReceipts is faster', async () => {
       // Set up timing history to trigger decrease
       (strategy as any)._previousLoadReceiptsDuration = 1000;
@@ -223,7 +182,7 @@ describe('PullNetworkProviderStrategy', () => {
 
       const mockBlocks = Array.from({ length: 3 }, (_, i) => createMockBlock(101 + i));
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue(mockBlocks);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(Array(3).fill([]));
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -248,17 +207,17 @@ describe('PullNetworkProviderStrategy', () => {
       const smallBlock = createMockBlock(103, 2, 100 * 1024); // 100KB block
 
       mockBlockchainProvider.getManyBlocksByHeights.mockResolvedValue([largeBlock, mediumBlock, smallBlock]);
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], [], []]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([largeBlock, mediumBlock, smallBlock]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
 
-      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102, 103]);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102, 103], undefined, true);
     });
 
     it('should estimate receipt sizes correctly based on block characteristics', async () => {
       // Test receipt size estimation through the batch creation process
-      const strategy = new PullNetworkProviderStrategy(
+      const strategy = new PullRpcProviderStrategy(
         mockLogger,
         mockBlockchainProvider as any,
         mockQueue as any,
@@ -271,7 +230,7 @@ describe('PullNetworkProviderStrategy', () => {
       // Set preloaded queue directly to test batching
       (strategy as any)._preloadedItemsQueue = [largeBlock, smallBlock];
 
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([[], []]);
+      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([largeBlock, smallBlock]);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);
@@ -290,9 +249,8 @@ describe('PullNetworkProviderStrategy', () => {
       mockBlockchainProvider.getManyBlocksWithReceipts
         .mockRejectedValueOnce(new Error('Network error'))
         .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValueOnce([[createMockReceipt('0xtx101_0')]]);
+        .mockResolvedValueOnce([mockBlocks[0]]);
       
-      mockBlockchainProvider.mergeReceiptsIntoBlocks.mockResolvedValue(mockBlocks);
       mockQueue.enqueue.mockResolvedValue(undefined);
 
       await strategy.load(110);

@@ -1,114 +1,53 @@
-import type {
-  UniversalBlock,
-  UniversalTransaction,
-  UniversalVin,
-  UniversalVout,
-  UniversalBlockStats,
-  NetworkConfig,
-} from './node-providers';
-import type { Block, Transaction, Vin, Vout, BlockStats } from './components';
-import { BlockSizeCalculator } from './utils/block-size-calculator';
+import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './node-providers';
+import type { Block, BlockStats, Transaction, Vin, Vout } from './components';
 
+/**
+ * Bitcoin Normalizer - converts Universal objects to enhanced component objects
+ * Expects complete Universal objects with all size data already calculated
+ * Only adds computed fields and enhanced metrics for better API usability
+ */
 export class BitcoinNormalizer {
-  private networkConfig: NetworkConfig;
-
-  constructor(networkConfig: NetworkConfig) {
-    this.networkConfig = networkConfig;
-  }
+  constructor(private readonly networkConfig: NetworkConfig) {}
 
   /**
-   * Normalizes a universal Bitcoin block from any provider into the application Block interface
-   * Throws error if block doesn't have height (which is required)
+   * Normalize UniversalBlock to enhanced Block component
    */
-  normalizeBlock(universalBlock: UniversalBlock): Block {
-    // Height is required for Block interface
-    if (universalBlock.height === undefined) {
-      throw new Error('Block height is required for normalization');
+  public normalizeBlock(universalBlock: UniversalBlock): Block {
+    // Ensure height is available - REQUIRED field
+    if (universalBlock.height === undefined || universalBlock.height === null) {
+      throw new Error(`Block height is required but missing for block ${universalBlock.hash}`);
     }
 
-    let transactions: Transaction[] | undefined;
+    // Calculate enhanced size metrics from existing data
+    const sizeMetrics = this.calculateBlockSizeMetrics(universalBlock);
 
-    // Handle different transaction formats
-    if (universalBlock.tx) {
-      if (Array.isArray(universalBlock.tx) && universalBlock.tx.length > 0) {
-        // Check if it's array of transaction objects or hashes
-        if (typeof universalBlock.tx[0] === 'string') {
-          // Array of transaction hashes - don't normalize, keep as undefined
-          transactions = undefined;
-        } else {
-          // Array of transaction objects - normalize each
-          transactions = (universalBlock.tx as UniversalTransaction[]).map((tx) => this.normalizeTransaction(tx));
-        }
-      }
-    }
-
-    // Calculate enhanced sizes if we have hex or can calculate from transactions
-    let enhancedSizes: any = {};
-
-    if (universalBlock.hex) {
-      // Calculate from hex for most accurate results
-      const calculatedSizes = BlockSizeCalculator.calculateSizeFromHex(universalBlock.hex, this.networkConfig);
-      enhancedSizes = {
-        size: calculatedSizes.size,
-        strippedsize: calculatedSizes.strippedSize,
-        sizeWithoutWitnesses: calculatedSizes.strippedSize,
-        weight: calculatedSizes.weight,
-        vsize: calculatedSizes.vsize,
-        witnessSize: calculatedSizes.witnessSize,
-        headerSize: calculatedSizes.headerSize,
-        transactionsSize: calculatedSizes.transactionsSize,
-      };
-    } else if (transactions && transactions.length > 0) {
-      // Calculate from transaction data if available
-      const blockWithTx = {
-        ...universalBlock,
-        tx: transactions,
-      } as Block;
-      const calculatedSizes = BlockSizeCalculator.calculateSizeFromBlock(blockWithTx, this.networkConfig);
-      enhancedSizes = {
-        size: calculatedSizes.size,
-        strippedsize: calculatedSizes.strippedSize,
-        sizeWithoutWitnesses: calculatedSizes.strippedSize,
-        weight: calculatedSizes.weight,
-        vsize: calculatedSizes.vsize,
-        witnessSize: calculatedSizes.witnessSize,
-        headerSize: calculatedSizes.headerSize,
-        transactionsSize: calculatedSizes.transactionsSize,
-      };
-    }
+    // Normalize transactions if present
+    const transactions =
+      universalBlock.tx && Array.isArray(universalBlock.tx)
+        ? (universalBlock.tx
+            .map((tx) => (typeof tx === 'string' ? null : this.normalizeTransaction(tx)))
+            .filter(Boolean) as Transaction[])
+        : undefined;
 
     // Calculate efficiency metrics
-    const blockSizeEfficiency = this.calculateBlockSizeEfficiency(
-      enhancedSizes.size || universalBlock.size,
-      this.networkConfig.maxBlockSize
-    );
+    const efficiencyMetrics = this.calculateBlockEfficiencyMetrics(universalBlock, sizeMetrics);
 
-    const witnessDataRatio = this.calculateWitnessDataRatio(
-      enhancedSizes.witnessSize || 0,
-      enhancedSizes.size || universalBlock.size
-    );
-
-    // Fallback to existing values if calculations failed
-    const witnessSize =
-      enhancedSizes.witnessSize ??
-      (this.networkConfig.hasSegWit ? Math.max(0, universalBlock.size - universalBlock.strippedsize) : 0);
-    const headerSize = enhancedSizes.headerSize ?? 80;
-    const transactionsSize = enhancedSizes.transactionsSize ?? universalBlock.size - headerSize;
-
-    const block: Block = {
-      height: universalBlock.height, // REQUIRED - always must be known
+    return {
+      // Required fields
+      height: universalBlock.height,
       hash: universalBlock.hash,
 
-      // Enhanced size fields - use calculated or fallback to provider values
-      size: enhancedSizes.size ?? universalBlock.size,
-      strippedsize: enhancedSizes.strippedsize ?? universalBlock.strippedsize,
-      sizeWithoutWitnesses: enhancedSizes.sizeWithoutWitnesses ?? universalBlock.strippedsize,
-      weight: enhancedSizes.weight ?? universalBlock.weight,
-      vsize: enhancedSizes.vsize ?? Math.ceil((universalBlock.weight || 0) / 4),
-      witnessSize,
-      headerSize,
-      transactionsSize,
+      // Enhanced size fields
+      size: universalBlock.size || 0,
+      strippedsize: universalBlock.strippedsize || 0,
+      sizeWithoutWitnesses: universalBlock.strippedsize || 0, // Alias for clarity
+      weight: universalBlock.weight || 0,
+      vsize: sizeMetrics.vsize,
+      witnessSize: sizeMetrics.witnessSize,
+      headerSize: 80, // Bitcoin block header is always 80 bytes
+      transactionsSize: sizeMetrics.transactionsSize,
 
+      // Standard block fields
       version: universalBlock.version,
       versionHex: universalBlock.versionHex,
       merkleroot: universalBlock.merkleroot,
@@ -123,213 +62,107 @@ export class BitcoinNormalizer {
       tx: transactions,
       nTx: universalBlock.nTx,
 
+      // Additional fields
+      fee: universalBlock.fee,
+      subsidy: universalBlock.subsidy,
+      miner: universalBlock.miner,
+      pool: universalBlock.pool,
+
       // Efficiency metrics
-      blockSizeEfficiency,
-      witnessDataRatio,
+      blockSizeEfficiency: efficiencyMetrics.blockSizeEfficiency,
+      witnessDataRatio: efficiencyMetrics.witnessDataRatio,
     };
-
-    // Add network-specific fields
-    if (universalBlock.fee !== undefined) {
-      block.fee = universalBlock.fee;
-    }
-
-    if (universalBlock.subsidy !== undefined) {
-      block.subsidy = universalBlock.subsidy;
-    }
-
-    if (universalBlock.miner !== undefined) {
-      block.miner = universalBlock.miner;
-    }
-
-    if (universalBlock.pool !== undefined) {
-      block.pool = universalBlock.pool;
-    }
-
-    return block;
   }
 
   /**
-   * Normalizes a universal Bitcoin transaction from any provider into the application Transaction interface
+   * Normalize multiple UniversalBlocks to enhanced Block components
    */
-  normalizeTransaction(universalTx: UniversalTransaction): Transaction {
-    // Calculate enhanced sizes
-    let enhancedSizes: any = {};
+  public normalizeManyBlocks(universalBlocks: UniversalBlock[]): Block[] {
+    return universalBlocks.map((block) => this.normalizeBlock(block));
+  }
 
-    if (universalTx.hex) {
-      // Calculate from hex for most accurate results
-      const calculatedSizes = BlockSizeCalculator.calculateTransactionSizeFromHex(universalTx.hex, this.networkConfig);
-      enhancedSizes = {
-        size: calculatedSizes.size,
-        strippedsize: calculatedSizes.strippedSize,
-        sizeWithoutWitnesses: calculatedSizes.strippedSize,
-        vsize: calculatedSizes.vsize,
-        weight: calculatedSizes.weight,
-        witnessSize: calculatedSizes.witnessSize,
-      };
-    } else {
-      // Calculate from transaction object
-      const txForCalculation = {
-        ...universalTx,
-        vin: universalTx.vin.map((vin) => this.normalizeVin(vin)),
-        vout: universalTx.vout.map((vout) => this.normalizeVout(vout)),
-      } as Transaction;
+  /**
+   * Normalize UniversalTransaction to enhanced Transaction component
+   */
+  public normalizeTransaction(universalTx: UniversalTransaction): Transaction {
+    // Calculate enhanced size metrics from existing data
+    const sizeMetrics = this.calculateTransactionSizeMetrics(universalTx);
 
-      const calculatedSizes = BlockSizeCalculator.calculateTransactionSize(txForCalculation, this.networkConfig);
-      enhancedSizes = {
-        size: calculatedSizes.size,
-        strippedsize: calculatedSizes.strippedSize,
-        sizeWithoutWitnesses: calculatedSizes.strippedSize,
-        vsize: calculatedSizes.vsize,
-        weight: calculatedSizes.weight,
-        witnessSize: calculatedSizes.witnessSize,
-      };
-    }
+    // Normalize inputs and outputs
+    const vin = universalTx.vin.map((input) => this.normalizeVin(input));
+    const vout = universalTx.vout.map((output) => this.normalizeVout(output));
 
-    // Fallback to existing values if calculations failed
-    const witnessSize =
-      enhancedSizes.witnessSize ??
-      (this.networkConfig.hasSegWit ? Math.max(0, (universalTx.weight || 0) - universalTx.size * 4) : 0);
+    // Calculate fee rate if fee is available
+    const feeRate = universalTx.fee && universalTx.vsize ? Math.round(universalTx.fee / universalTx.vsize) : undefined;
 
-    // Calculate fee rate
-    let feeRate: number | undefined;
-    if (universalTx.fee !== undefined && (enhancedSizes.vsize || universalTx.vsize) > 0) {
-      feeRate = universalTx.fee / (enhancedSizes.vsize || universalTx.vsize);
-    }
-
-    const transaction: Transaction = {
+    return {
       txid: universalTx.txid,
       hash: universalTx.hash,
       version: universalTx.version,
 
-      // Enhanced size fields - use calculated or fallback to provider values
-      size: enhancedSizes.size ?? universalTx.size,
-      strippedsize: enhancedSizes.strippedsize ?? universalTx.size, // Fallback if not available
-      sizeWithoutWitnesses: enhancedSizes.sizeWithoutWitnesses ?? universalTx.size,
-      vsize: enhancedSizes.vsize ?? universalTx.vsize,
-      weight: enhancedSizes.weight ?? universalTx.weight,
-      witnessSize,
+      // Enhanced size fields
+      size: universalTx.size,
+      strippedsize: sizeMetrics.strippedsize,
+      sizeWithoutWitnesses: sizeMetrics.strippedsize, // Alias for clarity
+      vsize: universalTx.vsize,
+      weight: universalTx.weight,
+      witnessSize: sizeMetrics.witnessSize,
 
       locktime: universalTx.locktime,
-      vin: universalTx.vin.map((vin) => this.normalizeVin(vin)),
-      vout: universalTx.vout.map((vout) => this.normalizeVout(vout)),
+      vin,
+      vout,
+
+      // Block context
       blockhash: universalTx.blockhash,
       time: universalTx.time,
       blocktime: universalTx.blocktime,
-    };
 
-    // Add network-specific fields
-    if (universalTx.fee !== undefined) {
-      transaction.fee = universalTx.fee;
-      transaction.feeRate = feeRate;
-    }
+      // Fee information
+      fee: universalTx.fee,
+      feeRate,
 
-    // SegWit specific fields - only if network supports SegWit
-    if (this.networkConfig.hasSegWit && universalTx.wtxid) {
-      transaction.wtxid = universalTx.wtxid;
-    }
-
-    // RBF specific fields - only if network supports RBF
-    if (this.networkConfig.hasRBF && universalTx.bip125_replaceable !== undefined) {
-      transaction.bip125_replaceable = universalTx.bip125_replaceable;
-    }
-
-    // Mempool specific fields
-    if (universalTx.depends !== undefined) {
-      transaction.depends = universalTx.depends;
-    }
-
-    if (universalTx.spentby !== undefined) {
-      transaction.spentby = universalTx.spentby;
-    }
-
-    return transaction;
-  }
-
-  /**
-   * Normalizes universal Bitcoin Vin to application Vin interface
-   */
-  private normalizeVin(universalVin: UniversalVin): Vin {
-    const vin: Vin = {
-      txid: universalVin.txid,
-      vout: universalVin.vout,
-      scriptSig: universalVin.scriptSig
-        ? {
-            asm: universalVin.scriptSig.asm,
-            hex: universalVin.scriptSig.hex,
-          }
-        : undefined,
-      sequence: universalVin.sequence,
-      coinbase: universalVin.coinbase,
-    };
-
-    // SegWit witness data - only if network supports SegWit
-    if (this.networkConfig.hasSegWit && universalVin.txinwitness) {
-      vin.txinwitness = universalVin.txinwitness;
-    }
-
-    return vin;
-  }
-
-  /**
-   * Normalizes universal Bitcoin Vout to application Vout interface
-   */
-  private normalizeVout(universalVout: UniversalVout): Vout {
-    let addresses: string[] | undefined;
-
-    // Handle both single address and array of addresses
-    if (universalVout.scriptPubKey?.addresses) {
-      addresses = universalVout.scriptPubKey.addresses;
-    } else if (universalVout.scriptPubKey?.address) {
-      addresses = [universalVout.scriptPubKey.address];
-    }
-
-    return {
-      value: universalVout.value,
-      n: universalVout.n,
-      scriptPubKey: universalVout.scriptPubKey
-        ? {
-            asm: universalVout.scriptPubKey.asm,
-            hex: universalVout.scriptPubKey.hex,
-            reqSigs: universalVout.scriptPubKey.reqSigs,
-            type: universalVout.scriptPubKey.type,
-            addresses: addresses,
-          }
-        : undefined,
+      // SegWit and metadata
+      wtxid: universalTx.wtxid,
+      depends: universalTx.depends,
+      spentby: universalTx.spentby,
+      bip125_replaceable: universalTx.bip125_replaceable,
     };
   }
 
   /**
-   * Normalizes universal Bitcoin block stats with enhanced fields
+   * Normalize multiple UniversalTransactions to enhanced Transaction components
    */
-  normalizeBlockStats(universalStats: UniversalBlockStats): BlockStats {
-    // Calculate enhanced witness statistics if possible
-    const totalWitnessSize =
-      universalStats.total_size && universalStats.total_stripped_size
-        ? universalStats.total_size - universalStats.total_stripped_size
-        : undefined;
+  public normalizeManyTransactions(universalTxs: UniversalTransaction[]): Transaction[] {
+    return universalTxs.map((tx) => this.normalizeTransaction(tx));
+  }
 
-    const witnessRatio =
-      universalStats.witness_txs && universalStats.txs
-        ? (universalStats.witness_txs / universalStats.txs) * 100
-        : undefined;
+  /**
+   * Normalize UniversalBlockStats to enhanced BlockStats component
+   */
+  public normalizeBlockStats(universalStats: UniversalBlockStats): BlockStats {
+    // Calculate witness statistics if available
+    const witnessStats = this.calculateWitnessStatistics(universalStats);
 
     return {
       blockhash: universalStats.blockhash,
       height: universalStats.height,
 
-      // Enhanced size fields
+      // Enhanced size stats
       total_size: universalStats.total_size,
       total_stripped_size: universalStats.total_stripped_size,
-      total_witness_size: totalWitnessSize,
+      total_witness_size: witnessStats.total_witness_size,
       total_weight: universalStats.total_weight,
-      total_vsize: universalStats.total_weight ? Math.ceil(universalStats.total_weight / 4) : undefined,
+      total_vsize: witnessStats.total_vsize,
 
+      // Financial stats
       total_fee: universalStats.total_fee,
       fee_rate_percentiles: universalStats.fee_rate_percentiles,
       subsidy: universalStats.subsidy,
       total_out: universalStats.total_out,
       utxo_increase: universalStats.utxo_increase,
       utxo_size_inc: universalStats.utxo_size_inc,
+
+      // Transaction counts
       ins: universalStats.ins,
       outs: universalStats.outs,
       txs: universalStats.txs,
@@ -352,137 +185,160 @@ export class BitcoinNormalizer {
 
       // Witness statistics
       witness_txs: universalStats.witness_txs,
-      witness_ratio: witnessRatio,
+      witness_ratio: witnessStats.witness_ratio,
     };
   }
 
   /**
-   * Get accurate block sizes from Block object
+   * Normalize multiple UniversalBlockStats to enhanced BlockStats components
    */
-  getBlockSizes(block: Block): {
-    size: number;
-    strippedSize: number;
-    sizeWithoutWitnesses: number;
-    weight: number;
+  public normalizeManyBlockStats(universalStats: UniversalBlockStats[]): BlockStats[] {
+    return universalStats.map((stats) => this.normalizeBlockStats(stats));
+  }
+
+  /**
+   * Normalize UniversalVin to Vin component
+   */
+  private normalizeVin(universalVin: any): Vin {
+    return {
+      txid: universalVin.txid,
+      vout: universalVin.vout,
+      scriptSig: universalVin.scriptSig,
+      sequence: universalVin.sequence,
+      coinbase: universalVin.coinbase,
+      txinwitness: universalVin.txinwitness,
+    };
+  }
+
+  /**
+   * Normalize UniversalVout to Vout component
+   */
+  private normalizeVout(universalVout: any): Vout {
+    return {
+      value: universalVout.value,
+      n: universalVout.n,
+      scriptPubKey: universalVout.scriptPubKey,
+    };
+  }
+
+  /**
+   * Calculate enhanced block size metrics from existing Universal block data
+   * No external calculations - only uses data already present in Universal object
+   */
+  private calculateBlockSizeMetrics(block: UniversalBlock): {
     vsize: number;
-    witnessSize: number;
-    headerSize: number;
+    witnessSize?: number;
     transactionsSize: number;
   } {
-    // Block already has enhanced fields
+    const blockSize = block.size || 0;
+    const strippedSize = block.strippedsize || 0;
+    const weight = block.weight || 0;
+
+    // Calculate virtual size from weight (BIP 141)
+    const vsize = weight > 0 ? Math.ceil(weight / 4) : strippedSize;
+
+    // Calculate witness data size
+    const witnessSize = this.networkConfig.hasSegWit && blockSize > strippedSize ? blockSize - strippedSize : undefined;
+
+    // Calculate transactions size (total size minus 80-byte header)
+    const transactionsSize = Math.max(0, blockSize - 80);
+
     return {
-      size: block.size,
-      strippedSize: block.strippedsize,
-      sizeWithoutWitnesses: block.sizeWithoutWitnesses,
-      weight: block.weight,
-      vsize: block.vsize || Math.ceil(block.weight / 4),
-      witnessSize: block.witnessSize || 0,
-      headerSize: block.headerSize || 80,
-      transactionsSize: block.transactionsSize || block.size - 80,
+      vsize,
+      witnessSize,
+      transactionsSize,
     };
   }
 
   /**
-   * Get accurate transaction sizes from Transaction object
+   * Calculate block efficiency metrics from existing data
    */
-  getTransactionSizes(tx: Transaction): {
-    size: number;
-    strippedSize: number;
-    sizeWithoutWitnesses: number;
-    weight: number;
-    vsize: number;
-    witnessSize: number;
-    feeRate?: number;
+  private calculateBlockEfficiencyMetrics(
+    block: UniversalBlock,
+    sizeMetrics: { witnessSize?: number }
+  ): {
+    blockSizeEfficiency?: number;
+    witnessDataRatio?: number;
   } {
-    // Transaction already has enhanced fields
+    const blockSize = block.size || 0;
+    const maxBlockSize = this.networkConfig.maxBlockSize;
+
+    // Calculate block size efficiency as percentage of maximum
+    const blockSizeEfficiency = maxBlockSize > 0 ? (blockSize / maxBlockSize) * 100 : undefined;
+
+    // Calculate witness data ratio
+    const witnessDataRatio =
+      sizeMetrics.witnessSize && blockSize > 0 ? (sizeMetrics.witnessSize / blockSize) * 100 : undefined;
+
     return {
-      size: tx.size,
-      strippedSize: tx.strippedsize,
-      sizeWithoutWitnesses: tx.sizeWithoutWitnesses,
-      weight: tx.weight,
-      vsize: tx.vsize,
-      witnessSize: tx.witnessSize || 0,
-      feeRate: tx.feeRate,
+      blockSizeEfficiency,
+      witnessDataRatio,
     };
   }
 
   /**
-   * Calculate block size efficiency as percentage of max block size
+   * Calculate enhanced transaction size metrics from existing Universal transaction data
+   * Simple calculations based on data already present in Universal object
    */
-  private calculateBlockSizeEfficiency(blockSize: number, maxBlockSize: number): number {
-    if (maxBlockSize <= 0) return 0;
-    return Math.round((blockSize / maxBlockSize) * 100 * 100) / 100; // Round to 2 decimal places
-  }
+  private calculateTransactionSizeMetrics(tx: UniversalTransaction): {
+    strippedsize: number;
+    witnessSize?: number;
+  } {
+    const txSize = tx.size || 0;
+    const weight = tx.weight || 0;
 
-  /**
-   * Calculate witness data ratio as percentage of total block size
-   */
-  private calculateWitnessDataRatio(witnessSize: number, totalSize: number): number {
-    if (totalSize <= 0 || !this.networkConfig.hasSegWit) return 0;
-    return Math.round((witnessSize / totalSize) * 100 * 100) / 100; // Round to 2 decimal places
-  }
+    // For SegWit transactions, estimate stripped size from weight
+    // Non-witness data has weight factor of 4, witness data has factor of 1
+    // So: weight = (base_size * 4) + witness_size
+    // Rough estimate: base_size ≈ weight / 4
+    let strippedsize = txSize;
+    let witnessSize: number | undefined;
 
-  /**
-   * Validates if a block hash format is correct
-   */
-  isValidBlockHash(hash: string): boolean {
-    return /^[a-fA-F0-9]{64}$/.test(hash);
-  }
+    if (this.networkConfig.hasSegWit && weight > 0) {
+      // Estimate stripped size from weight (this is an approximation)
+      const estimatedBaseSize = Math.floor((weight + 3) / 4); // Round up division
+      strippedsize = Math.min(estimatedBaseSize, txSize);
 
-  /**
-   * Validates if a transaction hash format is correct
-   */
-  isValidTransactionHash(hash: string): boolean {
-    return /^[a-fA-F0-9]{64}$/.test(hash);
-  }
-
-  /**
-   * Validates if block height is within reasonable bounds
-   */
-  isValidBlockHeight(height: number): boolean {
-    return Number.isInteger(height) && height >= 0 && height <= 10000000;
-  }
-
-  /**
-   * Normalizes many blocks - efficiently processing in a single loop
-   */
-  normalizeManyBlocks(universalBlocks: UniversalBlock[]): Block[] {
-    const results: Block[] = [];
-
-    for (const block of universalBlocks) {
-      try {
-        results.push(this.normalizeBlock(block));
-      } catch (error) {
-        // Skip blocks without height
+      // Calculate witness size
+      if (txSize > strippedsize) {
+        witnessSize = txSize - strippedsize;
       }
     }
 
-    return results;
+    return {
+      strippedsize,
+      witnessSize,
+    };
   }
 
   /**
-   * Normalizes many transactions - efficiently processing in a single loop
+   * Calculate witness statistics for block stats from existing data
    */
-  normalizeManyTransactions(universalTransactions: UniversalTransaction[]): Transaction[] {
-    const results: Transaction[] = [];
+  private calculateWitnessStatistics(stats: UniversalBlockStats): {
+    total_witness_size?: number;
+    total_vsize?: number;
+    witness_ratio?: number;
+  } {
+    const totalSize = stats.total_size || 0;
+    const totalStrippedSize = stats.total_stripped_size;
+    const totalWeight = stats.total_weight;
+    const totalTxs = stats.txs || 0;
+    const witnessTxs = stats.witness_txs;
 
-    for (const tx of universalTransactions) {
-      results.push(this.normalizeTransaction(tx));
-    }
+    // Calculate total witness size
+    const total_witness_size =
+      totalStrippedSize !== undefined && totalSize > totalStrippedSize ? totalSize - totalStrippedSize : undefined;
 
-    return results;
-  }
+    // Calculate total virtual size from weight
+    const total_vsize = totalWeight ? Math.ceil(totalWeight / 4) : undefined;
 
-  /**
-   * Normalizes many block stats - efficiently processing in a single loop
-   */
-  normalizeManyBlockStats(universalStats: UniversalBlockStats[]): BlockStats[] {
-    const results: BlockStats[] = [];
+    // Calculate witness transaction ratio
+    const witness_ratio = witnessTxs !== undefined && totalTxs > 0 ? (witnessTxs / totalTxs) * 100 : undefined;
 
-    for (const stats of universalStats) {
-      results.push(this.normalizeBlockStats(stats));
-    }
-
-    return results;
+    return {
+      total_witness_size,
+      total_vsize,
+      witness_ratio,
+    };
   }
 }

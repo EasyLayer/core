@@ -42,9 +42,9 @@ describe('BlocksQueueModule', () => {
           rateLimits: {} as any,
           providers: [{
           connection: {
-            type: 'selfnode' as any,
+            type: 'rpc' as any,
             baseUrl: 'http://localhost'
-          },
+          } as any,
         }] }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],

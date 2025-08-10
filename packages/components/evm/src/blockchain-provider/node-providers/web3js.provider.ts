@@ -4,6 +4,7 @@ import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
 import { NodeProviderTypes } from './interfaces';
 import { EvmRateLimiter } from './rate-limiter';
+import { EvmTrieVerifier } from './trie-verifier';
 import type {
   UniversalBlockStats,
   UniversalBlock,
@@ -377,7 +378,8 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
   public async getManyBlocksByHeights(
     heights: number[],
-    fullTransactions: boolean = false
+    fullTransactions: boolean = false,
+    verifyTrie: boolean = false
   ): Promise<(UniversalBlock | null)[]> {
     if (heights.length === 0) {
       return [];
@@ -396,22 +398,34 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
       const rawBlocks = await this.rateLimiter.execute(requests, batchCall);
 
-      // Preserve order: rawBlocks[i] corresponds to heights[i]
-      // Don't filter - return null for missing blocks
-      return rawBlocks.map((block, index) => {
-        if (block === null || block === undefined || block.error) {
-          return null;
-        }
+      // Process blocks with optional trie verification
+      return await Promise.all(
+        rawBlocks.map(async (block, index) => {
+          if (block === null || block === undefined || block.error) {
+            return null;
+          }
 
-        const normalizedBlock = this.normalizeRawBlock(block);
+          // Verify transactions trie if requested and we have full transactions
+          if (verifyTrie && fullTransactions && block.transactions && block.transactionsRoot) {
+            const isValid = await EvmTrieVerifier.verifyTransactionsRoot(block.transactions, block.transactionsRoot);
+            if (!isValid) {
+              throw new Error(
+                `Transactions root verification failed for block ${heights[index]}. ` +
+                  `Expected: ${block.transactionsRoot}, but computed root doesn't match.`
+              );
+            }
+          }
 
-        // Guarantee blockNumber from known height
-        if (normalizedBlock.blockNumber === undefined || normalizedBlock.blockNumber === null) {
-          normalizedBlock.blockNumber = heights[index];
-        }
+          const normalizedBlock = this.normalizeRawBlock(block);
 
-        return normalizedBlock;
-      });
+          // Guarantee blockNumber from known height
+          if (normalizedBlock.blockNumber === undefined || normalizedBlock.blockNumber === null) {
+            normalizedBlock.blockNumber = heights[index];
+          }
+
+          return normalizedBlock;
+        })
+      );
     }, 'getManyBlocksByHeights');
   }
 
@@ -484,7 +498,11 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
     }, 'getManyBlocksStatsByHeights');
   }
 
-  public async getManyBlocksReceipts(heights: number[]): Promise<UniversalTransactionReceipt[][]> {
+  public async getManyBlocksReceipts(
+    heights: number[],
+    verifyTrie = false,
+    receiptsRoots?: (string | undefined)[]
+  ): Promise<UniversalTransactionReceipt[][]> {
     if (heights.length === 0) {
       return [];
     }
@@ -502,27 +520,81 @@ export class Web3jsProvider extends BaseNodeProvider<Web3jsProviderOptions> {
 
       const rawBlocksReceipts = await this.rateLimiter.execute(requests, batchCall);
 
-      // Preserve order: rawBlocksReceipts[i] corresponds to heights[i]
-      // Guarantee blockNumber in each receipt since we know the block height
-      return rawBlocksReceipts.map((rawReceipts, index) => {
-        if (!rawReceipts || !Array.isArray(rawReceipts)) {
-          return [];
-        }
-
-        const blockHeight = heights[index];
-
-        return rawReceipts.map((receipt) => {
-          const normalizedReceipt = this.normalizeRawReceipt(receipt);
-
-          // Guarantee blockNumber in receipt from known block height
-          if (normalizedReceipt.blockNumber === undefined || normalizedReceipt.blockNumber === null) {
-            normalizedReceipt.blockNumber = blockHeight;
+      // Process receipts with optional trie verification
+      return await Promise.all(
+        rawBlocksReceipts.map(async (rawReceipts, index) => {
+          if (!rawReceipts || !Array.isArray(rawReceipts)) {
+            return [];
           }
 
-          return normalizedReceipt;
-        });
-      });
+          const blockHeight = heights[index];
+          const expectedReceiptsRoot = receiptsRoots?.[index];
+
+          // Verify trie if requested and expected root is provided
+          if (verifyTrie && expectedReceiptsRoot) {
+            const isValid = await EvmTrieVerifier.verifyReceiptsRoot(rawReceipts, expectedReceiptsRoot);
+            if (!isValid) {
+              throw new Error(
+                `Receipts root verification failed for block ${blockHeight}. ` +
+                  `Expected: ${expectedReceiptsRoot}, but computed root doesn't match.`
+              );
+            }
+          }
+
+          return rawReceipts.map((receipt) => {
+            const normalizedReceipt = this.normalizeRawReceipt(receipt);
+
+            // Guarantee blockNumber in receipt from known block height
+            if (normalizedReceipt.blockNumber === undefined || normalizedReceipt.blockNumber === null) {
+              normalizedReceipt.blockNumber = blockHeight;
+            }
+
+            return normalizedReceipt;
+          });
+        })
+      );
     }, 'getManyBlocksReceipts');
+  }
+  public async getManyBlocksWithReceipts(
+    heights: string[] | number[],
+    fullTransactions = false,
+    verifyTrie = false
+  ): Promise<((UniversalBlock & { receipts: UniversalTransactionReceipt[] }) | null)[]> {
+    if (heights.length === 0) {
+      return [];
+    }
+
+    return this.executeWithErrorHandling(async () => {
+      const numericHeights = heights.map((h) => Number(h));
+
+      // Get blocks first
+      const rawBlocks = await this.getManyBlocksByHeights(
+        numericHeights,
+        fullTransactions,
+        verifyTrie && fullTransactions // Only verify transactions if we have full transactions
+      );
+
+      // Extract receipts roots for verification if needed
+      const receiptsRoots = verifyTrie ? rawBlocks.map((block) => block?.receiptsRoot) : undefined;
+
+      // Get receipts for all requested heights (even if some blocks are null)
+      const allBlocksReceipts = await this.getManyBlocksReceipts(numericHeights, verifyTrie, receiptsRoots);
+
+      // Combine blocks with receipts, maintaining order
+      return rawBlocks.map((rawBlock, index) => {
+        if (rawBlock === null) {
+          return null;
+        }
+
+        // Attach receipts to block
+        const blockWithReceipts = {
+          ...rawBlock,
+          receipts: allBlocksReceipts[index] || [],
+        };
+
+        return blockWithReceipts;
+      });
+    }, 'getManyBlocksWithReceipts');
   }
 
   // ===== NORMALIZATION METHODS =====

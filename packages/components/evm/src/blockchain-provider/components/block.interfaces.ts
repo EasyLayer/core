@@ -1,10 +1,18 @@
 import type { Transaction, TransactionReceipt } from './transaction.interfaces';
 
 export type LightBlock = {
+  // Basic block identification
   blockNumber: number;
   hash: string;
   parentHash: string;
-  transactions: string[];
+
+  // 3 Merkle Root fields for validation
+  transactionsRoot: string; // 32 bytes hex
+  receiptsRoot: string; // 32 bytes hex
+  stateRoot: string; // 32 bytes hex
+
+  transactions: string[]; // Transaction hashes
+  receipts: string[]; // Receipt hashes
 };
 
 export interface Withdrawal {

@@ -1,5 +1,4 @@
 import { BitcoinNormalizer } from '../normalizer';
-import { BlockSizeCalculator } from '../utils/block-size-calculator';
 import type { 
   UniversalBlock, 
   UniversalTransaction, 
@@ -8,9 +7,6 @@ import type {
   UniversalBlockStats,
   NetworkConfig
 } from '../node-providers';
-
-// Mock the BlockSizeCalculator
-jest.mock('../utils/block-size-calculator');
 
 /**
  * Helper function to create a test universal block
@@ -114,7 +110,6 @@ function createUniversalBlockStats(overrides: Partial<UniversalBlockStats> = {})
 describe('BitcoinNormalizer', () => {
   let normalizer: BitcoinNormalizer;
   let mockNetworkConfig: NetworkConfig;
-  let mockBlockSizeCalculator: jest.Mocked<typeof BlockSizeCalculator>;
 
   beforeEach(() => {
     mockNetworkConfig = {
@@ -133,52 +128,10 @@ describe('BitcoinNormalizer', () => {
     };
 
     normalizer = new BitcoinNormalizer(mockNetworkConfig);
-    mockBlockSizeCalculator = BlockSizeCalculator as jest.Mocked<typeof BlockSizeCalculator>;
-
-    // Setup default mocks
-    mockBlockSizeCalculator.calculateSizeFromHex = jest.fn().mockReturnValue({
-      size: 1100,
-      strippedSize: 900,
-      weight: 3600,
-      vsize: 900,
-      witnessSize: 200,
-      headerSize: 80,
-      transactionsSize: 1020
-    });
-
-    mockBlockSizeCalculator.calculateSizeFromBlock = jest.fn().mockReturnValue({
-      size: 350,
-      strippedSize: 300,
-      weight: 1200,
-      vsize: 300,
-      witnessSize: 50,
-      headerSize: 80,
-      transactionsSize: 270
-    });
-
-    mockBlockSizeCalculator.calculateTransactionSizeFromHex = jest.fn().mockReturnValue({
-      size: 250,
-      strippedSize: 200,
-      vsize: 200,
-      weight: 800,
-      witnessSize: 50
-    });
-
-    mockBlockSizeCalculator.calculateTransactionSize = jest.fn().mockReturnValue({
-      size: 250,
-      strippedSize: 200,
-      vsize: 200,
-      weight: 800,
-      witnessSize: 50
-    });
-  });
-
-  afterEach(() => {
-    jest.clearAllMocks();
   });
 
   describe('normalizeBlock', () => {
-    it('should normalize a basic block successfully', () => {
+    it('should normalize a basic block with complete size data', () => {
       const universalBlock = createUniversalBlock();
 
       const result = normalizer.normalizeBlock(universalBlock);
@@ -188,17 +141,21 @@ describe('BitcoinNormalizer', () => {
       expect(result.size).toBe(1000);
       expect(result.strippedsize).toBe(800);
       expect(result.sizeWithoutWitnesses).toBe(800);
-      expect(result.witnessSize).toBe(200); // size - strippedsize
+      expect(result.weight).toBe(3200);
+      expect(result.vsize).toBe(800); // Math.ceil(3200 / 4)
+      expect(result.witnessSize).toBe(200); // size - strippedsize (1000 - 800)
       expect(result.headerSize).toBe(80);
-      expect(result.transactionsSize).toBe(920); // size - headerSize
-      expect(result.blockSizeEfficiency).toBe(0.1); // 1000/1000000 * 100
-      expect(result.witnessDataRatio).toBe(0);
+      expect(result.transactionsSize).toBe(920); // size - headerSize (1000 - 80)
+      expect(result.blockSizeEfficiency).toBe(0.1); // (1000/1000000) * 100
+      expect(result.witnessDataRatio).toBe(20); // (200/1000) * 100
     });
 
     it('should throw error when block height is missing', () => {
       const universalBlock = createUniversalBlock({ height: undefined });
 
-      expect(() => normalizer.normalizeBlock(universalBlock)).toThrow('Block height is required for normalization');
+      expect(() => normalizer.normalizeBlock(universalBlock)).toThrow(
+        'Block height is required but missing for block'
+      );
     });
 
     it('should handle block with transaction objects', () => {
@@ -209,7 +166,6 @@ describe('BitcoinNormalizer', () => {
 
       expect(result.tx).toHaveLength(1);
       expect(result.tx![0]!.txid).toBe('tx1');
-      expect(mockBlockSizeCalculator.calculateSizeFromBlock).toHaveBeenCalled();
     });
 
     it('should handle block with transaction hashes only', () => {
@@ -217,24 +173,77 @@ describe('BitcoinNormalizer', () => {
 
       const result = normalizer.normalizeBlock(universalBlock);
 
-      expect(result.tx).toBeUndefined();
+      expect(result.tx).toEqual([]);
     });
 
-    it('should use BlockSizeCalculator when hex is available', () => {
-      const universalBlock = createUniversalBlock({ hex: '0100000000000000' });
+    it('should handle block with mixed transaction types', () => {
+      const mockTx = createUniversalTransaction();
+      const universalBlock = createUniversalBlock({ tx: ['tx1hash', mockTx] as any });
 
       const result = normalizer.normalizeBlock(universalBlock);
 
-      expect(mockBlockSizeCalculator.calculateSizeFromHex).toHaveBeenCalledWith('0100000000000000', mockNetworkConfig);
-      expect(result.size).toBe(1100);
-      expect(result.strippedsize).toBe(900);
-      expect(result.sizeWithoutWitnesses).toBe(900);
-      expect(result.witnessSize).toBe(200);
+      expect(result.tx).toHaveLength(1);
+      expect(result.tx![0]!.txid).toBe('tx1');
+    });
+
+    it('should handle block without SegWit data', () => {
+      const universalBlock = createUniversalBlock({ 
+        size: 800, 
+        strippedsize: 800, // Same size = no witness data
+        weight: 3200 
+      });
+
+      const result = normalizer.normalizeBlock(universalBlock);
+
+      expect(result.witnessSize).toBeUndefined(); // No witness data
+      expect(result.witnessDataRatio).toBeUndefined();
+    });
+
+    it('should calculate efficiency metrics correctly', () => {
+      const universalBlock = createUniversalBlock({ 
+        size: 500000, // Half of max block size
+        strippedsize: 400000 
+      });
+
+      const result = normalizer.normalizeBlock(universalBlock);
+
+      expect(result.blockSizeEfficiency).toBe(50); // (500000/1000000) * 100
+      expect(result.witnessDataRatio).toBe(20); // (100000/500000) * 100
+    });
+
+    it('should handle zero weight correctly', () => {
+      const universalBlock = createUniversalBlock({ weight: 0, strippedsize: 800 });
+
+      const result = normalizer.normalizeBlock(universalBlock);
+
+      expect(result.vsize).toBe(800); // Falls back to strippedsize when weight is 0
+    });
+
+    it('should include optional block fields when present', () => {
+      const universalBlock = createUniversalBlock({
+        fee: 50000,
+        subsidy: 625000000,
+        miner: 'Pool Name',
+        pool: {
+          poolName: 'Mining Pool',
+          url: 'pool.com'
+        }
+      });
+
+      const result = normalizer.normalizeBlock(universalBlock);
+
+      expect(result.fee).toBe(50000);
+      expect(result.subsidy).toBe(625000000);
+      expect(result.miner).toBe('Pool Name');
+      expect(result.pool).toEqual({
+        poolName: 'Mining Pool',
+        url: 'pool.com'
+      });
     });
   });
 
   describe('normalizeTransaction', () => {
-    it('should normalize a basic transaction successfully', () => {
+    it('should normalize a basic transaction with complete data', () => {
       const vin = createUniversalVin();
       const vout = createUniversalVout();
       const universalTx = createUniversalTransaction({ vin: [vin], vout: [vout] });
@@ -243,11 +252,8 @@ describe('BitcoinNormalizer', () => {
 
       expect(result.txid).toBe('tx1');
       expect(result.size).toBe(250);
-      expect(result.strippedsize).toBe(200);
-      expect(result.sizeWithoutWitnesses).toBe(200);
-      expect(result.vsize).toBe(200);
-      expect(result.weight).toBe(800);
-      expect(result.witnessSize).toBe(50);
+      expect(result.vsize).toBe(125);
+      expect(result.weight).toBe(500);
       expect(result.vin).toHaveLength(1);
       expect(result.vout).toHaveLength(1);
       expect(result.vin[0]!.txid).toBe('prev_tx');
@@ -255,15 +261,24 @@ describe('BitcoinNormalizer', () => {
     });
 
     it('should calculate fee rate when fee is provided', () => {
-      const universalTx = createUniversalTransaction({ fee: 2000 }); // fee / calculated vsize (200) = 10
+      const universalTx = createUniversalTransaction({ fee: 2500, vsize: 125 }); // 2500 / 125 = 20
 
       const result = normalizer.normalizeTransaction(universalTx);
 
-      expect(result.fee).toBe(2000);
-      expect(result.feeRate).toBe(10); // 2000 / 200 = 10 sat/vbyte
+      expect(result.fee).toBe(2500);
+      expect(result.feeRate).toBe(20); // 2500 / 125 = 20 sat/vbyte
     });
 
-    it('should include SegWit fields when network supports it', () => {
+    it('should not calculate fee rate when fee is missing', () => {
+      const universalTx = createUniversalTransaction({ fee: undefined });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      expect(result.fee).toBeUndefined();
+      expect(result.feeRate).toBeUndefined();
+    });
+
+    it('should include SegWit fields when available', () => {
       const vinWithWitness = createUniversalVin({ txinwitness: ['witness_data'] });
       const universalTx = createUniversalTransaction({ 
         wtxid: 'wtx1',
@@ -276,12 +291,66 @@ describe('BitcoinNormalizer', () => {
       expect(result.vin[0]!.txinwitness).toEqual(['witness_data']);
     });
 
-    it('should include RBF field when network supports it', () => {
+    it('should include RBF field when available', () => {
       const universalTx = createUniversalTransaction({ bip125_replaceable: true });
 
       const result = normalizer.normalizeTransaction(universalTx);
 
       expect(result.bip125_replaceable).toBe(true);
+    });
+
+    it('should calculate transaction size metrics for SegWit', () => {
+      const universalTx = createUniversalTransaction({ 
+        size: 250, 
+        weight: 600, // (base_size * 4) + witness_size 
+        vsize: 150 
+      });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      // Estimated base size: Math.floor((600 + 3) / 4) = 150
+      expect(result.strippedsize).toBe(150);
+      expect(result.sizeWithoutWitnesses).toBe(150);
+      expect(result.witnessSize).toBe(100); // 250 - 150
+    });
+
+    it('should handle transaction without SegWit data', () => {
+      const universalTx = createUniversalTransaction({ 
+        size: 250, 
+        weight: 1000, // (250 * 4) = 1000, no witness data
+        vsize: 250 
+      });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      expect(result.strippedsize).toBe(250);
+      expect(result.witnessSize).toBeUndefined();
+    });
+
+    it('should include mempool-specific transaction fields', () => {
+      const universalTx = createUniversalTransaction({
+        depends: ['tx1', 'tx2'],
+        spentby: ['tx3', 'tx4']
+      });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      expect(result.depends).toEqual(['tx1', 'tx2']);
+      expect(result.spentby).toEqual(['tx3', 'tx4']);
+    });
+
+    it('should handle block context fields in transaction', () => {
+      const universalTx = createUniversalTransaction({
+        blockhash: 'block_hash_123',
+        time: 1640995200,
+        blocktime: 1640995300
+      });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      expect(result.blockhash).toBe('block_hash_123');
+      expect(result.time).toBe(1640995200);
+      expect(result.blocktime).toBe(1640995300);
     });
   });
 
@@ -293,49 +362,64 @@ describe('BitcoinNormalizer', () => {
 
       expect(result.blockhash).toBe('a'.repeat(64));
       expect(result.height).toBe(100);
+      expect(result.total_size).toBe(1000000);
+      expect(result.total_stripped_size).toBe(800000);
       expect(result.total_witness_size).toBe(200000); // total_size - total_stripped_size
       expect(result.total_vsize).toBe(800000); // Math.ceil(total_weight / 4)
       expect(result.witness_ratio).toBe(60); // (120/200) * 100
       expect(result.txs).toBe(200);
       expect(result.witness_txs).toBe(120);
     });
-  });
 
-  describe('validation methods', () => {
-    it('should validate block hash correctly', () => {
-      expect(normalizer.isValidBlockHash('a'.repeat(64))).toBe(true);
-      expect(normalizer.isValidBlockHash('invalid')).toBe(false);
-      expect(normalizer.isValidBlockHash('g'.repeat(64))).toBe(false);
+    it('should handle missing witness statistics', () => {
+      const universalStats = createUniversalBlockStats({ 
+        witness_txs: undefined,
+        txs: undefined,
+        total_stripped_size: undefined 
+      });
+
+      const result = normalizer.normalizeBlockStats(universalStats);
+
+      expect(result.total_witness_size).toBeUndefined();
+      expect(result.witness_ratio).toBeUndefined();
     });
 
-    it('should validate transaction hash correctly', () => {
-      expect(normalizer.isValidTransactionHash('a'.repeat(64))).toBe(true);
-      expect(normalizer.isValidTransactionHash('invalid')).toBe(false);
-      expect(normalizer.isValidTransactionHash('g'.repeat(64))).toBe(false);
-    });
+    it('should calculate witness ratio correctly', () => {
+      const universalStats = createUniversalBlockStats({ 
+        witness_txs: 75, 
+        txs: 100 
+      });
 
-    it('should validate block height correctly', () => {
-      expect(normalizer.isValidBlockHeight(100)).toBe(true);
-      expect(normalizer.isValidBlockHeight(0)).toBe(true);
-      expect(normalizer.isValidBlockHeight(-1)).toBe(false);
-      expect(normalizer.isValidBlockHeight(10000001)).toBe(false);
-      expect(normalizer.isValidBlockHeight(1.5)).toBe(false);
+      const result = normalizer.normalizeBlockStats(universalStats);
+
+      expect(result.witness_ratio).toBe(75); // (75/100) * 100
     });
   });
 
   describe('batch normalization methods', () => {
-    it('should normalize many blocks and skip invalid ones', () => {
+    it('should normalize many blocks', () => {
       const universalBlocks = [
-        createUniversalBlock({ height: 100 }),
-        createUniversalBlock({ height: undefined }), // Should be skipped
-        createUniversalBlock({ height: 102 })
+        createUniversalBlock({ height: 100, hash: 'block1' }),
+        createUniversalBlock({ height: 101, hash: 'block2' })
       ];
 
       const result = normalizer.normalizeManyBlocks(universalBlocks);
 
       expect(result).toHaveLength(2);
       expect(result[0]!.height).toBe(100);
-      expect(result[1]!.height).toBe(102);
+      expect(result[0]!.hash).toBe('block1');
+      expect(result[1]!.height).toBe(101);
+      expect(result[1]!.hash).toBe('block2');
+    });
+
+    it('should throw error for blocks with missing height in batch', () => {
+      const universalBlocks = [
+        createUniversalBlock({ height: 100 }),
+        createUniversalBlock({ height: undefined }), // Should throw
+        createUniversalBlock({ height: 102 })
+      ];
+
+      expect(() => normalizer.normalizeManyBlocks(universalBlocks)).toThrow();
     });
 
     it('should normalize many transactions', () => {
@@ -349,53 +433,24 @@ describe('BitcoinNormalizer', () => {
       expect(result).toHaveLength(2);
       expect(result[0]!.txid).toBe('tx1');
       expect(result[1]!.txid).toBe('tx2');
+      expect(result[1]!.size).toBe(300);
+    });
+
+    it('should normalize many block stats', () => {
+      const universalStats = [
+        createUniversalBlockStats({ height: 100 }),
+        createUniversalBlockStats({ height: 101, txs: 300 })
+      ];
+
+      const result = normalizer.normalizeManyBlockStats(universalStats);
+
+      expect(result).toHaveLength(2);
+      expect(result[0]!.height).toBe(100);
+      expect(result[1]!.txs).toBe(300);
     });
   });
 
-  describe('size calculation methods', () => {
-    it('should get block sizes correctly', () => {
-      const block = {
-        size: 1000,
-        strippedsize: 800,
-        sizeWithoutWitnesses: 800,
-        weight: 3200,
-        vsize: 800,
-        witnessSize: 200,
-        headerSize: 80,
-        transactionsSize: 920
-      } as any;
-
-      const result = normalizer.getBlockSizes(block);
-
-      expect(result.size).toBe(1000);
-      expect(result.strippedSize).toBe(800);
-      expect(result.sizeWithoutWitnesses).toBe(800);
-      expect(result.witnessSize).toBe(200);
-      expect(result.headerSize).toBe(80);
-    });
-
-    it('should get transaction sizes correctly', () => {
-      const transaction = {
-        size: 250,
-        strippedsize: 200,
-        sizeWithoutWitnesses: 200,
-        weight: 800,
-        vsize: 200,
-        witnessSize: 50,
-        feeRate: 10
-      } as any;
-
-      const result = normalizer.getTransactionSizes(transaction);
-
-      expect(result.size).toBe(250);
-      expect(result.strippedSize).toBe(200);
-      expect(result.sizeWithoutWitnesses).toBe(200);
-      expect(result.witnessSize).toBe(50);
-      expect(result.feeRate).toBe(10);
-    });
-  });
-
-  describe('network without SegWit/RBF support', () => {
+  describe('network without SegWit support', () => {
     beforeEach(() => {
       mockNetworkConfig = {
         network: 'testnet',
@@ -414,29 +469,25 @@ describe('BitcoinNormalizer', () => {
       normalizer = new BitcoinNormalizer(mockNetworkConfig);
     });
 
-    it('should not include SegWit fields when network does not support it', () => {
-      const universalTx = createUniversalTransaction({ wtxid: 'wtx1' });
-
-      const result = normalizer.normalizeTransaction(universalTx);
-
-      expect(result.wtxid).toBeUndefined();
-    });
-
-    it('should not include RBF field when network does not support it', () => {
-      const universalTx = createUniversalTransaction({ bip125_replaceable: true });
-
-      const result = normalizer.normalizeTransaction(universalTx);
-
-      expect(result.bip125_replaceable).toBeUndefined();
-    });
-
-    it('should calculate witness size as 0 for non-SegWit networks', () => {
+    it('should not calculate witness size for non-SegWit networks', () => {
       const universalBlock = createUniversalBlock({ size: 1000, strippedsize: 800 });
 
       const result = normalizer.normalizeBlock(universalBlock);
 
-      expect(result.witnessSize).toBe(0);
-      expect(result.witnessDataRatio).toBe(0);
+      expect(result.witnessSize).toBeUndefined();
+      expect(result.witnessDataRatio).toBeUndefined();
+    });
+
+    it('should handle transaction size calculation without SegWit', () => {
+      const universalTx = createUniversalTransaction({ 
+        size: 250, 
+        weight: 1000 
+      });
+
+      const result = normalizer.normalizeTransaction(universalTx);
+
+      expect(result.strippedsize).toBe(250); // Same as size for non-SegWit
+      expect(result.witnessSize).toBeUndefined();
     });
   });
 
@@ -446,7 +497,7 @@ describe('BitcoinNormalizer', () => {
 
       const result = normalizer.normalizeBlock(universalBlock);
 
-      expect(result.tx).toBeUndefined();
+      expect(result.tx).toEqual([]);
     });
 
     it('should handle transaction without fee', () => {
@@ -458,20 +509,23 @@ describe('BitcoinNormalizer', () => {
       expect(result.feeRate).toBeUndefined();
     });
 
-    it('should handle vout with single address string', () => {
+    it('should handle vout with addresses array', () => {
       const vout = createUniversalVout({
         scriptPubKey: {
           asm: 'OP_DUP OP_HASH160',
           hex: 'hex_script',
           type: 'pubkeyhash',
-          address: '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'
+          addresses: ['1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2']
         }
       });
       const universalTx = createUniversalTransaction({ vout: [vout] });
 
       const result = normalizer.normalizeTransaction(universalTx);
 
-      expect(result.vout[0]!.scriptPubKey?.addresses).toEqual(['1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa']);
+      expect(result.vout[0]!.scriptPubKey?.addresses).toEqual([
+        '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 
+        '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2'
+      ]);
     });
 
     it('should handle missing scriptPubKey', () => {
@@ -498,14 +552,15 @@ describe('BitcoinNormalizer', () => {
       const result = normalizer.normalizeBlock(universalBlock);
 
       expect(result.blockSizeEfficiency).toBe(0);
+      expect(result.witnessDataRatio).toBeUndefined(); // No witness data when size is 0
     });
 
     it('should handle missing block stats fields', () => {
       const universalStats = createUniversalBlockStats({ 
-        total_size: undefined,
+        total_size: 0,
         total_stripped_size: undefined,
         witness_txs: undefined,
-        txs: undefined
+        txs: 0
       });
 
       const result = normalizer.normalizeBlockStats(universalStats);
@@ -513,110 +568,63 @@ describe('BitcoinNormalizer', () => {
       expect(result.total_witness_size).toBeUndefined();
       expect(result.witness_ratio).toBeUndefined();
     });
-  });
 
-  describe('normalization with BlockSizeCalculator', () => {
-    it('should use calculated sizes from transaction data when hex not available', () => {
-      const mockTx = createUniversalTransaction();
-      const universalBlock = createUniversalBlock({ tx: [mockTx], hex: undefined });
-
-      const result = normalizer.normalizeBlock(universalBlock);
-
-      expect(mockBlockSizeCalculator.calculateSizeFromBlock).toHaveBeenCalled();
-      expect(result.size).toBe(350);
-      expect(result.witnessSize).toBe(50);
-    });
-
-    it('should use calculated transaction sizes from hex', () => {
-      const universalTx = createUniversalTransaction({ hex: '0100000001' });
+    it('should handle coinbase transaction input', () => {
+      const coinbaseVin = createUniversalVin({ 
+        txid: undefined,
+        vout: undefined,
+        coinbase: 'coinbase_data',
+        scriptSig: undefined
+      });
+      const universalTx = createUniversalTransaction({ vin: [coinbaseVin] });
 
       const result = normalizer.normalizeTransaction(universalTx);
 
-      expect(mockBlockSizeCalculator.calculateTransactionSizeFromHex).toHaveBeenCalledWith('0100000001', mockNetworkConfig);
-      expect(result.size).toBe(250);
-      expect(result.witnessSize).toBe(50);
-    });
-
-    it('should calculate transaction sizes from object when hex not available', () => {
-      const vin = createUniversalVin();
-      const vout = createUniversalVout();
-      const universalTx = createUniversalTransaction({ vin: [vin], vout: [vout], hex: undefined });
-
-      const result = normalizer.normalizeTransaction(universalTx);
-
-      expect(mockBlockSizeCalculator.calculateTransactionSize).toHaveBeenCalled();
-      expect(result.size).toBe(250);
+      expect(result.vin[0]!.coinbase).toBe('coinbase_data');
+      expect(result.vin[0]!.txid).toBeUndefined();
+      expect(result.vin[0]!.vout).toBeUndefined();
     });
   });
 
-  describe('additional network fields', () => {
-    it('should include optional block fields when present', () => {
-      const universalBlock = createUniversalBlock({
-        fee: 50000,
-        subsidy: 625000000,
-        miner: 'Pool Name',
-        pool: {
-          poolName: 'Mining Pool',
-          url: 'pool.com'
-        }
+  describe('size calculation edge cases', () => {
+    it('should handle blocks with very large witness data ratio', () => {
+      const universalBlock = createUniversalBlock({ 
+        size: 1000000, // Max block size
+        strippedsize: 200000, // Small base, large witness
+        weight: 4000000 // Max weight
       });
 
       const result = normalizer.normalizeBlock(universalBlock);
 
-      expect(result.fee).toBe(50000);
-      expect(result.subsidy).toBe(625000000);
-      expect(result.miner).toBe('Pool Name');
-      expect(result.pool).toEqual({
-        poolName: 'Mining Pool',
-        url: 'pool.com'
-      });
+      expect(result.blockSizeEfficiency).toBe(100); // Full block
+      expect(result.witnessDataRatio).toBe(80); // (800000/1000000) * 100
+      expect(result.vsize).toBe(1000000); // Math.ceil(4000000 / 4)
     });
 
-    it('should include mempool-specific transaction fields', () => {
-      const universalTx = createUniversalTransaction({
-        depends: ['tx1', 'tx2'],
-        spentby: ['tx3', 'tx4']
+    it('should handle transaction with zero weight edge case', () => {
+      const universalTx = createUniversalTransaction({ 
+        size: 250, 
+        weight: 0 
       });
 
       const result = normalizer.normalizeTransaction(universalTx);
 
-      expect(result.depends).toEqual(['tx1', 'tx2']);
-      expect(result.spentby).toEqual(['tx3', 'tx4']);
-    });
-  });
-
-  describe('batch normalization error handling', () => {
-    it('should log error and continue processing when block normalization fails', () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
-      
-      const universalBlocks = [
-        createUniversalBlock({ height: 100 }),
-        createUniversalBlock({ height: undefined, hash: 'invalid_block' }),
-        createUniversalBlock({ height: 102 })
-      ];
-
-      const result = normalizer.normalizeManyBlocks(universalBlocks);
-
-      expect(result).toHaveLength(2);
-      // expect(consoleSpy).toHaveBeenCalledWith(
-      //   'Failed to normalize block invalid_block:',
-      //   expect.any(Error)
-      // );
-
-      consoleSpy.mockRestore();
+      expect(result.strippedsize).toBe(250); // Falls back to original size
+      expect(result.witnessSize).toBeUndefined();
     });
 
-    it('should normalize many block stats successfully', () => {
-      const universalStats = [
-        createUniversalBlockStats({ height: 100 }),
-        createUniversalBlockStats({ height: 101, txs: 300 })
-      ];
+    it('should handle block stats with perfect witness usage', () => {
+      const universalStats = createUniversalBlockStats({ 
+        witness_txs: 200, 
+        txs: 200, // All transactions use witness
+        total_size: 1000000,
+        total_stripped_size: 600000
+      });
 
-      const result = normalizer.normalizeManyBlockStats(universalStats);
+      const result = normalizer.normalizeBlockStats(universalStats);
 
-      expect(result).toHaveLength(2);
-      expect(result[0]!.height).toBe(100);
-      expect(result[1]!.txs).toBe(300);
+      expect(result.witness_ratio).toBe(100); // (200/200) * 100
+      expect(result.total_witness_size).toBe(400000); // 1000000 - 600000
     });
   });
 });

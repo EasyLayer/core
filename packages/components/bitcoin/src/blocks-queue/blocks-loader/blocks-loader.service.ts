@@ -1,16 +1,23 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
+import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
-import { BlockchainProviderService, Block } from '../../blockchain-provider';
+import type { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
-import { PullNetworkProviderStrategy, BlocksLoadingStrategy, StrategyNames } from './load-strategies';
+import {
+  PullRpcProviderStrategy,
+  ProcessP2PProviderStrategy,
+  BlocksLoadingStrategy,
+  StrategyNames,
+} from './load-strategies';
 
 @Injectable()
 export class BlocksQueueLoaderService implements OnModuleDestroy {
   private _isLoading: boolean = false;
-  private _loadingStrategy: BlocksLoadingStrategy | null = null;
   private _timer: ExponentialTimer | null = null;
+  private _currentStrategy: BlocksLoadingStrategy | null = null;
   private readonly _monitoringInterval: number;
+  private readonly _strategies: Map<StrategyNames, BlocksLoadingStrategy> = new Map();
 
   constructor(
     private readonly log: AppLogger,
@@ -28,10 +35,11 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
 
   async onModuleDestroy() {
     this.log.debug('Blocks queue loader service is shutting down');
-    await this._loadingStrategy?.stop();
+    await this._currentStrategy?.stop();
     this._timer?.destroy();
     this._timer = null;
-    this._loadingStrategy = null;
+    this._currentStrategy = null;
+    this._strategies.clear();
     this._isLoading = false;
   }
 
@@ -49,7 +57,8 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
 
     this._isLoading = true;
 
-    this.createStrategy(queue);
+    // Create strategies with queue
+    this.createStrategies(queue);
 
     this.log.info('Loading strategy created', {
       args: { strategy: this.config.queueLoaderStrategyName },
@@ -60,22 +69,27 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
         try {
           // IMPORTANT: every exponential tick we fetch current blockchain network height
           const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeight();
-
           this.log.debug('Current blockchain network height fetched', {
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
 
-          // IMPORTANT: We expect that strategy loads all blocks to currentNetworkHeight for one method call
-          await this._loadingStrategy?.load(currentNetworkHeight);
+          // Get the strategy that should work now
+          this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
+
+          this.log.debug('Loading strategy created', {
+            args: { strategy: this._currentStrategy?.name },
+          });
+
+          // IMPORTANT: We expect that strategy load all blocks to currentNetworkHeight for one method call
+          await this._currentStrategy?.load(currentNetworkHeight);
 
           // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
           // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
-          this.log.debug('Loading blocks failed, retrying immediately', {
+          this.log.debug('Loading blocks on pause, reason: ', {
             args: { error },
           });
-
-          await this._loadingStrategy?.stop();
+          await this._currentStrategy?.stop();
 
           // ERROR CASE: Reset interval to retry immediately
           // because error means we didn't load blocks to currentHeight so we need to try again ASAP
@@ -93,18 +107,44 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     this.log.debug('Loader exponential timer started');
   }
 
-  private createStrategy(queue: BlocksQueue<Block>): void {
-    const name = this.config.queueLoaderStrategyName;
+  // Factory method to create strategies
+  private createStrategies(queue: BlocksQueue<Block>): void {
+    const strategyOptions = {
+      maxRequestBlocksBatchSize: this.config.queueLoaderRequestBlocksBatchSize,
+      basePreloadCount: this.config.basePreloadCount,
+    };
 
-    switch (name) {
-      case StrategyNames.PULL:
-        this._loadingStrategy = new PullNetworkProviderStrategy(this.log, this.blockchainProviderService, queue, {
-          maxRequestBlocksBatchSize: this.config.queueLoaderRequestBlocksBatchSize,
-          basePreloadCount: this.config.basePreloadCount,
-        });
-        break;
-      default:
-        throw new Error(`Unknown strategy: ${name}`);
+    this._strategies.set(
+      StrategyNames.RPC_PULL,
+      new PullRpcProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+    );
+
+    this._strategies.set(
+      StrategyNames.P2P_PROCESS,
+      new ProcessP2PProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+    );
+  }
+
+  // Business rule method to determine which strategy should work
+  private getCurrentStrategy(queue: BlocksQueue<Block>, currentNetworkHeight?: number): BlocksLoadingStrategy {
+    const configStrategy = this.config.queueLoaderStrategyName;
+
+    // If config is PULL - always use PULL
+    if (configStrategy === StrategyNames.RPC_PULL) {
+      return this._strategies.get(StrategyNames.RPC_PULL)!;
     }
+
+    // If config is SUBSCRIBE but big height difference - use PULL
+    if (currentNetworkHeight !== undefined) {
+      const heightDifference = currentNetworkHeight - queue.lastHeight;
+      const threshold = this.config.strategyThreshold || 20;
+
+      if (heightDifference > threshold) {
+        return this._strategies.get(StrategyNames.RPC_PULL)!;
+      }
+    }
+
+    // Default to use configured strategy
+    return this._strategies.get(StrategyNames.P2P_PROCESS)!;
   }
 }

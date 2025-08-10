@@ -143,17 +143,8 @@ export class Network extends AggregateRoot {
     );
   }
 
-  public async addBlocks({ blocks, requestId }: { blocks: Block[]; requestId: string }) {
-    const lightBlocks: LightBlock[] = blocks.map((block: Block) => ({
-      blockNumber: block.blockNumber,
-      hash: block.hash,
-      parentHash: block.parentHash ?? '',
-      transactions: (block.transactions ?? []).map((tx: Transaction) => tx.hash),
-    }));
-
-    const isValid = this.chain.validateNextBlocks(lightBlocks);
-
-    if (!isValid) {
+  public async addBlocks({ blocks, requestId }: { blocks: LightBlock[]; requestId: string }) {
+    if (!this.chain.validateNextBlocks(blocks)) {
       throw new BlockchainValidationError();
     }
 
@@ -162,7 +153,7 @@ export class Network extends AggregateRoot {
         aggregateId: this.aggregateId,
         requestId,
         blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
-        blocks: lightBlocks,
+        blocks,
       })
     );
   }
@@ -242,7 +233,11 @@ export class Network extends AggregateRoot {
         blockNumber: Number(block.blockNumber),
         hash: block.hash,
         parentHash: block?.parentHash || '',
-        transactions: block.transactions.map((txid: any) => txid),
+        transactions: block.transactions,
+        receipts: block.receipts,
+        transactionsRoot: block.transactionsRoot,
+        receiptsRoot: block.receiptsRoot,
+        stateRoot: block.stateRoot,
       }))
     );
   }

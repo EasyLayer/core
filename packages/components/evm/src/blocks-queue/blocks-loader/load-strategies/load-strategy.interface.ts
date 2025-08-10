@@ -5,6 +5,6 @@ export interface BlocksLoadingStrategy {
 }
 
 export enum StrategyNames {
-  PULL = 'pull',
-  SUBSCRIBE = 'subscribe',
+  RPC_PULL = 'rpc_pull',
+  WS_SUBSCRIBE = 'ws_subscribe',
 }

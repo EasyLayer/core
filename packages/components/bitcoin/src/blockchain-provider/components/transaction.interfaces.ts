@@ -1,4 +1,3 @@
-// ===== TRANSACTION INTERFACES =====
 export interface Vin {
   txid?: string;
   vout?: number;

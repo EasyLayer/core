@@ -1,4 +1,4 @@
-import type { LightBlock } from '@easylayer/bitcoin';
+import type { LightBlock } from '../../blockchain-provider';
 
 export interface IProcessMempoolReorganisationCommand {
   requestId: string;

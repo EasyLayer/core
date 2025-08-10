@@ -9,8 +9,8 @@ interface BlockInfo {
   height: number;
 }
 
-export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.PULL;
+export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
+  readonly name: StrategyNames = StrategyNames.RPC_PULL;
   private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
   private _preloadedItemsQueue: BlockInfo[] = [];
 
@@ -218,7 +218,7 @@ export class PullNetworkProviderStrategy implements BlocksLoadingStrategy {
       try {
         const heights = infos.map((i) => i.height);
         // Use the new performance method that returns fully parsed blocks with all transactions
-        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(heights, true);
+        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(heights, true, undefined, true);
         return blocks;
       } catch (error) {
         attempt++;

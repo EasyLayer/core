@@ -1,4 +1,4 @@
-import type { LightBlock } from '../../blockchain-provider';
+import type { Block, LightBlock } from '../../blockchain-provider';
 
 export class Chain {
   block!: LightBlock;
@@ -6,35 +6,14 @@ export class Chain {
   prev: Chain | null = null;
 }
 
-// /**
-// * Restores the chain links (next and prev) for the blockchain.
-// * @param currentNode The starting node of the chain to restore links for.
-// */
-// export function restoreChainLinks(currentNode: Chain | null): void {
-//  while (currentNode) {
-//    // Restore the prototype for the current Chain node
-//    Object.setPrototypeOf(currentNode, Chain.prototype);
-
-//    // If there is a next node, restore its prototype
-//    if (currentNode.next) {
-//      Object.setPrototypeOf(currentNode.next, Chain.prototype);
-//    }
-
-//    // If there is a previous node, restore its prototype
-//    if (currentNode.prev) {
-//      Object.setPrototypeOf(currentNode.prev, Chain.prototype);
-//    }
-
-//    // Move to the next node
-//    currentNode = currentNode.next;
-//  }
-// }
-
 /**
  * Blockchain class representing a doubly linked list of blocks.
  * Each block contains a height, hash, previous hash, and transaction IDs.
  * The blockchain has a fixed maximum size and automatically removes the oldest blocks
  * when new blocks are added beyond this size.
+ * SPV Validation:
+ * 1. Merkle Tree - verify merkleroot matches calculated root from transactions
+ * 2. Chain connectivity - prevHash → nextHash
  */
 export class Blockchain {
   private _head: Chain | null = null;
@@ -150,21 +129,17 @@ export class Blockchain {
 
   /**
    * Adds a block to the end of the chain.
-   * @param {number} height - The height of the new block.
-   * @param {string} hash - The hash of the new block.
-   * @param {string} previousblockhash - The hash of the previous block.
-   * @param {string[]} tx - The transaction IDs of the new block.
+   * @param block - The block to add.
    * @returns {boolean} True if the block was added successfully, false otherwise.
    * Complexity: O(1)
    */
-  public addBlock(height: number, hash: string, previousblockhash: string, tx: string[]): boolean {
-    // Before adding a block, we validate it
-    if (!this.validateNextBlock(height, previousblockhash)) {
+  public addBlock(block: LightBlock): boolean {
+    // Chain sequence validation (existing method)
+    if (!this.validateNextBlock(block.height, block.previousblockhash)) {
       return false;
     }
 
-    const newBlock: LightBlock = { height, hash, previousblockhash, tx };
-    return this.addBlockFast(newBlock);
+    return this.addBlockFast(block);
   }
 
   /**
@@ -174,12 +149,12 @@ export class Blockchain {
    * Complexity: O(n), where n - is the number of blocks in the array
    */
   public addBlocks(blocks: LightBlock[]): boolean {
-    // Before adding blocks, we validate the entire sequence ONCE
+    // Chain sequence validation
     if (!this.validateNextBlocks(blocks)) {
       return false;
     }
 
-    // Add all blocks without individual validation - much faster
+    // Add all blocks fast
     for (const block of blocks) {
       this.addBlockFast(block);
     }
