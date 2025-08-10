@@ -1,3 +1,15 @@
+## <small>0.9.6 (2025-08-10)</small>
+
+* chore: add bitpay github to allowed package url; ([ebdeda4](https://github.com/EasyLayer/core/commit/ebdeda4))
+* chore: fixed github workflow; ([c113d62](https://github.com/EasyLayer/core/commit/c113d62))
+* chore: fixed workflow; ([8913c1c](https://github.com/EasyLayer/core/commit/8913c1c))
+* feat: implemented base p2p node provider for bitcoin network; ([f3e41f1](https://github.com/EasyLayer/core/commit/f3e41f1))
+* feat: implemented spv validation; added p2p node provider and strategy; ([f27617b](https://github.com/EasyLayer/core/commit/f27617b))
+* refactor: fixed yarn lock file; ([2f9475a](https://github.com/EasyLayer/core/commit/2f9475a))
+* refactor: removed bitcore-p2p2 package as it cause lock file check failing; ([ec7b0d7](https://github.com/EasyLayer/core/commit/ec7b0d7))
+
+
+
 ## <small>0.9.5 (2025-08-05)</small>
 
 * refactor: added reorg command for bitcoin mempool; ([4179f3a](https://github.com/EasyLayer/core/commit/4179f3a))
