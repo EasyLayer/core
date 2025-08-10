@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/evm",
-  "version": "0.9.2",
+  "version": "0.9.5",
   "description": "",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -36,7 +36,7 @@
   "license": "",
   "packageManager": "yarn@4.5.0",
   "dependencies": {
-    "@easylayer/common": "0.9.2",
+    "@easylayer/common": "0.9.5",
     "@ethereumjs/rlp": "10.0.0",
     "@ethereumjs/trie": "6.2.1",
     "@nestjs/common": "10.2.10",

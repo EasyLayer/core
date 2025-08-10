@@ -1,3 +1,25 @@
+## <small>0.9.5 (2025-08-05)</small>
+
+* refactor: added reorg command for bitcoin mempool; ([4179f3a](https://github.com/EasyLayer/core/commit/4179f3a))
+
+
+
+## <small>0.9.4 (2025-08-05)</small>
+
+* feat: added bitcoin mempool cqrs componnets; ([c8c9c84](https://github.com/EasyLayer/core/commit/c8c9c84))
+
+
+
+## <small>0.9.3 (2025-08-03)</small>
+
+* refactor: fixed loading blocks timers; ([bfcd503](https://github.com/EasyLayer/core/commit/bfcd503))
+* refactor: improved bitcoin components; ([668b5e8](https://github.com/EasyLayer/core/commit/668b5e8))
+* refactor: optimized cqrs, eventstore, blocks queue, system aggregates; ([c8875ba](https://github.com/EasyLayer/core/commit/c8875ba))
+* refactor: refactored bitcoin components; fixed unit tests; ([2361e92](https://github.com/EasyLayer/core/commit/2361e92))
+* feat(cqrs,eventstore,bitcoin,evm): implemented: prune events and snaps; mempool for bitcoin; ([dde91f6](https://github.com/EasyLayer/core/commit/dde91f6))
+
+
+
 ## <small>0.9.2 (2025-07-20)</small>
 
 * chore: fixed event store leak; refactored blockchains providers; fixed blockchains queues; ([0a3ea1d](https://github.com/EasyLayer/core/commit/0a3ea1d))
