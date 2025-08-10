@@ -22,6 +22,6 @@ jobs:
         with:
           path: 'yarn.lock'
           type: 'yarn'
-          allowedHosts: 'registry.npmjs.org registry.yarnpkg.com'
-          allowedURLs: 'https://codeload.github.com/bitpay/node-buffers/tar.gz/fb509ded0d7f1fc0f6fa6662abf9e533018a57df'
+          allowedHosts: 'registry.npmjs.org,registry.yarnpkg.com,github.com,codeload.github.com'
+          allowedURLs: 'https://github.com/bitpay/node-buffers.git#commit=fb509ded0d7f1fc0f6fa6662abf9e533018a57df,https://codeload.github.com/bitpay/node-buffers/tar.gz/fb509ded0d7f1fc0f6fa6662abf9e533018a57df'
 
