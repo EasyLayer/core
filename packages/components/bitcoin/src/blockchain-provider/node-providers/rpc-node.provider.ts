@@ -1,7 +1,9 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as zmq from 'zeromq';
 import type { BaseNodeProviderOptions } from './base-node-provider';
 import { BaseNodeProvider } from './base-node-provider';
+import { BitcoinMerkleVerifier } from './merkle-verifier';
 import type {
   NetworkConfig,
   UniversalBlock,
@@ -18,6 +20,8 @@ export interface RPCNodeProviderOptions extends BaseNodeProviderOptions {
   baseUrl: string;
   network: NetworkConfig;
   responseTimeout?: number;
+  // ZMQ settings (optional) - MOVED FROM P2P
+  zmqEndpoint?: string;
 }
 
 export const createRPCNodeProvider = (options: RPCNodeProviderOptions): RPCNodeProvider => {
@@ -33,6 +37,14 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
   private responseTimeout: number;
   private network: NetworkConfig;
   private rateLimiter: RateLimiter;
+
+  // ZMQ settings - MOVED FROM P2P TO RPC
+  private zmqEndpoint?: string;
+  private zmqSocket?: zmq.Subscriber;
+  private zmqRunning = false;
+
+  // Subscription state
+  private blockSubscriptions = new Set<(block: UniversalBlock) => void>();
 
   constructor(options: RPCNodeProviderOptions) {
     super(options);
@@ -51,6 +63,7 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
 
     this.network = options.network;
     this.rateLimiter = new RateLimiter(options.rateLimits);
+    this.zmqEndpoint = options.zmqEndpoint; // ZMQ moved here
 
     // Determine whether to use HTTP or HTTPS, and create the appropriate agent
     const isHttps = this.baseUrl.startsWith('https://');
@@ -76,6 +89,7 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
       type: this.type,
       uniqName: this.uniqName,
       baseUrl: this.baseUrl,
+      zmqEndpoint: this.zmqEndpoint, // Include ZMQ in connection options
       rateLimits: this.rateLimits,
       network: this.network,
     };
@@ -94,6 +108,11 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
     if (!health) {
       throw new Error('Cannot connect to the node');
     }
+
+    // Initialize ZMQ if endpoint is provided
+    if (this.zmqEndpoint) {
+      await this.initializeZMQ();
+    }
   }
 
   public async healthcheck(): Promise<boolean> {
@@ -111,7 +130,11 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
     // 1. Stop rate limiter first
     await this.rateLimiter.stop();
 
-    // 2. HTTPS fix - force close connections
+    // 2. Clean up ZMQ subscription
+    this.cleanupBlockSubscription();
+    this.blockSubscriptions.clear();
+
+    // 3. HTTPS fix - force close connections
     if (this._httpClient && this.baseUrl.startsWith('https://')) {
       // Force destroy all HTTPS sockets immediately
       const agent = this._httpClient as any;
@@ -135,10 +158,156 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
       }
     }
 
-    // 3. Destroy HTTP agent
+    // 4. Destroy HTTP agent
     if (this._httpClient) {
       this._httpClient.destroy();
       this._httpClient = null;
+    }
+  }
+
+  /**
+   * Initialize ZMQ subscriber for new blocks - MOVED FROM P2P
+   */
+  private async initializeZMQ(): Promise<void> {
+    if (!this.zmqEndpoint) return;
+
+    try {
+      this.zmqSocket = new zmq.Subscriber();
+      this.zmqSocket.connect(this.zmqEndpoint);
+
+      // Subscribe to both hash and full block notifications
+      this.zmqSocket.subscribe('hashblock');
+      this.zmqSocket.subscribe('rawblock');
+
+      this.zmqRunning = true;
+
+      // Handle new block notifications
+      this.processZMQMessages();
+    } catch (error) {
+      this.zmqSocket = undefined;
+      this.zmqRunning = false;
+    }
+  }
+
+  /**
+   * Process ZMQ messages - MOVED FROM P2P
+   */
+  private async processZMQMessages(): Promise<void> {
+    if (!this.zmqSocket) return;
+
+    try {
+      for await (const [topic, message] of this.zmqSocket) {
+        if (!this.zmqRunning) break;
+
+        const topicStr = topic?.toString();
+
+        if (topicStr === 'rawblock' && this.blockSubscriptions.size > 0) {
+          const blockBuffer = message as Buffer;
+          const processedBlock = await this.processNewBlock(blockBuffer);
+
+          if (processedBlock) {
+            this.blockSubscriptions.forEach((callback) => {
+              try {
+                callback(processedBlock);
+              } catch (error) {
+                // Ignore callback errors
+              }
+            });
+          }
+        } else if (topicStr === 'hashblock' && this.blockSubscriptions.size > 0) {
+          const blockHash = message?.toString('hex');
+          if (blockHash) {
+            try {
+              // Fetch the full block data using RPC
+              const blocks = await this.getManyBlocksHexByHashes([blockHash], true);
+              const block = blocks[0];
+
+              if (block) {
+                this.blockSubscriptions.forEach((callback) => {
+                  try {
+                    callback(block);
+                  } catch (error) {
+                    // Ignore callback errors
+                  }
+                });
+              }
+            } catch (fetchError) {
+              // Block fetch failed
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // ZMQ connection error
+    }
+  }
+
+  /**
+   * Process new block from ZMQ - MOVED FROM P2P
+   */
+  private async processNewBlock(blockData: Buffer): Promise<UniversalBlock | null> {
+    try {
+      const hexData = blockData.toString('hex');
+      const parsedBlock = HexTransformer.parseBlockHex(hexData, this.network);
+      parsedBlock.hex = hexData;
+
+      // Verify Merkle root for security
+      const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
+
+      if (!isValid) {
+        throw new Error('TODO');
+      }
+
+      // Get height using RPC call
+      try {
+        const blockInfo = await this.getManyBlocksByHashes([parsedBlock.hash], 1);
+        if (blockInfo[0] && blockInfo[0].height !== undefined) {
+          (parsedBlock as any).height = blockInfo[0].height;
+        }
+      } catch (error) {
+        // Could not get height, skip this block
+        return null;
+      }
+
+      return parsedBlock;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Subscribe to new blocks with UniversalBlock - ZMQ SUBSCRIPTION
+   */
+  public subscribeToNewBlocks(callback: (block: UniversalBlock) => void): { unsubscribe: () => void } {
+    this.blockSubscriptions.add(callback);
+
+    if (this.blockSubscriptions.size === 1) {
+      this.initializeZMQSubscription();
+    }
+
+    return {
+      unsubscribe: () => {
+        this.blockSubscriptions.delete(callback);
+        if (this.blockSubscriptions.size === 0) {
+          this.cleanupBlockSubscription();
+        }
+      },
+    };
+  }
+
+  private initializeZMQSubscription(): void {
+    if (this.zmqEndpoint && !this.zmqRunning) {
+      this.initializeZMQ().catch((error) => {
+        // ZMQ initialization failed
+      });
+    }
+  }
+
+  private cleanupBlockSubscription(): void {
+    if (this.zmqSocket && this.zmqRunning) {
+      this.zmqRunning = false;
+      this.zmqSocket.close();
+      this.zmqSocket = undefined;
     }
   }
 
@@ -241,23 +410,40 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
    * Get multiple blocks parsed from hex as Universal objects - ATOMIC METHOD
    * Returns blocks parsed from hex only, without height (height must be set separately)
    */
-  public async getManyBlocksHexByHashes(hashes: string[]): Promise<(UniversalBlock | null)[]> {
+  public async getManyBlocksHexByHashes(
+    hashes: string[],
+    verifyMerkle: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
     return this.executeWithErrorHandling(async () => {
       // Get hex data for all blocks
       const hexRequests = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] }));
       const hexResults = await this.rateLimiter.execute(hexRequests, (calls) => this._batchRpcCall(calls));
 
       // Parse hex to Universal blocks, preserving order
-      return hexResults.map((hex) => {
-        if (hex === null) {
-          return null;
-        }
+      return await Promise.all(
+        hexResults.map(async (hex) => {
+          if (hex === null) {
+            return null; // TODO: think about this null or throw an error
+          }
 
-        // Parse hex and normalize through HexTransformer
-        const parsedBlock = HexTransformer.parseBlockHex(hex, this.network);
-        parsedBlock.hex = hex;
-        return parsedBlock;
-      });
+          // Parse hex and normalize through HexTransformer
+          const parsedBlock = HexTransformer.parseBlockHex(hex, this.network);
+          parsedBlock.hex = hex;
+
+          // Verify Merkle root if requested
+          if (verifyMerkle) {
+            const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
+            if (!isValid) {
+              throw new Error(
+                `Merkle root verification failed for block ${parsedBlock.hash}. ` +
+                  `Expected: ${parsedBlock.merkleroot}, but computed root doesn't match.`
+              );
+            }
+          }
+
+          return parsedBlock;
+        })
+      );
     }, 'getManyBlocksHexByHashes');
   }
 
@@ -265,7 +451,10 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
    * Get multiple blocks parsed from hex by heights as Universal objects - COMBINED METHOD
    * Guarantees height for all returned blocks since we know the heights from input
    */
-  public async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {
+  public async getManyBlocksHexByHeights(
+    heights: number[],
+    verifyMerkle: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
     return this.executeWithErrorHandling(async () => {
       // Get hashes using our internal method - preserves order with nulls
       const hashes = await this.getManyBlockHashesByHeights(heights);
@@ -276,7 +465,7 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
         return new Array(heights.length).fill(null);
       }
 
-      const hexBlocks = await this.getManyBlocksHexByHashes(validHashes);
+      const hexBlocks = await this.getManyBlocksHexByHashes(validHashes, verifyMerkle);
 
       // Map results back to original order with guaranteed heights
       const results: (UniversalBlock | null)[] = new Array(heights.length).fill(null);
@@ -302,25 +491,47 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
   /**
    * Get multiple blocks as structured objects - ATOMIC METHOD
    */
-  public async getManyBlocksByHashes(hashes: string[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
+  public async getManyBlocksByHashes(
+    hashes: string[],
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
     return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, verbosity] }));
       const results = await this.rateLimiter.execute(requests, (calls) => this._batchRpcCall(calls));
 
-      // Preserve order, normalize only non-null blocks
-      return results.map((rawBlock) => {
-        if (rawBlock === null) {
-          return null;
-        }
-        return this.normalizeRawBlock(rawBlock);
-      });
+      // Process and verify blocks if requested
+      return await Promise.all(
+        results.map(async (rawBlock) => {
+          if (rawBlock === null) {
+            return null; // TODO: think about this null or throw an error
+          }
+
+          // Verify Merkle root if requested and we have transaction data
+          if (verifyMerkle && verbosity >= 1 && rawBlock.tx) {
+            const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(rawBlock, this.network.hasSegWit);
+            if (!isValid) {
+              throw new Error(
+                `Merkle root verification failed for block ${rawBlock.hash}. ` +
+                  `Expected: ${rawBlock.merkleroot}, but computed root doesn't match.`
+              );
+            }
+          }
+
+          return this.normalizeRawBlock(rawBlock);
+        })
+      );
     }, 'getManyBlocksByHashes');
   }
 
   /**
    * Get multiple blocks by heights as structured objects - COMBINED METHOD
    */
-  public async getManyBlocksByHeights(heights: number[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
+  public async getManyBlocksByHeights(
+    heights: number[],
+    verbosity: number = 1,
+    verifyMerkle: boolean = false
+  ): Promise<(UniversalBlock | null)[]> {
     return this.executeWithErrorHandling(async () => {
       // Get hashes first - preserves order, null for missing
       const blocksHashes = await this.getManyBlockHashesByHeights(heights);
@@ -331,7 +542,7 @@ export class RPCNodeProvider extends BaseNodeProvider<RPCNodeProviderOptions> {
         return new Array(heights.length).fill(null);
       }
 
-      const blocks = await this.getManyBlocksByHashes(validHashes, verbosity);
+      const blocks = await this.getManyBlocksByHashes(validHashes, verbosity, verifyMerkle);
 
       // Map back to original order
       const results: (UniversalBlock | null)[] = new Array(heights.length).fill(null);

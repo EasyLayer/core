@@ -1,11 +1,11 @@
 import type { AppLogger } from '@easylayer/common/logger';
 import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
-import { StrategyNames } from '../load-strategies';
+import { StrategyNames } from '.';
 import type { BlocksQueue } from '../../blocks-queue';
 
-export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.SUBSCRIBE;
+export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
+  readonly name: StrategyNames = StrategyNames.WS_SUBSCRIBE;
 
   // Hold the active subscription (Promise<void> & { unsubscribe(): void }) or undefined
   private _subscription?: Promise<void> & { unsubscribe: () => void };
@@ -47,31 +47,35 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
           await this.performInitialCatchup(currentNetworkHeight);
 
           // Create subscription to new blocks
-          this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
-            try {
-              if (this.queue.isMaxHeightReached) {
-                // this._subscription?.unsubscribe();
-                // reject(new Error('Reached max block height'));
-                return;
-              }
+          this._subscription = this.blockchainProvider.subscribeToNewBlocks(
+            async (block) => {
+              try {
+                if (this.queue.isMaxHeightReached) {
+                  // this._subscription?.unsubscribe();
+                  // reject(new Error('Reached max block height'));
+                  return;
+                }
 
-              // IMPORTANT: we don't need to check currentNetworkHeight here
-              // because we subscribe on new blocks
+                // IMPORTANT: we don't need to check currentNetworkHeight here
+                // because we subscribe on new blocks
 
-              // Check if the queue is full
-              if (this.queue.isQueueFull) {
+                // Check if the queue is full
+                if (this.queue.isQueueFull) {
+                  this._subscription?.unsubscribe();
+                  reject(new Error('The queue is full'));
+                  return;
+                }
+
+                // Enqueue the new block
+                await this.enqueueBlock(block);
+              } catch (error) {
                 this._subscription?.unsubscribe();
-                reject(new Error('The queue is full'));
-                return;
+                reject(error);
               }
-
-              // Enqueue the new block
-              await this.enqueueBlock(block);
-            } catch (error) {
-              this._subscription?.unsubscribe();
-              reject(error);
-            }
-          });
+            },
+            true,
+            true
+          );
 
           this.log.debug('Subscription created, waiting for new blocks');
 
@@ -155,7 +159,7 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
   private async performInitialCatchup(targetHeight: number): Promise<void> {
     const queueHeight = this.queue.lastHeight;
 
-    this.log.info('Performing initial catch-up', {
+    this.log.debug('Performing initial catch-up', {
       args: {
         from: queueHeight + 1,
         to: targetHeight,
@@ -171,12 +175,12 @@ export class SubscribeBlocksProviderStrategy implements BlocksLoadingStrategy {
     }
 
     // Fetch all blocks in a single batch request with full transactions + receipts
-    const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true);
+    const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, true);
 
     // Enqueue blocks in correct order
     await this.enqueueBlocks(blocks);
 
-    this.log.info('Initial catch-up completed successfully', {
+    this.log.debug('Initial catch-up completed successfully', {
       args: { blocksProcessed: blocks.length },
     });
   }

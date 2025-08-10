@@ -1,4 +1,4 @@
-import { SubscribeBlocksProviderStrategy } from '../subscribe-blocks-provider.strategy';
+import { SubscribeWsProviderStrategy } from '../subscribe-ws-provider.strategy';
 
 const mockLogger = {
   debug: jest.fn(),
@@ -25,8 +25,8 @@ const mockBlock = {
   transactions: [],
 };
 
-describe('SubscribeBlocksProviderStrategy', () => {
-  let strategy: SubscribeBlocksProviderStrategy;
+describe('SubscribeWsProviderStrategy', () => {
+  let strategy: SubscribeWsProviderStrategy;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -34,7 +34,7 @@ describe('SubscribeBlocksProviderStrategy', () => {
     mockQueue.isMaxHeightReached = false;
     mockQueue.isQueueFull = false;
     
-    strategy = new SubscribeBlocksProviderStrategy(
+    strategy = new SubscribeWsProviderStrategy(
       mockLogger,
       mockBlockchainProvider as any,
       mockQueue as any,
@@ -79,7 +79,7 @@ describe('SubscribeBlocksProviderStrategy', () => {
       await loadPromise;
 
       // Check that catch-up was performed for blocks 101 and 102
-      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102], true);
+      expect(mockBlockchainProvider.getManyBlocksWithReceipts).toHaveBeenCalledWith([101, 102], true, true);
       
       // Check that all blocks were added to queue (catchup + new block)
       // The actual order depends on the sorting logic in enqueueBlocks method

@@ -1,5 +1,5 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { BlockchainProviderService, MempoolTransaction, LightBlock } from '@easylayer/bitcoin';
+import type { BlockchainProviderService, MempoolTransaction, LightBlock } from '../../blockchain-provider';
 import {
   BitcoinMempoolInitializedEvent,
   BitcoinMempoolSyncProcessedEvent,

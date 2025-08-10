@@ -57,7 +57,7 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
    * @param callback - Function called with new block hash
    * @returns Subscription object with unsubscribe method
    */
-  subscribeToNewBlocks?(callback: (blockHash: string) => void): { unsubscribe: () => void };
+  subscribeToNewBlocks?(callback: (block: UniversalBlock) => void): { unsubscribe: () => void };
 
   // ===== BASIC BLOCKCHAIN METHODS =====
 
@@ -72,24 +72,32 @@ export abstract class BaseNodeProvider<T extends BaseNodeProviderOptions = BaseN
   // ===== HEX METHODS (parse hex and return Universal* with hex field) =====
 
   // ATOMIC METHOD - must be implemented by all providers
-  async getManyBlocksHexByHashes(hashes: string[]): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksHexByHashes(hashes: string[], verifyMerkle?: boolean): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksHexByHashes() must be implemented by provider');
   }
 
   // COMBINED METHOD - optional, providers can implement for optimization
-  async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksHexByHeights(heights: number[], verifyMerkle?: boolean): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksHexByHeights() must be implemented by provider');
   }
 
   // ===== OBJECT METHODS (return Universal* without hex field) =====
 
   // ATOMIC METHOD - must be implemented by all providers
-  async getManyBlocksByHashes(hashes: string[], verbosity?: number): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksByHashes(
+    hashes: string[],
+    verbosity?: number,
+    verifyMerkle?: boolean
+  ): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksByHashes() must be implemented by provider');
   }
 
   // COMBINED METHOD - optional, providers can implement for optimization
-  async getManyBlocksByHeights(heights: number[], verbosity?: number): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksByHeights(
+    heights: number[],
+    verbosity?: number,
+    verifyMerkle?: boolean
+  ): Promise<(UniversalBlock | null)[]> {
     throw new Error('Method getManyBlocksByHeights() must be implemented by provider');
   }
 
