@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import { ConnectionManager } from './connection-manager';
-import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './node-providers';
+import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequestOptions } from './managers';
+import type { NetworkProvider, MempoolProvider } from './providers';
+import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
 import { BitcoinNormalizer } from './normalizer';
 import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
@@ -11,66 +12,99 @@ import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from 
  */
 export type Subscription = Promise<void> & { unsubscribe: () => void };
 
+/**
+ * Blockchain Provider Service - Main service interface for Bitcoin-compatible blockchain operations
+ *
+ * Architecture:
+ * - NetworkConnectionManager: Single active provider with automatic failover
+ * - MempoolConnectionManager: Multiple providers with configurable strategies
+ * - Unified interface for both RPC and P2P transports
+ * - Supports Bitcoin-compatible chains (BTC, BCH, DOGE, LTC) via network config
+ * - Automatic error handling and provider switching
+ * - Built-in normalization and validation
+ *
+ * Performance characteristics:
+ * - Block operations: Optimized batch calls where possible
+ * - Mempool operations: Configurable strategies (parallel, round-robin, fastest)
+ * - Memory usage: No caching - immediate processing and forwarding
+ * - Error recovery: Automatic provider switching with exponential backoff
+ */
 @Injectable()
 export class BlockchainProviderService {
   private readonly normalizer: BitcoinNormalizer;
 
   constructor(
     private readonly log: AppLogger,
-    private readonly _connectionManager: ConnectionManager,
+    private readonly networkConnectionManager: NetworkConnectionManager,
+    private readonly mempoolConnectionManager: MempoolConnectionManager,
     private readonly networkConfig: NetworkConfig
   ) {
     this.normalizer = new BitcoinNormalizer(this.networkConfig);
   }
 
-  get connectionManager() {
-    return this._connectionManager;
+  get networkManager() {
+    return this.networkConnectionManager;
+  }
+
+  get mempoolManager() {
+    return this.mempoolConnectionManager;
   }
 
   get config() {
     return this.networkConfig;
   }
 
+  // ===== PRIVATE HELPER METHODS =====
+
   /**
-   * Execute provider method with automatic error handling and provider switching
+   * Check if network providers are available
    */
-  private async executeProviderMethod<T>(methodName: string, operation: (provider: any) => Promise<T>): Promise<T> {
-    try {
-      const provider = await this._connectionManager.getActiveProvider();
-      return await operation(provider);
-    } catch (error) {
-      this.log.warn('Bitcoin provider operation failed, attempting recovery', {
-        args: { methodName, error: error || 'Unknown error' },
-      });
+  private hasNetworkProviders(): boolean {
+    return this.networkConnectionManager.allProviders.length > 0;
+  }
 
-      // Let connection manager handle the failure and provider switching
-      try {
-        const currentProvider = await this._connectionManager.getActiveProvider();
-        const recoveredProvider = await this._connectionManager.handleProviderFailure(
-          currentProvider.uniqName,
-          error,
-          methodName
-        );
+  /**
+   * Check if mempool providers are available
+   */
+  private hasMempoolProviders(): boolean {
+    return this.mempoolConnectionManager.allProviders.length > 0;
+  }
 
-        // Retry with recovered/switched provider
-        return await operation(recoveredProvider);
-      } catch (recoveryError) {
-        this.log.error('Bitcoin provider recovery failed', {
-          args: { methodName, originalError: error, recoveryError },
-        });
-        throw recoveryError;
-      }
+  /**
+   * Throw error if no network providers are available
+   */
+  private ensureNetworkProviders(): void {
+    if (!this.hasNetworkProviders()) {
+      throw new Error('No network providers configured. Please configure at least one network provider.');
     }
   }
 
   /**
-   * Subscribes to new block events via provider (ZMQ for RPC, P2P for P2P)
-   * Automatically uses the best available subscription method from active provider
+   * Throw error if no mempool providers are available
+   */
+  private ensureMempoolProviders(): void {
+    if (!this.hasMempoolProviders()) {
+      throw new Error('No mempool providers configured. Please configure at least one mempool provider.');
+    }
+  }
+
+  // ===== SUBSCRIPTION METHODS =====
+
+  /**
+   * Subscribe to new block events with automatic normalization
+   * Node calls: 0 (real-time messages from transport)
+   * Memory usage: No block storage - immediate callback execution
    *
-   * @param callback - Function to be invoked whenever a new block is received
-   * @returns A Subscription (Promise<void> & { unsubscribe(): void })
+   * Automatically uses the best available subscription method from active provider:
+   * - RPC transport: ZMQ rawblock messages
+   * - P2P transport: Direct P2P block messages
+   *
+   * @param callback Function to call when new block arrives
+   * @returns Subscription promise with unsubscribe method
    */
   public subscribeToNewBlocks(callback: (block: Block) => void): Subscription {
+    this.ensureNetworkProviders();
+
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
@@ -79,18 +113,20 @@ export class BlockchainProviderService {
       rejectSubscription = reject;
     }) as Subscription;
 
-    this._connectionManager
+    this.networkConnectionManager
       .getActiveProvider()
       .then((provider) => {
+        const networkProvider = provider as NetworkProvider;
+
         // Check if provider supports block subscriptions
-        if (typeof provider.subscribeToNewBlocks !== 'function') {
+        if (typeof networkProvider.subscribeToNewBlocks !== 'function') {
           rejectSubscription(new Error('Active provider does not support block subscriptions'));
           return;
         }
 
         try {
           // Subscribe to UniversalBlock and normalize at service level
-          const subscription = provider.subscribeToNewBlocks((universalBlock: UniversalBlock) => {
+          const subscription = networkProvider.subscribeToNewBlocks((universalBlock: UniversalBlock) => {
             try {
               // Normalize UniversalBlock to Block at service level
               const normalizedBlock = this.normalizer.normalizeBlock(universalBlock);
@@ -119,26 +155,73 @@ export class BlockchainProviderService {
     return subscriptionPromise;
   }
 
-  // ===== BASIC INFO METHODS =====
+  // ===== NETWORK OPERATIONS (using networkConnectionManager) =====
 
   /**
-   * Gets the current block height
-   * Node calls: 1 (getblockcount)
+   * Execute network provider method with automatic error handling and provider switching
+   * Implements automatic failover with exponential backoff
+   *
+   * @param methodName Name of the method being executed (for logging)
+   * @param operation Function to execute on the network provider
+   * @returns Result of the operation
    */
-  public async getCurrentBlockHeight(): Promise<number> {
-    return this.executeProviderMethod('getCurrentBlockHeight', async (provider) => {
+  private async executeNetworkProviderMethod<T>(
+    methodName: string,
+    operation: (provider: NetworkProvider) => Promise<T>
+  ): Promise<T> {
+    this.ensureNetworkProviders();
+
+    try {
+      const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
+      return await operation(provider);
+    } catch (error) {
+      this.log.warn('Network provider operation failed, attempting recovery', {
+        args: { methodName, error: error || 'Unknown error' },
+      });
+
+      try {
+        const currentProvider = await this.networkConnectionManager.getActiveProvider();
+        const recoveredProvider = (await this.networkConnectionManager.handleProviderFailure(
+          currentProvider.uniqName,
+          error,
+          methodName
+        )) as NetworkProvider;
+
+        // Retry with recovered/switched provider
+        return await operation(recoveredProvider);
+      } catch (recoveryError) {
+        this.log.error('Network provider recovery failed', {
+          args: { methodName, originalError: error, recoveryError },
+        });
+        throw recoveryError;
+      }
+    }
+  }
+
+  /**
+   * Get current blockchain height
+   * Node calls: 1 (getblockcount for RPC, cached for P2P)
+   * Time complexity: O(1)
+   *
+   * @returns Current blockchain height
+   */
+  public async getCurrentBlockHeightFromNetwork(): Promise<number> {
+    return this.executeNetworkProviderMethod('getCurrentBlockHeight', async (provider) => {
       const height = await provider.getBlockHeight();
       return Number(height);
     });
   }
 
   /**
-   * Gets a block hash by height
-   * Node calls: 1 (getblockhash)
-   * @returns block hash or null if block doesn't exist
+   * Get a single block hash by height
+   * Node calls: 1 (getblockhash for RPC, cached lookup for P2P)
+   * Time complexity: O(1)
+   *
+   * @param height Block height to get hash for
+   * @returns Block hash or null if block doesn't exist
    */
   public async getOneBlockHashByHeight(height: string | number): Promise<string | null> {
-    return this.executeProviderMethod('getOneBlockHashByHeight', async (provider) => {
+    return this.executeNetworkProviderMethod('getOneBlockHashByHeight', async (provider) => {
       try {
         const hashes = await provider.getManyBlockHashesByHeights([Number(height)]);
         return hashes[0] || null;
@@ -149,114 +232,50 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple block hashes by heights - batch optimized
+   * Get multiple block hashes by heights - batch optimized
    * Node calls: 1 (batch getblockhash for all heights)
+   * Time complexity: O(k) where k = number of heights
+   *
+   * @param heights Array of block heights
+   * @returns Array of hashes in same order as input heights, null for missing blocks
    */
   public async getManyHashesByHeights(heights: string[] | number[]): Promise<(string | null)[]> {
-    return this.executeProviderMethod('getManyHashesByHeights', async (provider) => {
+    return this.executeNetworkProviderMethod('getManyHashesByHeights', async (provider) => {
       return await provider.getManyBlockHashesByHeights(heights.map((h) => Number(h)));
     });
   }
 
-  // ===== BLOCK METHODS WITH HEX OPTION =====
-
   /**
-   * Gets a normalized block by height
-   * Node calls: 1 (getblockhash + getblock) if useHex=true, 2 (getblockhash + getblock) if useHex=false
-   * @param height - block height
-   * @param useHex - if true, uses hex parsing for better performance and complete transaction data
-   * @param verbosity - verbosity level for object method (ignored if useHex=true)
-   * @param verifyMerkle - if true, verifies Merkle root of transactions
-   * @returns normalized block or null if block doesn't exist
+   * Get a basic block by height (with transaction hashes only, not full transactions)
+   * Node calls: 2 (getblockhash + getblock) for RPC, cached lookup + GetData for P2P
+   * Time complexity: O(1) with guaranteed height information
+   *
+   * Recommended method for reorg detection as it provides minimal data but guarantees height accuracy
+   *
+   * @param height Block height
+   * @returns Normalized block with transaction hashes only, or null if block doesn't exist
    */
-  public async getOneBlockByHeight(
-    height: string | number,
-    useHex: boolean = false,
-    verbosity: number = 1,
-    verifyMerkle: boolean = false
-  ): Promise<Block | null> {
-    return this.executeProviderMethod('getOneBlockByHeight', async (provider) => {
-      if (useHex) {
-        // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHeights([Number(height)], verifyMerkle);
-        const universalBlock = universalBlocks[0];
+  public async getBasicBlockByHeight(height: string | number): Promise<Block | null> {
+    return this.executeNetworkProviderMethod('getBasicBlockByHeight', async (provider) => {
+      // Use structured data method with verbosity 1 (includes tx hashes but not full tx data)
+      const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], 1, false);
+      const rawBlock = rawBlocks[0];
 
-        if (!universalBlock) {
-          return null;
-        }
-
-        return this.normalizer.normalizeBlock(universalBlock);
-      } else {
-        // Get structured block data - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], verbosity, verifyMerkle);
-        const rawBlock = rawBlocks[0];
-
-        if (!rawBlock) {
-          return null;
-        }
-
-        return this.normalizer.normalizeBlock(rawBlock);
-      }
+      if (!rawBlock) return null;
+      return this.normalizer.normalizeBlock(rawBlock);
     });
   }
 
   /**
-   * Gets a normalized block by hash
-   * Node calls: 1 (getblock) if useHex=true, 2 (getblock + getblock) if useHex=false and height missing
-   * @param hash - block hash
-   * @param useHex - if true, uses hex parsing for better performance and complete transaction data
-   * @param verbosity - verbosity level for object method (ignored if useHex=true)
-   * @param verifyMerkle - if true, verifies Merkle root of transactions
-   * @returns normalized block or null if block doesn't exist
-   */
-  public async getOneBlockByHash(
-    hash: string,
-    useHex: boolean = false,
-    verbosity: number = 1,
-    verifyMerkle: boolean = false
-  ): Promise<Block | null> {
-    return this.executeProviderMethod('getOneBlockByHash', async (provider) => {
-      if (useHex) {
-        // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHashes([hash], verifyMerkle);
-        const universalBlock = universalBlocks[0];
-
-        if (!universalBlock) {
-          return null;
-        }
-
-        // Need to get height separately using public provider method
-        const blockInfos = await provider.getManyBlocksByHashes([hash], 1);
-        const blockInfo = blockInfos[0];
-
-        if (!blockInfo || blockInfo.height === undefined) {
-          return null; // Cannot guarantee height
-        }
-
-        // Set height and normalize
-        universalBlock.height = blockInfo.height;
-        return this.normalizer.normalizeBlock(universalBlock);
-      } else {
-        // Get structured block data - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHashes([hash], verbosity, verifyMerkle);
-        const rawBlock = rawBlocks[0];
-
-        if (!rawBlock) {
-          return null;
-        }
-
-        return this.normalizer.normalizeBlock(rawBlock);
-      }
-    });
-  }
-
-  /**
-   * Gets multiple normalized blocks by heights
-   * Node calls: 1 (batch getblockhash + batch getblock) if useHex=true, 1 (batch getblockhash + batch getblock) if useHex=false
-   * @param heights - array of block heights
-   * @param useHex - if true, uses hex parsing for better performance and complete transaction data
-   * @param verbosity - verbosity level for object method (ignored if useHex=true)
-   * @param verifyMerkle - if true, verifies Merkle root of transactions
+   * Get multiple blocks by heights with configurable options
+   * Node calls: 1-2 depending on method (batch operations)
+   * Time complexity: O(k) where k = number of heights
+   *
+   * @param heights Array of block heights
+   * @param useHex If true, uses hex parsing for better performance and complete transaction data
+   * @param verbosity Verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle If true, verifies Merkle root of transactions
+   * @returns Array of blocks in same order as input heights, with guaranteed height information
    */
   public async getManyBlocksByHeights(
     heights: string[] | number[],
@@ -264,7 +283,7 @@ export class BlockchainProviderService {
     verbosity: number = 1,
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
-    return this.executeProviderMethod('getManyBlocksByHeights', async (provider) => {
+    return this.executeNetworkProviderMethod('getManyBlocksByHeights', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHeights(
@@ -291,12 +310,15 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets multiple normalized blocks by hashes
-   * Node calls: 1 (batch getblock) if useHex=false, 2 (batch getblock + batch getblock) if useHex=true and heights needed
-   * @param hashes - array of block hashes
-   * @param useHex - if true, uses hex parsing for better performance and complete transaction data
-   * @param verbosity - verbosity level for object method (ignored if useHex=true)
-   * @param verifyMerkle - if true, verifies Merkle root of transactions
+   * Get multiple blocks by hashes with configurable options
+   * Node calls: 1-2 depending on method and whether heights are needed
+   * Time complexity: O(k) where k = number of hashes
+   *
+   * @param hashes Array of block hashes
+   * @param useHex If true, uses hex parsing for better performance and complete transaction data
+   * @param verbosity Verbosity level for object method (ignored if useHex=true)
+   * @param verifyMerkle If true, verifies Merkle root of transactions
+   * @returns Array of blocks in same order as input hashes, with height information
    */
   public async getManyBlocksByHashes(
     hashes: string[],
@@ -304,16 +326,14 @@ export class BlockchainProviderService {
     verbosity: number = 1,
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
-    return this.executeProviderMethod('getManyBlocksByHashes', async (provider) => {
+    return this.executeNetworkProviderMethod('getManyBlocksByHashes', async (provider) => {
       if (useHex) {
         // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHashes(hashes, verifyMerkle);
 
         // Get heights for valid blocks using public provider method
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
-        if (validHashes.length === 0) {
-          return [];
-        }
+        if (validHashes.length === 0) return [];
 
         // Get height info for valid hashes using structured method
         const heightInfos = await provider.getManyBlocksByHashes(validHashes, 1);
@@ -345,14 +365,16 @@ export class BlockchainProviderService {
     });
   }
 
-  // ===== BLOCK STATS METHODS =====
-
   /**
-   * Gets block statistics by heights using batch calls
+   * Get block statistics by heights using batch calls
    * Node calls: 2 (batch getblockhash + batch getblockstats, with special genesis handling)
+   * Time complexity: O(k) where k = number of heights
+   *
+   * @param heights Array of block heights
+   * @returns Array of stats in same order as input heights
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<BlockStats[]> {
-    return this.executeProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
+    return this.executeNetworkProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
       // Get raw stats - GUARANTEES HEIGHT
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
 
@@ -363,11 +385,15 @@ export class BlockchainProviderService {
   }
 
   /**
-   * Gets block statistics by hashes using batch calls
+   * Get block statistics by hashes using batch calls
    * Node calls: 1 (batch getblockstats for all hashes)
+   * Time complexity: O(k) where k = number of hashes
+   *
+   * @param hashes Array of block hashes
+   * @returns Array of stats in same order as input hashes
    */
   public async getManyBlocksStatsByHashes(hashes: string[]): Promise<BlockStats[]> {
-    return this.executeProviderMethod('getManyBlocksStatsByHashes', async (provider) => {
+    return this.executeNetworkProviderMethod('getManyBlocksStatsByHashes', async (provider) => {
       // Get raw stats - GUARANTEES HEIGHT (blockstats includes height)
       const rawStats = await provider.getManyBlocksStatsByHashes(hashes);
 
@@ -377,90 +403,249 @@ export class BlockchainProviderService {
     });
   }
 
-  // ===== TRANSACTION METHODS =====
-
   /**
-   * Gets multiple transactions by txids - batch optimized
-   * @param txids - array of transaction IDs
-   * @param useHex - if true, uses hex parsing for better performance and complete transaction data
-   * @param verbosity - verbosity level for object method (ignored if useHex=true)
-   * @returns transactions or empty array if none exist
+   * Get multiple transactions by txids - batch optimized (Network Provider)
+   * Node calls: 1 (batch getrawtransaction for all txids)
+   * Time complexity: O(k) where k = number of txids
+   *
+   * @param txids Array of transaction IDs
+   * @param useHex If true, uses hex parsing for better performance and complete transaction data
+   * @param verbosity Verbosity level for object method (ignored if useHex=true)
+   * @returns Array of transactions in same order as input txids
    */
   public async getTransactionsByTxids(
     txids: string[],
     useHex: boolean = false,
     verbosity: number = 1
   ): Promise<Transaction[]> {
-    return this.executeProviderMethod('getTransactionsByTxids', async (provider) => {
+    return this.executeNetworkProviderMethod('getTransactionsByTxids', async (provider) => {
       if (useHex) {
         // Get Universal transactions parsed from hex
         const universalTxs = await provider.getManyTransactionsHexByTxids(txids);
-
-        // Filter out null transactions and normalize
         const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
         return this.normalizer.normalizeManyTransactions(validTxs);
       } else {
         // Get structured transaction data
         const rawTxs = await provider.getManyTransactionsByTxids(txids, verbosity);
-
-        // Filter out null transactions and normalize
         const validTxs = rawTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
         return this.normalizer.normalizeManyTransactions(validTxs);
       }
     });
   }
 
-  // ===== NETWORK METHODS =====
-
   /**
-   * Gets blockchain information
+   * Get blockchain information
+   * Node calls: 1 (getblockchaininfo)
    */
   public async getBlockchainInfo(): Promise<any> {
-    return this.executeProviderMethod('getBlockchainInfo', async (provider) => {
+    return this.executeNetworkProviderMethod('getBlockchainInfo', async (provider) => {
       return await provider.getBlockchainInfo();
     });
   }
 
   /**
-   * Gets network information
+   * Get network information
+   * Node calls: 1 (getnetworkinfo)
    */
   public async getNetworkInfo(): Promise<any> {
-    return this.executeProviderMethod('getNetworkInfo', async (provider) => {
+    return this.executeNetworkProviderMethod('getNetworkInfo', async (provider) => {
       return await provider.getNetworkInfo();
     });
   }
 
-  public async getMempoolInfo(): Promise<MempoolInfo> {
-    return this.executeProviderMethod('getMempoolInfo', async (provider) => {
-      return await provider.getMempoolInfo();
-    });
-  }
-
-  public async getRawMempool(verbose: boolean = false): Promise<any> {
-    return this.executeProviderMethod('getRawMempool', async (provider) => {
-      return await provider.getRawMempool(verbose);
-    });
-  }
-
-  public async getMempoolEntries(txids: string[]): Promise<(MempoolTransaction | null)[]> {
-    return this.executeProviderMethod('getMempoolEntries', async (provider) => {
-      return await provider.getMempoolEntries(txids);
-    });
-  }
-
   /**
-   * Estimates smart fee
+   * Estimate smart fee via network provider
+   * Node calls: 1 (estimatesmartfee)
    */
   public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
-    return this.executeProviderMethod('estimateSmartFee', async (provider) => {
+    return this.executeNetworkProviderMethod('estimateSmartFee', async (provider) => {
       return await provider.estimateSmartFee(confTarget, estimateMode);
     });
   }
 
-  // ===== NETWORK FEATURE UTILITY METHODS =====
+  // ===== MEMPOOL OPERATIONS (using mempoolConnectionManager) =====
 
   /**
-   * Utility method to check if a feature is supported by the current network
+   * Get multiple transactions by txids from mempool providers with strategy
+   * Node calls: 1 per provider (batch getrawtransaction for all txids)
+   * Time complexity: O(k) where k = number of txids
+   *
+   * @param txids Array of transaction IDs
+   * @param useHex If true, uses hex parsing for better performance
+   * @param verbosity Verbosity level for object method (ignored if useHex=true)
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Array of transactions in same order as input txids
+   */
+  public async getMempoolTransactionsByTxids(
+    txids: string[],
+    useHex: boolean = false,
+    verbosity: number = 1,
+    options: MempoolRequestOptions = {}
+  ): Promise<Transaction[]> {
+    this.ensureMempoolProviders();
+
+    if (useHex) {
+      const universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
+        async (provider: MempoolProvider) => await provider.getManyTransactionsHexByTxids(txids),
+        options
+      );
+      const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
+      return this.normalizer.normalizeManyTransactions(validTxs);
+    } else {
+      const rawTxs = await this.mempoolConnectionManager.executeWithStrategy(
+        async (provider: MempoolProvider) => await provider.getManyTransactionsByTxids(txids, verbosity),
+        options
+      );
+      const validTxs = rawTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
+      return this.normalizer.normalizeManyTransactions(validTxs);
+    }
+  }
+
+  /**
+   * Get current blockchain height from mempool providers with strategy
+   * Node calls: 1 per provider (getblockcount)
+   * Time complexity: O(1)
+   *
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Current blockchain height
+   */
+  public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions = {}): Promise<number> {
+    this.ensureMempoolProviders();
+    const height = await this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.getBlockHeight(),
+      options
+    );
+    return Number(height);
+  }
+
+  /**
+   * Get mempool information using specified strategy
+   * Node calls: 1 per provider (getmempoolinfo)
+   * Time complexity: O(1)
+   * Memory usage: Minimal - just returns current mempool state
+   *
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Mempool information
+   */
+  public async getMempoolInfo(options: MempoolRequestOptions = {}): Promise<MempoolInfo> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.getMempoolInfo(),
+      options
+    );
+  }
+
+  /**
+   * Get raw mempool using specified strategy
+   * Node calls: 1 per provider (getrawmempool)
+   * Time complexity: O(n) where n = number of transactions in mempool
+   * Memory usage: Depends on mempool size and verbosity
+   *
+   * @param verbose If true, returns detailed transaction info; if false, returns array of txids
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Raw mempool data
+   */
+  public async getRawMempool(verbose: boolean = false, options: MempoolRequestOptions = {}): Promise<any> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.getRawMempool(verbose),
+      options
+    );
+  }
+
+  /**
+   * Get mempool entries using specified strategy
+   * Node calls: 1 per provider (batch getmempoolentry for all txids)
+   * Time complexity: O(k) where k = number of txids
+   *
+   * @param txids Array of transaction IDs to get mempool entries for
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Array of mempool entries in same order as input
+   */
+  public async getMempoolEntries(
+    txids: string[],
+    options: MempoolRequestOptions = {}
+  ): Promise<(MempoolTransaction | null)[]> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.getMempoolEntries(txids),
+      options
+    );
+  }
+
+  /**
+   * Get mempool information from all providers (parallel execution)
+   * Node calls: 1 per provider in parallel (getmempoolinfo)
+   * Time complexity: O(1) with parallel execution
+   *
+   * @returns Array of mempool info from all providers
+   */
+  public async getMempoolInfoFromAll(): Promise<MempoolInfo[]> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeOnMultiple(
+      async (provider: MempoolProvider) => await provider.getMempoolInfo()
+    );
+  }
+
+  /**
+   * Get raw mempool from all providers (parallel execution)
+   * Node calls: 1 per provider in parallel (getrawmempool)
+   * Time complexity: O(n) where n = number of transactions in mempool
+   *
+   * @param verbose If true, returns detailed transaction info; if false, returns array of txids
+   * @returns Array of raw mempool data from all providers
+   */
+  public async getRawMempoolFromAll(verbose: boolean = false): Promise<any[]> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeOnMultiple(
+      async (provider: MempoolProvider) => await provider.getRawMempool(verbose)
+    );
+  }
+
+  /**
+   * Estimate smart fee using mempool provider with specified strategy
+   * Node calls: 1 per provider (estimatesmartfee)
+   * Time complexity: O(1)
+   *
+   * @param confTarget Target number of confirmations
+   * @param estimateMode Estimation mode ('CONSERVATIVE' or 'ECONOMICAL')
+   * @param options Mempool request options (strategy, timeout, etc.)
+   * @returns Fee estimation data
+   */
+  public async estimateSmartFeeFromMempool(
+    confTarget: number,
+    estimateMode: string = 'CONSERVATIVE',
+    options: MempoolRequestOptions = {}
+  ): Promise<any> {
+    this.ensureMempoolProviders();
+    return this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.estimateSmartFee(confTarget, estimateMode),
+      options
+    );
+  }
+
+  /**
+   * Get mempool statistics from all providers
+   */
+  public getMempoolProviderStats() {
+    return this.mempoolConnectionManager.getProviderStats();
+  }
+
+  /**
+   * Reset mempool provider failure state
+   */
+  public resetMempoolProviderFailures(): void {
+    this.mempoolConnectionManager.resetFailureState();
+  }
+
+  // ===== UTILITY METHODS =====
+
+  /**
+   * Check if a feature is supported by the current network
+   * Time complexity: O(1)
+   *
+   * @param feature Feature to check support for
+   * @returns True if feature is supported
    */
   public isFeatureSupported(feature: 'segwit' | 'taproot' | 'rbf' | 'csv' | 'cltv'): boolean {
     switch (feature) {
@@ -479,67 +664,76 @@ export class BlockchainProviderService {
     }
   }
 
-  // ===== CONVENIENCE METHODS FOR BETTER API =====
-
   /**
-   * High-performance method: Gets a fully parsed block with all transactions and Merkle verification
-   * This is the fastest and most secure way to get complete block with all transactions
-   * @returns block or null if doesn't exist
+   * Get network provider connection options
    */
-  public async getFullBlockByHeight(height: string | number, verifyMerkle: boolean = false): Promise<Block | null> {
-    return this.getOneBlockByHeight(height, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
+  public getNetworkProviderConnectionOptions(): any[] {
+    return this.networkConnectionManager.getConnectionOptionsForAllProviders();
   }
 
   /**
-   * High-performance method: Gets a fully parsed block with all transactions and Merkle verification
-   * @returns block or null if doesn't exist
+   * Get mempool provider connection options
    */
-  public async getFullBlockByHash(hash: string, verifyMerkle: boolean = false): Promise<Block | null> {
-    return this.getOneBlockByHash(hash, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
+  public getMempoolProviderConnectionOptions(): any[] {
+    return this.mempoolConnectionManager.getConnectionOptionsForAllProviders();
   }
 
   /**
-   * High-performance method: Gets multiple fully parsed blocks with all transactions and Merkle verification
-   * This is the most efficient and secure way to get multiple complete blocks
+   * Get active network provider name
    */
-  public async getFullBlocksByHeights(heights: string[] | number[], verifyMerkle: boolean = false): Promise<Block[]> {
-    return this.getManyBlocksByHeights(heights, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
+  public async getActiveNetworkProviderName(): Promise<string> {
+    this.ensureNetworkProviders();
+    const provider = await this.networkConnectionManager.getActiveProvider();
+    return provider.uniqName;
   }
 
   /**
-   * High-performance method: Gets multiple fully parsed blocks with all transactions and Merkle verification
+   * Manually switch network provider
    */
-  public async getFullBlocksByHashes(hashes: string[], verifyMerkle: boolean = false): Promise<Block[]> {
-    return this.getManyBlocksByHashes(hashes, true, 1, verifyMerkle); // Force hex parsing with optional Merkle verification
+  public async switchNetworkProvider(providerName: string): Promise<void> {
+    this.ensureNetworkProviders();
+    await this.networkConnectionManager.switchProvider(providerName);
   }
 
   /**
-   * Lightweight method: Gets basic block info without transactions
-   * @returns block or null if doesn't exist
+   * Get specific network provider
    */
-  public async getBasicBlockByHeight(height: string | number): Promise<Block | null> {
-    return this.getOneBlockByHeight(height, false, 1); // Force object parsing with verbosity 1
+  public async getNetworkProviderByName(name: string) {
+    return this.networkConnectionManager.getProviderByName(name);
   }
 
   /**
-   * Lightweight method: Gets basic block info without transactions
-   * @returns block or null if doesn't exist
+   * Get specific mempool provider
    */
-  public async getBasicBlockByHash(hash: string): Promise<Block | null> {
-    return this.getOneBlockByHash(hash, false, 1); // Force object parsing with verbosity 1
+  public async getMempoolProviderByName(name: string) {
+    return this.mempoolConnectionManager.getProviderByName(name);
   }
 
   /**
-   * Lightweight method: Gets multiple basic blocks without transactions
+   * Remove network provider
    */
-  public async getBasicBlocksByHeights(heights: string[] | number[]): Promise<Block[]> {
-    return this.getManyBlocksByHeights(heights, false, 1); // Force object parsing with verbosity 1
+  public async removeNetworkProvider(name: string): Promise<boolean> {
+    return this.networkConnectionManager.removeProvider(name);
   }
 
   /**
-   * Lightweight method: Gets multiple basic blocks without transactions
+   * Remove mempool provider
    */
-  public async getBasicBlocksByHashes(hashes: string[]): Promise<Block[]> {
-    return this.getManyBlocksByHashes(hashes, false, 1); // Force object parsing with verbosity 1
+  public async removeMempoolProvider(name: string): Promise<boolean> {
+    return this.mempoolConnectionManager.removeProvider(name);
+  }
+
+  /**
+   * Check if network providers are available
+   */
+  public hasNetworkProvidersAvailable(): boolean {
+    return this.hasNetworkProviders();
+  }
+
+  /**
+   * Check if mempool providers are available
+   */
+  public hasMempoolProvidersAvailable(): boolean {
+    return this.hasMempoolProviders();
   }
 }

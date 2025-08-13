@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import * as bitcoin from 'bitcoinjs-lib';
 import { BlockSizeCalculator } from '../utils';
-import type { UniversalBlock, UniversalTransaction, UniversalVin, UniversalVout, NetworkConfig } from './interfaces';
+import type { UniversalBlock, UniversalTransaction, UniversalVin, UniversalVout, NetworkConfig } from '../transports';
 
 /**
  * Utility class for transforming hex data to Universal Bitcoin objects
