@@ -1,3 +1,9 @@
+## 0.10.0 (2025-08-13)
+
+* feat: implemented new blockchain provider design; refactored mempool aggregate; ([546c684](https://github.com/EasyLayer/core/commit/546c684))
+
+
+
 ## <small>0.9.6 (2025-08-10)</small>
 
 * chore: add bitpay github to allowed package url; ([ebdeda4](https://github.com/EasyLayer/core/commit/ebdeda4))
