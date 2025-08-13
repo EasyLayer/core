@@ -40,12 +40,15 @@ describe('BlocksQueueModule', () => {
           isGlobal: true, 
           network: {} as any,
           rateLimits: {} as any,
-          providers: [{
-          connection: {
-            type: 'rpc' as any,
-            baseUrl: 'http://localhost'
-          } as any,
-        }] }),
+          networkProviders: {
+            type: 'RPC',
+            connections: []
+          },
+          mempoolProviders: {
+            type: 'RPC',
+            connections: []
+          }
+        }),
         BlocksQueueModule.forRootAsync(moduleOptions),
       ],
     }).compile();

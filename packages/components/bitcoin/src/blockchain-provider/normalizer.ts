@@ -1,4 +1,4 @@
-import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './node-providers';
+import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
 import type { Block, BlockStats, Transaction, Vin, Vout } from './components';
 
 /**

@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import * as bitcoin from 'bitcoinjs-lib';
-import type { UniversalBlock, UniversalTransaction, NetworkConfig } from '../node-providers';
+import type { UniversalBlock, UniversalTransaction, NetworkConfig } from '../transports';
 
 /**
  * Size calculation result for blocks
