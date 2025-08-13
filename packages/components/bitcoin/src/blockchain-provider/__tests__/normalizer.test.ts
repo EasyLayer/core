@@ -6,7 +6,7 @@ import type {
   UniversalVout,
   UniversalBlockStats,
   NetworkConfig
-} from '../node-providers';
+} from '../transports';
 
 /**
  * Helper function to create a test universal block

@@ -1,10 +1,13 @@
 import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
-import type { MempoolTransaction } from '../../../blockchain-provider';
-
+import type { Transaction } from '../../../blockchain-provider';
 export interface BitcoinMempoolSyncProcessedEventPayload extends EventBasePayload {
   loadedTransactions: Array<{
     txid: string;
-    transaction: MempoolTransaction;
+    transaction: Transaction;
+    // Optional provider info for transactions loaded directly from specific providers
+    providerIndex?: number;
+    // providerName?: string;
+    // metadata: any;
   }>;
   hasMoreToProcess: boolean; // true if there are still pending txids to load
 }

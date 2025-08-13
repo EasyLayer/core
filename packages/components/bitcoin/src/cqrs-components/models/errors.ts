@@ -51,3 +51,19 @@ export class MempoolSizeMismatchError extends BaseError<MempoolSizeMismatchError
     super(message, params);
   }
 }
+export interface ReorganizationGenesisErrorParams extends ErrorParams {
+  startHeight: number;
+  endHeight: number;
+  searchDepth: number;
+  aggregateId: string;
+  requestId: string;
+}
+
+export class ReorganizationGenesisError extends BaseError<ReorganizationGenesisErrorParams> {
+  constructor({
+    message = 'Reorganization failed: reached genesis without finding fork point',
+    params = {} as ReorganizationGenesisErrorParams,
+  }: ErrorOptions<ReorganizationGenesisErrorParams> = {}) {
+    super(message, params);
+  }
+}

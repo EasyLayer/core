@@ -218,7 +218,12 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       try {
         const heights = infos.map((i) => i.height);
         // Use the new performance method that returns fully parsed blocks with all transactions
-        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(heights, true, undefined, true);
+        const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(
+          heights,
+          true, // useHex = true for better performance and complete transaction data
+          undefined, // verbosity ignored when useHex = true
+          true // verifyMerkle = true for security
+        );
         return blocks;
       } catch (error) {
         attempt++;

@@ -68,7 +68,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       async (resetInterval) => {
         try {
           // IMPORTANT: every exponential tick we fetch current blockchain network height
-          const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeight();
+          const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeightFromNetwork();
           this.log.debug('Current blockchain network height fetched', {
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });

@@ -1,8 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BlockchainProviderModule, BlockchainProviderModuleOptions } from '../blockchain-provider.module';
 import { BlockchainProviderService } from '../blockchain-provider.service';
-import { ConnectionManager } from '../connection-manager';
-import { NodeProviderTypes } from '../node-providers';
 
 describe('BlockchainProviderModule', () => {
   let module: TestingModule;
@@ -12,14 +10,14 @@ describe('BlockchainProviderModule', () => {
     isGlobal: false,
     network: {} as any,
     rateLimits: {} as any,
-    providers: [
-      {
-        connection: {
-          type: NodeProviderTypes.RPC,
-          baseUrl: 'http://localhost',
-        } as any
-      } 
-    ]
+    networkProviders: {
+      type: 'RPC',
+      connections: []
+    },
+    mempoolProviders: {
+      type: 'RPC',
+      connections: []
+    }
   }
 
   beforeEach(async () => {
@@ -37,11 +35,5 @@ describe('BlockchainProviderModule', () => {
   it('should have BlockchainProviderService', () => {
     expect(service).toBeDefined();
     expect(service).toBeInstanceOf(BlockchainProviderService);
-  });
-
-  it('should have ConnectionManager', () => {
-    const connectionManager = module.get<ConnectionManager>(ConnectionManager);
-    expect(connectionManager).toBeDefined();
-    expect(connectionManager).toBeInstanceOf(ConnectionManager);
   });
 });
