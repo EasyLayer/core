@@ -88,7 +88,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @throws {Error} If the blockchain provider fails to fetch blocks
    * @returns A promise that resolves once all blocks with transactions are preloaded
    */
-  @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
+  // @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksWithTransactions(currentNetworkHeight: number): Promise<void> {
     // Dynamic adjustment based on timing comparison with previous loadReceipts
     if (this._previousLoadReceiptsDuration > 0 && this._lastLoadReceiptsDuration > 0) {

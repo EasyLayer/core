@@ -1,13 +1,27 @@
+// ============================================================
+//  HexTransformer
+//  ------------------------------------------------------------
+//  - Parses block/tx hex using bitcoinjs-lib.
+//  - Converts header hashes to BE for RPC-style fields:
+//      * hash          -> BE (bitcoinjs getId() already BE)
+//      * merkleroot    -> convert LE Buffer -> BE hex
+//      * prevHash      -> convert LE Buffer -> BE hex
+//  - Produces Universal* structures. Sizes via BlockSizeCalculator.
+//  - Computes wtxid in BE when SegWit is present.
+//  - Works across BTC/BCH/LTC/DOGE; SegWit fields only if networkConfig.hasSegWit.
+// ============================================================
+
 import { Buffer } from 'node:buffer';
 import * as bitcoin from 'bitcoinjs-lib';
 import { BlockSizeCalculator } from '../utils';
 import type { UniversalBlock, UniversalTransaction, UniversalVin, UniversalVout, NetworkConfig } from '../transports';
 
-/**
- * Utility class for transforming hex data to Universal Bitcoin objects
- * Uses BlockSizeCalculator for accurate size metrics
- * Returns Universal objects without height when height is unknown
- */
+function bufToHexBE(buf?: Buffer): string | undefined {
+  if (!buf) return undefined;
+  // Header stores merkleRoot/prevHash in LE; flip for BE display.
+  return Buffer.from(buf).reverse().toString('hex');
+}
+
 export class HexTransformer {
   /**
    * Overload: parse block hex with known height
@@ -27,64 +41,65 @@ export class HexTransformer {
     arg2: number | NetworkConfig,
     arg3?: NetworkConfig
   ): UniversalBlock | (Omit<UniversalBlock, 'height'> & { height?: undefined }) {
-    if (!hex) {
-      throw new Error('Block hex is required');
-    }
+    if (!hex) throw new Error('Block hex is required');
 
-    const networkConfig = typeof arg2 === 'number' ? arg3! : (arg2 as NetworkConfig);
+    const networkConfig = typeof arg2 === 'number' ? (arg3 as NetworkConfig) : (arg2 as NetworkConfig);
     const height = typeof arg2 === 'number' ? arg2 : undefined;
 
     const buffer = Buffer.from(hex, 'hex');
     const btcBlock = bitcoin.Block.fromBuffer(buffer);
-    const hash = btcBlock.getId();
+
+    // bitcoinjs:
+    // - getId(): BE hex (ready for RPC display)
+    // - merkleRoot/prevHash: Buffers in LE; must reverse to BE for RPC fields
+    const hash = btcBlock.getId(); // BE
     const time = btcBlock.timestamp;
 
-    // Parse transactions list
-    const txs = btcBlock.transactions ?? [];
-    const transactions: UniversalTransaction[] = txs.map((tx) =>
+    // Parse txs
+    const rawTxs = btcBlock.transactions ?? [];
+    const transactions: UniversalTransaction[] = rawTxs.map((tx) =>
       this.parseTransactionFromBitcoinJS(tx, hash, time, networkConfig)
     );
 
-    // Use BlockSizeCalculator for accurate size metrics
+    // Accurate sizes
     const sizeMetrics = BlockSizeCalculator.calculateSizeFromHex(hex, networkConfig);
-
-    // Validate calculated sizes
     if (!BlockSizeCalculator.validateSizes(sizeMetrics)) {
       throw new Error(`Block size calculation validation failed for block: ${hash}`);
     }
 
-    // Build base block object
     const base = {
-      hash,
+      hash, // BE hex
       strippedsize: sizeMetrics.strippedSize,
       size: sizeMetrics.size,
       weight: sizeMetrics.weight,
       vsize: sizeMetrics.vsize,
       version: btcBlock.version,
       versionHex: '0x' + btcBlock.version.toString(16).padStart(8, '0'),
-      merkleroot: btcBlock.merkleRoot?.toString('hex') ?? '',
+
+      // IMPORTANT: LE -> BE for RPC
+      merkleroot: bufToHexBE(btcBlock.merkleRoot) ?? '',
+
       time,
-      mediantime: time,
+      mediantime: time, // if you don't track MTP, keep equal to time
       nonce: btcBlock.nonce,
       bits: '0x' + btcBlock.bits.toString(16).padStart(8, '0'),
       difficulty: this.calculateDifficulty(btcBlock.bits),
-      chainwork: '',
-      previousblockhash: this.bufferToHex(btcBlock.prevHash),
+
+      chainwork: '', // not derivable here
+      previousblockhash: bufToHexBE(btcBlock.prevHash),
       nextblockhash: undefined,
+
       tx: transactions,
       nTx: transactions.length,
     };
 
-    if (height !== undefined) {
-      return { height, ...base };
-    } else {
-      return base as Omit<UniversalBlock, 'height'> & { height?: undefined };
-    }
+    return height !== undefined
+      ? ({ height, ...base } as UniversalBlock)
+      : (base as Omit<UniversalBlock, 'height'> & { height?: undefined });
   }
 
   /**
-   * Parse raw transaction hex into Universal Transaction object
-   * Uses BlockSizeCalculator for accurate size metrics
+   * Parse raw transaction hex into UniversalTransaction
    */
   static parseTransactionHex(
     hex: string,
@@ -93,17 +108,12 @@ export class HexTransformer {
     time?: number,
     blocktime?: number
   ): UniversalTransaction {
-    if (!hex) {
-      throw new Error('Transaction hex is required');
-    }
+    if (!hex) throw new Error('Transaction hex is required');
 
     const buffer = Buffer.from(hex, 'hex');
     const tx = bitcoin.Transaction.fromBuffer(buffer);
 
-    // Calculate accurate transaction sizes using BlockSizeCalculator
     const sizeMetrics = BlockSizeCalculator.calculateTransactionSizeFromHex(hex, networkConfig);
-
-    // Validate calculated sizes
     if (!BlockSizeCalculator.validateSizes(sizeMetrics)) {
       throw new Error(`Transaction size calculation validation failed for tx: ${tx.getId()}`);
     }
@@ -120,8 +130,7 @@ export class HexTransformer {
   }
 
   /**
-   * Parse bitcoin.Transaction into UniversalTransaction
-   * Enhanced with optional pre-calculated size metrics
+   * Parse bitcoin.Transaction into UniversalTransaction (with optional pre-computed sizes).
    */
   private static parseTransactionFromBitcoinJS(
     tx: bitcoin.Transaction,
@@ -135,29 +144,24 @@ export class HexTransformer {
     const vin = tx.ins.map((input, i) => this.parseVin(input, i, networkConfig));
     const vout = tx.outs.map((output, i) => this.parseVout(output, i));
 
-    // Use pre-calculated sizes if available, otherwise calculate from transaction
     let size: number;
     let strippedSize: number;
     let weight: number;
     let vsize: number;
 
     if (preCalculatedSizes) {
-      size = preCalculatedSizes.size;
-      strippedSize = preCalculatedSizes.strippedSize;
-      weight = preCalculatedSizes.weight;
-      vsize = preCalculatedSizes.vsize;
+      ({ size, strippedSize, weight, vsize } = preCalculatedSizes);
     } else {
-      // Calculate sizes using BlockSizeCalculator
-      const sizeMetrics = BlockSizeCalculator.calculateTransactionSizeFromBitcoinJS(tx, networkConfig);
-      size = sizeMetrics.size;
-      strippedSize = sizeMetrics.strippedSize;
-      weight = sizeMetrics.weight;
-      vsize = sizeMetrics.vsize;
+      const m = BlockSizeCalculator.calculateTransactionSizeFromBitcoinJS(tx, networkConfig);
+      ({ size, strippedSize, weight, vsize } = m);
     }
 
+    // bitcoinjs:
+    // - getId(): BE txid (for display/RPC)
+    // - getHash(false): Buffer in LE; reverse to BE for wtxid string
     const result: UniversalTransaction = {
-      txid: tx.getId(),
-      hash: tx.getId(),
+      txid: tx.getId(), // BE
+      hash: tx.getId(), // keep for compatibility
       version: tx.version,
       size,
       vsize,
@@ -170,9 +174,9 @@ export class HexTransformer {
       blocktime: blocktime ?? time,
     };
 
-    // Add SegWit fields if supported
     if (networkConfig?.hasSegWit && tx.hasWitnesses()) {
-      result.wtxid = tx.getHash(false).toString('hex');
+      const wtxidBE = Buffer.from(tx.getHash(true)).reverse().toString('hex'); // true = include witness
+      result.wtxid = wtxidBE;
     }
 
     return result;
@@ -183,13 +187,15 @@ export class HexTransformer {
     index: number,
     networkConfig?: NetworkConfig
   ): UniversalVin {
+    // Coinbase: prev hash = 32x00, index = 0xffffffff
     const isCoinbase = input.hash.every((b) => b === 0) && input.index === 0xffffffff;
     if (isCoinbase) {
       return { coinbase: input.script.toString('hex'), sequence: input.sequence };
     }
 
     const vin: UniversalVin = {
-      txid: this.bufferToHex(input.hash),
+      // Previous-outpoint txid is serialized LE in the tx; convert to BE for display.
+      txid: bufToHexBE(input.hash)!,
       vout: input.index,
       scriptSig: { asm: this.safeToASM(input.script), hex: input.script.toString('hex') },
       sequence: input.sequence,
@@ -211,23 +217,9 @@ export class HexTransformer {
         asm: this.safeToASM(output.script),
         hex: scriptHex,
         type: this.detectScriptType(scriptHex),
-        addresses: undefined,
+        addresses: undefined, // address derivation is network-specific; omitted here
       },
     };
-  }
-
-  private static calculateStrippedTxSize(tx: bitcoin.Transaction): number {
-    let s = 4;
-    s += this.getVarintSize(tx.ins.length);
-    for (const inp of tx.ins) {
-      s += 32 + 4 + this.getVarintSize(inp.script.length) + inp.script.length + 4;
-    }
-    s += this.getVarintSize(tx.outs.length);
-    for (const out of tx.outs) {
-      s += 8 + this.getVarintSize(out.script.length) + out.script.length;
-    }
-    s += 4;
-    return s;
   }
 
   private static detectScriptType(scriptHex: string): string {
@@ -235,11 +227,11 @@ export class HexTransformer {
     try {
       if (
         script.length === 25 &&
-        script[0] === 0x76 &&
-        script[1] === 0xa9 &&
-        script[2] === 0x14 &&
-        script[23] === 0x88 &&
-        script[24] === 0xac
+        script[0] === 0x76 && // OP_DUP
+        script[1] === 0xa9 && // OP_HASH160
+        script[2] === 0x14 && // push 20
+        script[23] === 0x88 && // OP_EQUALVERIFY
+        script[24] === 0xac // OP_CHECKSIG
       )
         return 'pubkeyhash';
       if (script.length === 23 && script[0] === 0xa9 && script[1] === 0x14 && script[22] === 0x87) return 'scripthash';
@@ -278,17 +270,5 @@ export class HexTransformer {
     } catch {
       return '';
     }
-  }
-
-  private static bufferToHex(buf?: Buffer): string | undefined {
-    if (!buf) return undefined;
-    return Buffer.from(buf).reverse().toString('hex');
-  }
-
-  private static getVarintSize(i: number): number {
-    if (i < 0xfd) return 1;
-    if (i <= 0xffff) return 3;
-    if (i <= 0xffffffff) return 5;
-    return 9;
   }
 }

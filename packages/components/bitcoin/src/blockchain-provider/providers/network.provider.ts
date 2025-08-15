@@ -1,7 +1,6 @@
 import type { UniversalBlock, UniversalTransaction, UniversalBlockStats } from '../transports';
 import { BaseProvider } from './base.provider';
 import { HexTransformer } from './hex-transformer';
-import { BitcoinMerkleVerifier } from './merkle-verifier';
 
 /**
  * Network Provider for blockchain operations
@@ -11,7 +10,6 @@ import { BitcoinMerkleVerifier } from './merkle-verifier';
  * - Transaction retrieval and parsing
  * - Block statistics retrieval
  * - Real-time block subscriptions
- * - Merkle root verification for security
  *
  * Works with both RPC and P2P transports through unified interface
  * Supports Bitcoin-compatible chains (BTC, BCH, DOGE, LTC) via network config
@@ -19,7 +17,7 @@ import { BitcoinMerkleVerifier } from './merkle-verifier';
  */
 export class NetworkProvider extends BaseProvider {
   /**
-   * Subscribe to new blocks with automatic parsing and verification
+   * Subscribe to new blocks with automatic parsing
    * Node calls: 0 (real-time messages from transport)
    * Memory: No block storage - immediate callback execution
    *
@@ -36,11 +34,7 @@ export class NetworkProvider extends BaseProvider {
         const hexData = blockData.toString('hex');
         const parsedBlock = HexTransformer.parseBlockHex(hexData, this.network);
         parsedBlock.hex = hexData;
-
-        const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
-        if (isValid) {
-          callback(parsedBlock as UniversalBlock);
-        }
+        callback(parsedBlock as UniversalBlock);
       } catch (error) {
         // Skip invalid blocks silently
       }
@@ -78,7 +72,7 @@ export class NetworkProvider extends BaseProvider {
    * Time complexity: O(k) where k = number of blocks requested
    *
    * @param hashes Array of block hashes
-   * @param verifyMerkle Whether to verify Merkle root
+   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input, null for missing blocks
    */
   async getManyBlocksHexByHashes(hashes: string[], verifyMerkle: boolean = false): Promise<(UniversalBlock | null)[]> {
@@ -95,14 +89,6 @@ export class NetworkProvider extends BaseProvider {
             const hex = buffer.toString('hex');
             const parsedBlock = HexTransformer.parseBlockHex(hex, this.network);
             parsedBlock.hex = hex;
-
-            if (verifyMerkle) {
-              const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
-              if (!isValid) {
-                return null;
-              }
-            }
-
             return parsedBlock as UniversalBlock;
           } catch (error) {
             return null;
@@ -120,7 +106,7 @@ export class NetworkProvider extends BaseProvider {
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
-   * @param verifyMerkle Whether to verify Merkle root
+   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input heights, null for missing blocks
    */
   async getManyBlocksHexByHeights(
@@ -134,15 +120,13 @@ export class NetworkProvider extends BaseProvider {
       return new Array(heights.length).fill(null);
     }
 
-    const hexBlocks = await this.getManyBlocksHexByHashes(validHashes, verifyMerkle);
+    const hexBlocks = await this.getManyBlocksHexByHashes(validHashes, false);
 
-    // Create map for hash -> block lookup
     const hashToBlock = new Map<string, UniversalBlock | null>();
     validHashes.forEach((hash, index) => {
       hashToBlock.set(hash, hexBlocks[index] || null);
     });
 
-    // Restore order according to original heights
     return hashes.map((hash, index) => {
       if (hash === null) {
         return null;
@@ -166,7 +150,7 @@ export class NetworkProvider extends BaseProvider {
    *
    * @param hashes Array of block hashes
    * @param verbosity Verbosity level (1=with tx hashes, 2=with full tx objects)
-   * @param verifyMerkle Whether to verify Merkle root
+   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input, null for missing blocks
    */
   async getManyBlocksByHashes(
@@ -182,13 +166,6 @@ export class NetworkProvider extends BaseProvider {
         if (rawBlock === null) return null;
 
         try {
-          if (verifyMerkle && verbosity >= 1 && rawBlock.tx) {
-            const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(rawBlock, this.network.hasSegWit);
-            if (!isValid) {
-              return null;
-            }
-          }
-
           return this.normalizeRawBlock(rawBlock);
         } catch (error) {
           return null;
@@ -204,7 +181,7 @@ export class NetworkProvider extends BaseProvider {
    *
    * @param heights Array of block heights
    * @param verbosity Verbosity level (1=with tx hashes, 2=with full tx objects)
-   * @param verifyMerkle Whether to verify Merkle root
+   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input heights, null for missing blocks
    */
   async getManyBlocksByHeights(
@@ -219,15 +196,13 @@ export class NetworkProvider extends BaseProvider {
       return new Array(heights.length).fill(null);
     }
 
-    const blocks = await this.getManyBlocksByHashes(validHashes, verbosity, verifyMerkle);
+    const blocks = await this.getManyBlocksByHashes(validHashes, verbosity, false);
 
-    // Create map for hash -> block lookup
     const hashToBlock = new Map<string, UniversalBlock | null>();
     validHashes.forEach((hash, index) => {
       hashToBlock.set(hash, blocks[index] || null);
     });
 
-    // Restore order according to original heights
     return blocksHashes.map((hash, index) => {
       if (hash === null) {
         return null;
@@ -281,11 +256,9 @@ export class NetworkProvider extends BaseProvider {
 
     if (hasGenesis) {
       try {
-        // Get genesis hash
         const genesisResults = await this.transport.batchCall([{ method: 'getblockhash', params: [genesisHeight] }]);
         const genesisHash = genesisResults[0];
 
-        // Get stats for non-genesis blocks
         const filteredHeights = heights.filter((height) => height !== genesisHeight);
         let filteredStats: (UniversalBlockStats | null)[] = [];
 
@@ -296,13 +269,11 @@ export class NetworkProvider extends BaseProvider {
           if (validHashes.length > 0) {
             const statsResults = await this.getManyBlocksStatsByHashes(validHashes);
 
-            // Create map for hash -> stats lookup
             const hashToStats = new Map<string, UniversalBlockStats | null>();
             validHashes.forEach((hash, index) => {
               hashToStats.set(hash, statsResults[index] || null);
             });
 
-            // Map stats back to filtered heights order
             filteredStats = blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
           }
         }
@@ -358,7 +329,6 @@ export class NetworkProvider extends BaseProvider {
         return new Array(heights.length).fill(null);
       }
     } else {
-      // No genesis, use regular flow
       const blocksHashes = await this.getManyBlockHashesByHeights(heights);
       const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
 
@@ -368,13 +338,11 @@ export class NetworkProvider extends BaseProvider {
 
       const blocks = await this.getManyBlocksStatsByHashes(validHashes);
 
-      // Create map for hash -> stats lookup
       const hashToStats = new Map<string, UniversalBlockStats | null>();
       validHashes.forEach((hash, index) => {
         hashToStats.set(hash, blocks[index] || null);
       });
 
-      // Restore order according to original heights
       return blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
     }
   }
@@ -420,7 +388,7 @@ export class NetworkProvider extends BaseProvider {
   async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
     const hexRequests = txids.map((txid) => ({
       method: 'getrawtransaction',
-      params: [txid, false], // false = hex format
+      params: [txid, false],
     }));
 
     const hexResults = await this.transport.batchCall(hexRequests);
@@ -501,10 +469,10 @@ export class NetworkProvider extends BaseProvider {
     } = {}
   ): Promise<void> {
     if (this.transport.type !== 'p2p') {
-      return; // Only for P2P transports
+      return;
     }
 
-    const p2pTransport = this.transport as any; // Cast to access P2P methods
+    const p2pTransport = this.transport as any;
 
     if (options.waitForHeaderSync && typeof p2pTransport.waitForHeaderSync === 'function') {
       await p2pTransport.waitForHeaderSync(options.headerSyncTimeout || 300000);

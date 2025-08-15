@@ -4,6 +4,7 @@ import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequest
 import type { NetworkProvider, MempoolProvider } from './providers';
 import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
 import { BitcoinNormalizer } from './normalizer';
+import { BitcoinMerkleVerifier } from './merkle-verifier';
 import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
 /**
@@ -88,6 +89,43 @@ export class BlockchainProviderService {
     }
   }
 
+  /**
+   * Verify merkle root for blocks with special genesis handling
+   * Uses BitcoinMerkleVerifier to perform cryptographic verification
+   */
+  private verifyBlockMerkleRoot(block: UniversalBlock): boolean {
+    if (block.height === 0) {
+      // Genesis block verification
+      return BitcoinMerkleVerifier.verifyGenesisMerkleRoot(block);
+    } else {
+      // Regular block verification
+      return BitcoinMerkleVerifier.verifyBlockMerkleRoot(block, this.networkConfig.hasSegWit);
+    }
+  }
+
+  /**
+   * Filter out null values and verify merkle roots for blocks
+   * Performs Merkle tree verification with special genesis block handling
+   */
+  private processAndValidateBlocks(blocks: (UniversalBlock | null)[], verifyMerkle: boolean = false): Block[] {
+    const validBlocks: UniversalBlock[] = [];
+
+    for (const block of blocks) {
+      if (block === null) continue;
+
+      if (verifyMerkle) {
+        const isValid = this.verifyBlockMerkleRoot(block);
+        if (!isValid) {
+          throw new Error(`Merkle root verification failed for block ${block.hash} at height ${block.height}`);
+        }
+      }
+
+      validBlocks.push(block);
+    }
+
+    return this.normalizer.normalizeManyBlocks(validBlocks);
+  }
+
   // ===== SUBSCRIPTION METHODS =====
 
   /**
@@ -118,21 +156,27 @@ export class BlockchainProviderService {
       .then((provider) => {
         const networkProvider = provider as NetworkProvider;
 
-        // Check if provider supports block subscriptions
         if (typeof networkProvider.subscribeToNewBlocks !== 'function') {
           rejectSubscription(new Error('Active provider does not support block subscriptions'));
           return;
         }
 
         try {
-          // Subscribe to UniversalBlock and normalize at service level
           const subscription = networkProvider.subscribeToNewBlocks((universalBlock: UniversalBlock) => {
             try {
-              // Normalize UniversalBlock to Block at service level
+              // Verify Merkle root for incoming blocks
+              const isValid = this.verifyBlockMerkleRoot(universalBlock);
+              if (!isValid) {
+                this.log.warn('Merkle root verification failed for subscribed block', {
+                  args: { blockHash: universalBlock.hash, height: universalBlock.height },
+                });
+                return;
+              }
+
               const normalizedBlock = this.normalizer.normalizeBlock(universalBlock);
               callback(normalizedBlock);
             } catch (error) {
-              this.log.warn('Failed to normalize block in subscription', { args: { error } });
+              this.log.warn('Failed to process block in subscription', { args: { error } });
             }
           });
 
@@ -187,7 +231,6 @@ export class BlockchainProviderService {
           methodName
         )) as NetworkProvider;
 
-        // Retry with recovered/switched provider
         return await operation(recoveredProvider);
       } catch (recoveryError) {
         this.log.error('Network provider recovery failed', {
@@ -257,7 +300,6 @@ export class BlockchainProviderService {
    */
   public async getBasicBlockByHeight(height: string | number): Promise<Block | null> {
     return this.executeNetworkProviderMethod('getBasicBlockByHeight', async (provider) => {
-      // Use structured data method with verbosity 1 (includes tx hashes but not full tx data)
       const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], 1, false);
       const rawBlock = rawBlocks[0];
 
@@ -284,28 +326,22 @@ export class BlockchainProviderService {
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHeights', async (provider) => {
-      if (useHex) {
-        // Get Universal blocks parsed from hex via transport.requestHexBlocks() - GUARANTEES HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHeights(
-          heights.map((item) => Number(item)),
-          verifyMerkle
-        );
+      let universalBlocks: (UniversalBlock | null)[];
 
-        // Filter out null blocks and normalize
-        const validBlocks = universalBlocks.filter((block: any): block is UniversalBlock => block !== null);
-        return this.normalizer.normalizeManyBlocks(validBlocks);
+      if (useHex) {
+        universalBlocks = await provider.getManyBlocksHexByHeights(
+          heights.map((item) => Number(item)),
+          false
+        );
       } else {
-        // Get structured blocks via transport.batchCall() - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHeights(
+        universalBlocks = await provider.getManyBlocksByHeights(
           heights.map((item) => Number(item)),
           verbosity,
-          verifyMerkle
+          false
         );
-
-        // Filter out null blocks and normalize
-        const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
-        return this.normalizer.normalizeManyBlocks(validBlocks);
       }
+
+      return this.processAndValidateBlocks(universalBlocks, verifyMerkle);
     });
   }
 
@@ -327,18 +363,16 @@ export class BlockchainProviderService {
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHashes', async (provider) => {
-      if (useHex) {
-        // Get Universal blocks parsed from hex via transport.requestHexBlocks() - DOES NOT GUARANTEE HEIGHT
-        const universalBlocks = await provider.getManyBlocksHexByHashes(hashes, verifyMerkle);
+      let universalBlocks: (UniversalBlock | null)[];
 
-        // Get heights for valid blocks using public provider method
+      if (useHex) {
+        universalBlocks = await provider.getManyBlocksHexByHashes(hashes, false);
+
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
         if (validHashes.length === 0) return [];
 
-        // Get height info for valid hashes using structured method (transport.batchCall)
         const heightInfos = await provider.getManyBlocksByHashes(validHashes, 1);
 
-        // Combine blocks with heights, filter out invalid
         const completeBlocks: UniversalBlock[] = [];
         let heightIndex = 0;
 
@@ -349,18 +383,13 @@ export class BlockchainProviderService {
               block.height = heightInfo.height;
               completeBlocks.push(block);
             }
-            // If no height info, skip this block
           }
         });
 
-        return this.normalizer.normalizeManyBlocks(completeBlocks);
+        return this.processAndValidateBlocks(completeBlocks, verifyMerkle);
       } else {
-        // Get structured blocks via transport.batchCall() - GUARANTEES HEIGHT
-        const rawBlocks = await provider.getManyBlocksByHashes(hashes, verbosity, verifyMerkle);
-
-        // Filter out null blocks and normalize
-        const validBlocks = rawBlocks.filter((block: any): block is UniversalBlock => block !== null);
-        return this.normalizer.normalizeManyBlocks(validBlocks);
+        universalBlocks = await provider.getManyBlocksByHashes(hashes, verbosity, false);
+        return this.processAndValidateBlocks(universalBlocks, verifyMerkle);
       }
     });
   }
@@ -375,10 +404,8 @@ export class BlockchainProviderService {
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<BlockStats[]> {
     return this.executeNetworkProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
-      // Get raw stats - GUARANTEES HEIGHT
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
 
-      // Filter out null stats and normalize
       const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);
     });
@@ -394,10 +421,8 @@ export class BlockchainProviderService {
    */
   public async getManyBlocksStatsByHashes(hashes: string[]): Promise<BlockStats[]> {
     return this.executeNetworkProviderMethod('getManyBlocksStatsByHashes', async (provider) => {
-      // Get raw stats - GUARANTEES HEIGHT (blockstats includes height)
       const rawStats = await provider.getManyBlocksStatsByHashes(hashes);
 
-      // Filter out null stats and normalize
       const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);
     });
@@ -419,17 +444,16 @@ export class BlockchainProviderService {
     verbosity: number = 1
   ): Promise<Transaction[]> {
     return this.executeNetworkProviderMethod('getTransactionsByTxids', async (provider) => {
+      let universalTxs: (UniversalTransaction | null)[];
+
       if (useHex) {
-        // Get Universal transactions parsed from hex
-        const universalTxs = await provider.getManyTransactionsHexByTxids(txids);
-        const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
-        return this.normalizer.normalizeManyTransactions(validTxs);
+        universalTxs = await provider.getManyTransactionsHexByTxids(txids);
       } else {
-        // Get structured transaction data
-        const rawTxs = await provider.getManyTransactionsByTxids(txids, verbosity);
-        const validTxs = rawTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
-        return this.normalizer.normalizeManyTransactions(validTxs);
+        universalTxs = await provider.getManyTransactionsByTxids(txids, verbosity);
       }
+
+      const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
+      return this.normalizer.normalizeManyTransactions(validTxs);
     });
   }
 
@@ -484,21 +508,22 @@ export class BlockchainProviderService {
   ): Promise<Transaction[]> {
     this.ensureMempoolProviders();
 
+    let universalTxs: (UniversalTransaction | null)[];
+
     if (useHex) {
-      const universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
+      universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
         async (provider: MempoolProvider) => await provider.getManyTransactionsHexByTxids(txids),
         options
       );
-      const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
-      return this.normalizer.normalizeManyTransactions(validTxs);
     } else {
-      const rawTxs = await this.mempoolConnectionManager.executeWithStrategy(
+      universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
         async (provider: MempoolProvider) => await provider.getManyTransactionsByTxids(txids, verbosity),
         options
       );
-      const validTxs = rawTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
-      return this.normalizer.normalizeManyTransactions(validTxs);
     }
+
+    const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
+    return this.normalizer.normalizeManyTransactions(validTxs);
   }
 
   /**

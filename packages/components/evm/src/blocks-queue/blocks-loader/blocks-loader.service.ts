@@ -26,7 +26,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   ) {
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
-    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 3000);
   }
 
   get isLoading(): boolean {
@@ -100,7 +100,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       {
         interval: 1000, // Start with 1000ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
-        multiplier: 10, // Exponential backoff multiplier
+        multiplier: 2, // Exponential backoff multiplier
       }
     );
 

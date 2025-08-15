@@ -55,7 +55,7 @@ export class MempoolProvider extends BaseProvider {
   async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
     const hexRequests = txids.map((txid) => ({
       method: 'getrawtransaction',
-      params: [txid, false], // false = hex format
+      params: [txid, false],
     }));
 
     const hexResults = await this.transport.batchCall(hexRequests);
@@ -215,13 +215,11 @@ export class MempoolProvider extends BaseProvider {
    * @returns Normalized mempool transaction
    */
   private normalizeMempoolEntry(txid: string, entry: any): UniversalMempoolTransaction {
-    // Extract fee values (handle both old and new fee structure)
     const baseFee = entry.fees?.base ?? entry.fee;
     const modifiedFee = entry.fees?.modified ?? entry.modifiedfee;
     const ancestorFee = entry.fees?.ancestor ?? entry.ancestorfees;
     const descendantFee = entry.fees?.descendant ?? entry.descendantfees;
 
-    // Validation
     if (baseFee === undefined || baseFee === null) {
       throw new Error(`Missing base fee for transaction ${txid}`);
     }
@@ -275,7 +273,6 @@ export class MempoolProvider extends BaseProvider {
    * @returns Normalized mempool info
    */
   private normalizeMempoolInfo(rawInfo: any): UniversalMempoolInfo {
-    // Validate required fields
     if (typeof rawInfo.size !== 'number') {
       throw new Error('Missing or invalid size in mempool info');
     }
@@ -296,11 +293,9 @@ export class MempoolProvider extends BaseProvider {
       throw new Error('Missing minrelaytxfee in mempool info');
     }
 
-    // Convert BTC amounts to satoshis
     const totalFee =
       rawInfo.total_fee !== undefined && rawInfo.total_fee !== null ? this.coinToSmallestUnit(rawInfo.total_fee) : 0;
 
-    // Convert fee rates from BTC/kvB to sat/vB
     const mempoolMinFee = Math.round((rawInfo.mempoolminfee * 100000000) / 1000);
     const minRelayTxFee = Math.round((rawInfo.minrelaytxfee * 100000000) / 1000);
 

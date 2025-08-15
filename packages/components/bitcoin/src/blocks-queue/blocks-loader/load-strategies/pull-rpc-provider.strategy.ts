@@ -108,7 +108,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @throws {Error} If any returned block stat is missing a hash or height.
    * @returns A promise that resolves once all stats have been enqueued.
    */
-  @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
+  // @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
     // Dynamic adjustment based on timing comparison with previous loadAndEnqueue
     if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {

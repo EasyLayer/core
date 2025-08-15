@@ -26,7 +26,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
 
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
-    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 4, 3000);
 
     // TODO: This should be removed when we figure out where to initialize the queue correctly.
     // Now, without this line, we can get a situation where the queue is not initialized
@@ -95,8 +95,8 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         }
       },
       {
-        interval: 1000, // Start with 1000ms for first attempts
-        maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
+        interval: 500, // Start with 500ms for first attempts
+        maxInterval: this._monitoringInterval, // Max interval = monitoring interval
         multiplier: 2, // Exponential backoff multiplier
       }
     );

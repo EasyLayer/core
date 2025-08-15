@@ -26,7 +26,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   ) {
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
-    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 3000);
   }
 
   get isLoading(): boolean {
@@ -100,7 +100,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       {
         interval: 1000, // Start with 1000ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
-        multiplier: 10, // Exponential backoff multiplier
+        multiplier: 2, // Exponential backoff multiplier
       }
     );
 
@@ -137,7 +137,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     // If config is SUBSCRIBE but big height difference - use PULL
     if (currentNetworkHeight !== undefined) {
       const heightDifference = currentNetworkHeight - queue.lastHeight;
-      const threshold = this.config.strategyThreshold || 20;
+      const threshold = this.config.strategyThreshold || 10;
 
       if (heightDifference > threshold) {
         return this._strategies.get(StrategyNames.RPC_PULL)!;
