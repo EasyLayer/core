@@ -27,42 +27,39 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   }
 
   /**
-   * Loads blocks up to the current network height.
+   * Loads blocks up to the current network height in a continuous loop.
    * @param currentNetworkHeight - The current height of the network.
-   * @throws Will throw an error if the maximum block height or current network height is reached,
-   *         or if the queue is full.
+   * @throws Will throw an error if the maximum block height is reached.
    */
   public async load(currentNetworkHeight: number): Promise<void> {
-    if (this.queue.isMaxHeightReached) {
-      throw new Error('Reached max block height');
-    }
+    while (this.queue.lastHeight < currentNetworkHeight) {
+      if (this.queue.isMaxHeightReached) {
+        return;
+      }
 
-    // Check if we have reached the current network height
-    if (this.queue.lastHeight >= currentNetworkHeight) {
-      // IMPORTANT: we return as successfull without an error
-      return;
-      // throw new Error('Reached current network height');
-    }
+      if (this.queue.isQueueFull) {
+        // IMPORTANT: the error throw triggers a timer refresh
+        throw new Error('The queue is full, waiting before retry');
+      }
 
-    // Check if the queue is full
-    if (this.queue.isQueueFull) {
-      throw new Error('The queue is full');
-    }
+      // Only preload blocks with transactions if array is empty
+      if (this._preloadedItemsQueue.length === 0) {
+        await this.preloadBlocksWithTransactions(currentNetworkHeight);
+      }
 
-    // Only preload blocks with transactions if array is empty
-    if (this._preloadedItemsQueue.length === 0) {
-      await this.preloadBlocksWithTransactions(currentNetworkHeight);
-    }
+      // IMPORTANT: This check is mandatory after preload.
+      // We don't want to start downloading receipts if there is no space in the queue
+      if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
 
-    // IMPORTANT: This check is mandatory after preload.
-    // We don't want to start downloading receipts if there is no space in the queue
-    if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
-      this.log.debug('The queue is overloaded');
-      return;
-    }
+      if (this._preloadedItemsQueue.length > 0) {
+        await this.loadReceiptsAndEnqueueBlocks();
+      }
 
-    if (this._preloadedItemsQueue.length > 0) {
-      await this.loadReceiptsAndEnqueueBlocks();
+      // Wait 1 second between iterations to avoid overwhelming the system
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
 
