@@ -37,7 +37,6 @@ export class NetworkProvider extends BaseProvider {
         const parsedBlock = HexTransformer.parseBlockHex(hexData, this.network);
         parsedBlock.hex = hexData;
 
-        // Verify Merkle root for security
         const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
         if (isValid) {
           callback(parsedBlock as UniversalBlock);
@@ -60,7 +59,7 @@ export class NetworkProvider extends BaseProvider {
   }
 
   /**
-   * Get multiple block hashes by heights - PRESERVES ORDER
+   * Get multiple block hashes by heights
    * Node calls: 1 (batch getblockhash for all heights)
    * Time complexity: O(k) where k = number of heights
    *
@@ -74,7 +73,7 @@ export class NetworkProvider extends BaseProvider {
   // ===== HEX METHODS =====
 
   /**
-   * Get multiple blocks parsed from hex as Universal objects - ATOMIC METHOD
+   * Get multiple blocks parsed from hex as Universal objects
    * Node calls: 1 (batch getblock with verbosity=0 for all hashes, or P2P GetData)
    * Time complexity: O(k) where k = number of blocks requested
    *
@@ -84,14 +83,12 @@ export class NetworkProvider extends BaseProvider {
    */
   async getManyBlocksHexByHashes(hashes: string[], verifyMerkle: boolean = false): Promise<(UniversalBlock | null)[]> {
     try {
-      // Get block data from transport (works with both RPC and P2P)
-      const blockBuffers = await this.transport.requestBlocks(hashes);
+      const hexBlockBuffers = await this.transport.requestHexBlocks(hashes);
 
-      // Process results in same order as input hashes
       return await Promise.all(
-        blockBuffers.map(async (buffer, index) => {
+        hexBlockBuffers.map(async (buffer, index) => {
           if (!buffer) {
-            return null; // Block not found at this hash
+            return null;
           }
 
           try {
@@ -102,28 +99,23 @@ export class NetworkProvider extends BaseProvider {
             if (verifyMerkle) {
               const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(parsedBlock, this.network.hasSegWit);
               if (!isValid) {
-                throw new Error(
-                  `Merkle root verification failed for block ${parsedBlock.hash}. ` +
-                    `Expected: ${parsedBlock.merkleroot}, but computed root doesn't match.`
-                );
+                return null;
               }
             }
 
             return parsedBlock as UniversalBlock;
           } catch (error) {
-            // Parse error - return null for this position
             return null;
           }
         })
       );
     } catch (error) {
-      // Transport error - return array of nulls
       return new Array(hashes.length).fill(null);
     }
   }
 
   /**
-   * Get multiple blocks parsed from hex by heights - COMBINED METHOD
+   * Get multiple blocks parsed from hex by heights
    * Node calls: 2 (batch getblockhash + batch getblock for valid hashes)
    * Time complexity: O(k) where k = number of heights
    *
@@ -135,33 +127,34 @@ export class NetworkProvider extends BaseProvider {
     heights: number[],
     verifyMerkle: boolean = false
   ): Promise<(UniversalBlock | null)[]> {
-    // Step 1: Get hashes for all heights - preserves order with nulls
     const hashes = await this.getManyBlockHashesByHeights(heights);
-
-    // Step 2: Get blocks only for valid hashes
     const validHashes = hashes.filter((hash): hash is string => hash !== null);
+
     if (validHashes.length === 0) {
       return new Array(heights.length).fill(null);
     }
 
     const hexBlocks = await this.getManyBlocksHexByHashes(validHashes, verifyMerkle);
 
-    // Step 3: Map results back to original order with guaranteed heights
-    const results: (UniversalBlock | null)[] = new Array(heights.length).fill(null);
-    let blockIndex = 0;
-
-    hashes.forEach((hash, index) => {
-      if (hash !== null) {
-        const block = hexBlocks[blockIndex++] || null;
-        if (block !== null) {
-          // Guarantee height since we know it from input
-          block.height = heights[index];
-          results[index] = block;
-        }
-      }
+    // Create map for hash -> block lookup
+    const hashToBlock = new Map<string, UniversalBlock | null>();
+    validHashes.forEach((hash, index) => {
+      hashToBlock.set(hash, hexBlocks[index] || null);
     });
 
-    return results;
+    // Restore order according to original heights
+    return hashes.map((hash, index) => {
+      if (hash === null) {
+        return null;
+      }
+
+      const block = hashToBlock.get(hash) || null;
+      if (block !== null) {
+        block.height = heights[index];
+      }
+
+      return block;
+    });
   }
 
   // ===== OBJECT METHODS =====
@@ -188,17 +181,18 @@ export class NetworkProvider extends BaseProvider {
       results.map(async (rawBlock) => {
         if (rawBlock === null) return null;
 
-        if (verifyMerkle && verbosity >= 1 && rawBlock.tx) {
-          const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(rawBlock, this.network.hasSegWit);
-          if (!isValid) {
-            throw new Error(
-              `Merkle root verification failed for block ${rawBlock.hash}. ` +
-                `Expected: ${rawBlock.merkleroot}, but computed root doesn't match.`
-            );
+        try {
+          if (verifyMerkle && verbosity >= 1 && rawBlock.tx) {
+            const isValid = BitcoinMerkleVerifier.verifyBlockMerkleRoot(rawBlock, this.network.hasSegWit);
+            if (!isValid) {
+              return null;
+            }
           }
-        }
 
-        return this.normalizeRawBlock(rawBlock);
+          return this.normalizeRawBlock(rawBlock);
+        } catch (error) {
+          return null;
+        }
       })
     );
   }
@@ -227,22 +221,25 @@ export class NetworkProvider extends BaseProvider {
 
     const blocks = await this.getManyBlocksByHashes(validHashes, verbosity, verifyMerkle);
 
-    // Map back to original order with guaranteed heights
-    const results: (UniversalBlock | null)[] = new Array(heights.length).fill(null);
-    let blockIndex = 0;
-
-    blocksHashes.forEach((hash, index) => {
-      if (hash !== null) {
-        const block = blocks[blockIndex++] || null;
-        if (block !== null) {
-          // Guarantee height since we know it from input
-          block.height = heights[index];
-          results[index] = block;
-        }
-      }
+    // Create map for hash -> block lookup
+    const hashToBlock = new Map<string, UniversalBlock | null>();
+    validHashes.forEach((hash, index) => {
+      hashToBlock.set(hash, blocks[index] || null);
     });
 
-    return results;
+    // Restore order according to original heights
+    return blocksHashes.map((hash, index) => {
+      if (hash === null) {
+        return null;
+      }
+
+      const block = hashToBlock.get(hash) || null;
+      if (block !== null) {
+        block.height = heights[index];
+      }
+
+      return block;
+    });
   }
 
   // ===== BLOCK STATS METHODS =====
@@ -261,7 +258,12 @@ export class NetworkProvider extends BaseProvider {
 
     return results.map((rawStats) => {
       if (rawStats === null) return null;
-      return this.normalizeRawBlockStats(rawStats);
+
+      try {
+        return this.normalizeRawBlockStats(rawStats);
+      } catch (error) {
+        return null;
+      }
     });
   }
 
@@ -278,39 +280,83 @@ export class NetworkProvider extends BaseProvider {
     const hasGenesis = heights.includes(genesisHeight);
 
     if (hasGenesis) {
-      // Handle genesis block separately (getblockstats doesn't work for genesis)
-      const genesisResults = await this.transport.batchCall([{ method: 'getblockhash', params: [genesisHeight] }]);
-      const genesisHash = genesisResults[0];
+      try {
+        // Get genesis hash
+        const genesisResults = await this.transport.batchCall([{ method: 'getblockhash', params: [genesisHeight] }]);
+        const genesisHash = genesisResults[0];
 
-      const filteredHeights = heights.filter((height) => height !== genesisHeight);
-      const blocksHashes = await this.getManyBlockHashesByHeights(filteredHeights);
+        // Get stats for non-genesis blocks
+        const filteredHeights = heights.filter((height) => height !== genesisHeight);
+        let filteredStats: (UniversalBlockStats | null)[] = [];
 
-      const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
-      const blocks = validHashes.length > 0 ? await this.getManyBlocksStatsByHashes(validHashes) : [];
+        if (filteredHeights.length > 0) {
+          const blocksHashes = await this.getManyBlockHashesByHeights(filteredHeights);
+          const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
 
-      // Create mock genesis stats
-      const genesisMock: UniversalBlockStats = {
-        blockhash: genesisHash,
-        total_size: 0,
-        height: genesisHeight,
-      };
+          if (validHashes.length > 0) {
+            const statsResults = await this.getManyBlocksStatsByHashes(validHashes);
 
-      // Map results back to original order
-      const results: (UniversalBlockStats | null)[] = new Array(heights.length).fill(null);
-      let blockIndex = 0;
+            // Create map for hash -> stats lookup
+            const hashToStats = new Map<string, UniversalBlockStats | null>();
+            validHashes.forEach((hash, index) => {
+              hashToStats.set(hash, statsResults[index] || null);
+            });
 
-      heights.forEach((height, index) => {
-        if (height === genesisHeight) {
-          results[index] = genesisMock;
-        } else {
-          const hashIndex = filteredHeights.indexOf(height);
-          if (hashIndex !== -1 && blocksHashes[hashIndex] !== null) {
-            results[index] = blocks[blockIndex++] || null;
+            // Map stats back to filtered heights order
+            filteredStats = blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
           }
         }
-      });
 
-      return results;
+        // Create genesis mock with available data (getblockstats doesn't support genesis)
+        const genesisMock: UniversalBlockStats | null = genesisHash
+          ? {
+              blockhash: genesisHash,
+              height: genesisHeight,
+              total_size: 285, // Known Bitcoin genesis block size
+              total_weight: 1140, // Known weight (285 * 4 for non-segwit)
+              total_fee: 0, // No fees in genesis
+              // fee_rate_percentiles: [0, 0, 0, 0, 0], // No fees
+              // subsidy: 5000000000,          // 50 BTC in satoshis
+              // total_out: 5000000000,        // Same as subsidy
+              // utxo_increase: 1,             // One new UTXO created
+              // utxo_size_inc: 43,            // Estimated UTXO size increase
+              // ins: 0,                       // No real inputs (coinbase)
+              // outs: 1,                      // One output
+              // txs: 1,                       // One transaction
+              // minfee: 0,                    // No fees
+              // maxfee: 0,
+              // medianfee: 0,
+              // avgfee: 0,
+              // minfeerate: 0,                // No fee rates
+              // maxfeerate: 0,
+              // medianfeerate: 0,
+              // avgfeerate: 0,
+              // mintxsize: 204,               // Genesis transaction size
+              // maxtxsize: 204,
+              // mediantxsize: 204,
+              // avgtxsize: 204,
+              // total_stripped_size: 285,     // Same as total_size for non-segwit
+              // witness_txs: 0,               // No witness transactions in genesis
+            }
+          : null;
+
+        // Combine results in original order
+        const results: (UniversalBlockStats | null)[] = [];
+        let filteredIndex = 0;
+
+        heights.forEach((height) => {
+          if (height === genesisHeight) {
+            results.push(genesisMock);
+          } else {
+            results.push(filteredStats[filteredIndex] || null);
+            filteredIndex++;
+          }
+        });
+
+        return results;
+      } catch (error) {
+        return new Array(heights.length).fill(null);
+      }
     } else {
       // No genesis, use regular flow
       const blocksHashes = await this.getManyBlockHashesByHeights(heights);
@@ -322,16 +368,14 @@ export class NetworkProvider extends BaseProvider {
 
       const blocks = await this.getManyBlocksStatsByHashes(validHashes);
 
-      const results: (UniversalBlockStats | null)[] = new Array(heights.length).fill(null);
-      let blockIndex = 0;
-
-      blocksHashes.forEach((hash, index) => {
-        if (hash !== null) {
-          results[index] = blocks[blockIndex++] || null;
-        }
+      // Create map for hash -> stats lookup
+      const hashToStats = new Map<string, UniversalBlockStats | null>();
+      validHashes.forEach((hash, index) => {
+        hashToStats.set(hash, blocks[index] || null);
       });
 
-      return results;
+      // Restore order according to original heights
+      return blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
     }
   }
 
@@ -356,7 +400,12 @@ export class NetworkProvider extends BaseProvider {
 
     return results.map((rawTx) => {
       if (rawTx === null) return null;
-      return this.normalizeRawTransaction(rawTx);
+
+      try {
+        return this.normalizeRawTransaction(rawTx);
+      } catch (error) {
+        return null;
+      }
     });
   }
 
@@ -397,7 +446,13 @@ export class NetworkProvider extends BaseProvider {
    */
   async getBlockchainInfo(): Promise<any> {
     const results = await this.transport.batchCall([{ method: 'getblockchaininfo', params: [] }]);
-    return results[0];
+    const info = results[0];
+
+    if (info === null) {
+      throw new Error('Failed to get blockchain info: null response from transport');
+    }
+
+    return info;
   }
 
   /**
@@ -406,7 +461,13 @@ export class NetworkProvider extends BaseProvider {
    */
   async getNetworkInfo(): Promise<any> {
     const results = await this.transport.batchCall([{ method: 'getnetworkinfo', params: [] }]);
-    return results[0];
+    const info = results[0];
+
+    if (info === null) {
+      throw new Error('Failed to get network info: null response from transport');
+    }
+
+    return info;
   }
 
   /**
@@ -417,13 +478,20 @@ export class NetworkProvider extends BaseProvider {
     const results = await this.transport.batchCall([
       { method: 'estimatesmartfee', params: [confTarget, estimateMode] },
     ]);
-    return results[0];
+
+    const feeData = results[0];
+
+    if (feeData === null) {
+      throw new Error('Failed to estimate smart fee: null response from transport');
+    }
+
+    return feeData;
   }
 
   // ===== P2P SPECIFIC METHODS =====
 
   /**
-   * P2P-specific initialization - NEW METHOD
+   * P2P-specific initialization
    * Wait for header sync if transport supports it
    */
   async initializeP2P(
@@ -432,7 +500,7 @@ export class NetworkProvider extends BaseProvider {
       headerSyncTimeout?: number;
     } = {}
   ): Promise<void> {
-    if (this.transport.type !== 'P2P') {
+    if (this.transport.type !== 'p2p') {
       return; // Only for P2P transports
     }
 
@@ -451,7 +519,7 @@ export class NetworkProvider extends BaseProvider {
     headerSyncComplete?: boolean;
     syncProgress?: { synced: number; total: number; percentage: number };
   }> {
-    if (this.transport.type !== 'P2P') {
+    if (this.transport.type !== 'p2p') {
       return { isP2P: false };
     }
 

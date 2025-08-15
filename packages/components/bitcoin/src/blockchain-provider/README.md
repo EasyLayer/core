@@ -132,7 +132,7 @@ graph TB
 ### 🟡 Factory Layer
 - **TransportFactory** - Transport creation and configuration validation
   - Validates RPC/P2P configurations with detailed error messages
-  - **NEW**: P2P header sync configuration validation (maxHeight, headerSyncEnabled, headerSyncBatchSize)
+  - P2P header sync configuration validation (maxHeight, headerSyncEnabled, headerSyncBatchSize)
   - Type-safe transport creation with proper generic constraints
   - Handles `uniqName` generation and requirement enforcement
   - Extensible for new transport types
@@ -150,19 +150,19 @@ graph TB
 ### 🟢 Service Layer
 - **BlockchainProviderService** - Unified API with provider availability checks
 - Enforces provider availability before operations (`ensureNetworkProviders()`, `ensureMempoolProviders()`)
-- **NEW**: P2P sync status monitoring (`getP2PSyncStatus()`, `waitForP2PHeaderSync()`)
-- **NEW**: P2P-aware height operations with sync options
+- P2P sync status monitoring (`getP2PSyncStatus()`, `waitForP2PHeaderSync()`)
+- P2P-aware height operations with sync options
 - Provides meaningful error messages when no providers are configured
 - Data normalization from Universal objects to component types
-- **ENHANCED**: Real-time block subscription management (single callback pattern)
+- Real-time block subscription management (single callback pattern)
 - API for blocks, transactions, blockchain stats, and mempool operations
 
 ### 🟣 Connection Management Layer
 - **NetworkConnectionManager** - Single active provider management
   - **Type**: `BaseConnectionManager<NetworkProvider>`
   - Strategy: One active provider with automatic failover
-  - **NEW**: P2P provider initialization with header sync support
-  - **NEW**: P2P status monitoring across all providers
+  - P2P provider initialization with header sync support
+  - P2P status monitoring across all providers
   - Round-robin provider switching on failures with P2P-aware switching
   - Connection health monitoring and recovery
   
@@ -176,9 +176,9 @@ graph TB
 - **NetworkProvider** - Network operations business logic
   - **Base**: `BaseProvider` with `NetworkConfig` specialization
   - Methods for blocks, transactions, blockchain info
-  - **NEW**: P2P-specific initialization methods (`initializeP2P()`, `getP2PStatus()`)
-  - **ENHANCED**: Universal transport interface (works with both RPC and P2P)
-  - **ENHANCED**: Real-time block subscriptions with Buffer→UniversalBlock parsing
+  - P2P-specific initialization methods (`initializeP2P()`, `getP2PStatus()`)
+  - Universal transport interface (works with both RPC and P2P)
+  - Real-time block subscriptions with Buffer→UniversalBlock parsing
   - Merkle root verification capabilities
   
 - **MempoolProvider** - Mempool operations business logic
@@ -191,18 +191,18 @@ graph TB
 - **RPCTransport** - HTTP/HTTPS + ZMQ connections
   - Batch RPC call optimization
   - Authentication and rate limiting
-  - **ENHANCED**: ZMQ subscriptions with single callback pattern
-  - **ENHANCED**: Real-time block notifications via Buffer callbacks
+  - ZMQ subscriptions with single callback pattern
+  - Real-time block notifications via Buffer callbacks
   - Connection timeout and retry handling
   
 - **P2PTransport** - Direct P2P network connections
-  - **NEW**: Automatic header synchronization on connect
-  - **NEW**: ChainTracker for height→hash mapping (~60MB for 870k blocks)
-  - **NEW**: Support for `getManyBlockHashesByHeights()` and `getBlockHeight()` via chain tracker
-  - **NEW**: Real-time block processing with automatic height calculation
-  - **NEW**: Blockchain reorganization detection and handling
-  - **NEW**: Configurable sync parameters (maxHeight, batchSize, sync enabled/disabled)
-  - **ENHANCED**: Single block subscription callback (not stored, passed through)
+  - Automatic header synchronization on connect
+  - ChainTracker for height→hash mapping (~60MB for 870k blocks)
+  - Support for `getManyBlockHashesByHeights()` and `getBlockHeight()` via chain tracker
+  - Real-time block processing with automatic height calculation
+  - Blockchain reorganization detection and handling
+  - Configurable sync parameters (maxHeight, batchSize, sync enabled/disabled)
+  - Single block subscription callback (not stored, passed through)
   - Peer management and connection pooling
   - Direct message handling with Bitcoin protocol
   - Block request optimization via GetData messages
@@ -210,12 +210,45 @@ graph TB
 
 ### 🔴 External Systems
 - **Bitcoin Nodes** - RPC servers with optional ZMQ push notifications
-- **P2P Network** - **Enhanced**: Direct connections to your own Bitcoin nodes (trusted peers)
-- **NEW**: Header sync sources for building complete blockchain index
+- **P2P Network** - Direct connections to your own Bitcoin nodes (trusted peers)
+- Header sync sources for building complete blockchain index
 
-## Enhanced Data Flow Examples
+## Transport Method Architecture
 
-### P2P Header Synchronization Flow (NEW)
+### Core Transport Methods
+```typescript
+// Universal RPC method
+batchCall(): Promise<(T | null)[]>          // JSON structures, null support
+
+// Specialized hex block method  
+requestHexBlocks(): Promise<Buffer[]>        // Raw block data, throws on missing
+
+// Specialized hash lookup
+getManyBlockHashesByHeights(): Promise<(string | null)[]>  // Hash lookup, null support
+
+// Current height
+getBlockHeight(): Promise<number>            // Current height, throws on missing
+```
+
+### Provider Method Mapping
+```typescript
+// JSON blocks via transport.batchCall()
+getManyBlocksByHashes()     → batchCall([{method: 'getblock', params: [hash, verbosity]}])
+
+// Hex blocks via transport.requestHexBlocks()
+getManyBlocksHexByHashes()  → requestHexBlocks(hashes) → HexTransformer.parseBlockHex()
+
+// Combined: hash lookup + block retrieval
+getManyBlocksByHeights()    → getManyBlockHashesByHeights() + getManyBlocksByHashes()
+
+// Transaction methods
+getManyTransactionsByTxids()    → batchCall([{method: 'getrawtransaction', params: [txid, verbosity]}])
+getManyTransactionsHexByTxids() → batchCall([{method: 'getrawtransaction', params: [txid, false]}])
+```
+
+## Data Flow Examples
+
+### P2P Header Synchronization Flow
 ```
 P2P Transport Connect
     ↓
@@ -234,7 +267,7 @@ Header Sync Complete (~60MB memory for full chain)
 Ready for Height-based Operations
 ```
 
-### P2P Real-time Block Processing (NEW)
+### P2P Real-time Block Processing
 ```
 New Block Received (P2P 'block' event)
     ↓
@@ -251,7 +284,7 @@ Add to ChainTracker (Auto Reorg Detection)
 Height→Hash Mapping Updated
 ```
 
-### Enhanced Network Operations (P2P Compatible)
+### Network Operations Flow (Universal)
 ```
 User Request (e.g., getOneBlockByHeight(100))
     ↓
@@ -263,14 +296,14 @@ NetworkProvider (Universal Interface)
     ↓
 if P2P: getManyBlockHashesByHeights([100]) via ChainTracker
     ↓
-if P2P: requestBlocks([hash]) via GetData message
+if P2P: requestHexBlocks([hash]) via GetData message
     ↓
-if RPC: batch getblockhash + getblock calls
+if RPC: batchCall([{method: 'getblockhash'}, {method: 'getblock'}])
     ↓
 Parse & Return UniversalBlock
 ```
 
-### Real-time Block Subscription Flow (ENHANCED)
+### Real-time Block Subscription Flow
 ```
 Service.subscribeToNewBlocks(callback)
     ↓
@@ -288,69 +321,36 @@ if RPC: ZMQ subscription with callback set
 Real-time blocks → Buffer → UniversalBlock → Service Callback
 ```
 
-### P2P Provider Initialization Flow (NEW)
-```
-NetworkConnectionManager.initialize()
-    ↓
-Try P2P Providers First
-    ↓
-provider.initializeP2P({ waitForHeaderSync: false })
-    ↓
-if header sync needed: start in background
-    ↓
-Set as Active Provider
-    ↓
-Background monitoring of sync progress
+### Order Guarantees & Null Handling
+
+#### Transport Level
+```typescript
+// RPC Transport: UUID matching preserves order
+batchCall([req_A, req_B, req_C]) → [result_A, null, result_C]  // B failed
+
+// P2P Transport: Position mapping preserves order  
+getManyBlockHashesByHeights([100, 999999, 200]) → [hash_100, null, hash_200]  // 999999 missing
 ```
 
-## Key Architectural Improvements
+#### Provider Level
+```typescript
+// Graceful normalization with try-catch → null
+getManyBlocksByHashes([hash1, corrupted, hash3]) → [Block, null, Block]  // corrupted fails parsing
+```
 
-### ✅ **P2P Transport Integration**
-- **Header Synchronization**: Automatic download of all blockchain headers for height→hash mapping
-- **Memory Efficient**: ~72 bytes per block (8 bytes height + 64 bytes hash) = ~60MB for 870k blocks
-- **Trusted Peer Model**: Optimized for connecting to your own Bitcoin nodes
-- **Real-time Updates**: Automatic chain tracker updates from live blocks and headers
-- **Reorg Handling**: Automatic detection and handling of blockchain reorganizations
+#### Service Level
+```typescript
+// Filters out nulls for clean API
+getManyBlocksByHeights([100, 999999, 200]) → [Block_100, Block_200]  // null filtered out
+```
 
-### ✅ **Enhanced Block Subscriptions**
-- **Universal Interface**: Same subscription API works for both RPC (ZMQ) and P2P transports
-- **Single Callback Pattern**: Simplified subscription management (no storage, pass-through only)
-- **Buffer-based**: Consistent Buffer→UniversalBlock parsing in NetworkProvider
-- **Height Enrichment**: P2P blocks automatically get height from chain tracker
+## Configuration Examples
 
-### ✅ **Type Safety & Extensibility**
-- **Transport Level**: Generic factory methods with proper type constraints
-- **P2P Configuration**: Strongly typed header sync options with validation
-- **Provider Level**: Enhanced NetworkProvider with P2P-specific methods
-- **Manager Level**: P2P-aware connection management
-- **Easy Extension**: Add new transport/provider types with minimal changes
-
-### ✅ **Configuration Validation**
-- **Factory Responsibility**: All validation logic in factories, not module
-- **P2P Validation**: Header sync parameters, peer arrays, port ranges
-- **Detailed Errors**: Specific error messages for configuration issues
-- **Early Validation**: Errors caught during factory creation, not runtime
-
-### ✅ **Error Handling Strategy**
-- **Configuration Level**: Factories validate and throw detailed errors
-- **Module Level**: No validation - trusts factories
-- **Service Level**: Checks provider availability with user-friendly messages
-- **P2P Level**: Graceful header sync failures, transport still functional
-- **Runtime Level**: Connection managers handle failures and switching
-
-### ✅ **Graceful Degradation**
-- **Empty Providers**: Connection managers created even with empty arrays
-- **Service Checks**: Operations fail gracefully with clear error messages
-- **P2P Partial Sync**: Transport works even if header sync fails partially
-- **Provider Availability**: Service methods check before execution
-
-## Enhanced Configuration Examples
-
-### P2P Network Configuration (NEW)
+### P2P Network Configuration
 ```typescript
 BlockchainProviderModule.forRootAsync({
   networkProviders: {
-    type: 'P2P',
+    type: 'p2p',
     connections: [{
       peers: [
         { host: '192.168.1.100', port: 8333 }, // Your Bitcoin node
@@ -367,7 +367,7 @@ BlockchainProviderModule.forRootAsync({
     }]
   },
   mempoolProviders: {
-    type: 'RPC', // Use RPC for mempool operations
+    type: 'rpc', // Use RPC for mempool operations
     connections: [
       { baseUrl: 'http://192.168.1.100:8332', uniqName: 'mempool-rpc' }
     ]
@@ -377,26 +377,11 @@ BlockchainProviderModule.forRootAsync({
 });
 ```
 
-### P2P Limited Sync Configuration (NEW)
-```typescript
-{
-  type: 'P2P',
-  connections: [{
-    peers: [{ host: 'localhost', port: 8333 }],
-    // Only sync first 100k blocks for testing
-    maxHeight: 100000,
-    headerSyncEnabled: true,
-    headerSyncBatchSize: 1000,      // Smaller batches for testing
-    uniqName: 'p2p-limited-sync'
-  }]
-}
-```
-
-### Mixed Transport with P2P Network + RPC Mempool (ENHANCED)
+### Mixed Transport Configuration
 ```typescript
 BlockchainProviderModule.forRootAsync({
   networkProviders: {
-    type: 'P2P',
+    type: 'p2p',
     connections: [{
       peers: [
         { host: '10.0.0.1', port: 8333 },
@@ -409,7 +394,7 @@ BlockchainProviderModule.forRootAsync({
     }]
   },
   mempoolProviders: {
-    type: 'RPC',
+    type: 'rpc',
     connections: [
       { 
         baseUrl: 'http://fast-mempool:8332',
@@ -428,40 +413,7 @@ BlockchainProviderModule.forRootAsync({
 });
 ```
 
-### P2P Configuration Error Examples (NEW)
-```typescript
-// ❌ Invalid P2P configuration - caught at factory level
-{
-  type: 'P2P',
-  connections: [{
-    peers: [],                      // Error: "P2P transport configuration must specify a non-empty peers array"
-    headerSyncEnabled: 'true'       // Error: "P2P transport headerSyncEnabled must be a boolean"
-  }]
-}
-
-// ❌ Invalid header sync configuration
-{
-  type: 'P2P',
-  connections: [{
-    peers: [{ host: 'localhost', port: 8333 }],
-    maxHeight: -1,                  // Error: "P2P transport maxHeight must be a positive number"
-    headerSyncBatchSize: 0          // Error: "P2P transport headerSyncBatchSize must be a positive number"
-  }]
-}
-
-// ❌ Invalid peer configuration
-{
-  type: 'P2P',
-  connections: [{
-    peers: [
-      { host: '', port: 8333 },     // Error: "P2P transport peer 0: host must be a non-empty string"
-      { host: 'localhost', port: 0 } // Error: "P2P transport peer 1: port must be a valid port number (1-65535)"
-    ]
-  }]
-}
-```
-
-## Enhanced Service API Examples (NEW)
+## Service API Examples
 
 ### P2P Sync Status Monitoring
 ```typescript
@@ -480,21 +432,26 @@ await service.initializeP2PProvider({
 });
 ```
 
-### Height-based Operations with P2P Sync Awareness
+### Block Operations with Strategy Selection
 ```typescript
-// Get current height (with optional sync wait)
-const height = await service.getCurrentBlockHeight({
-  waitForP2PSync: true,
-  syncTimeout: 60000
-});
+// Get blocks with hex parsing for performance
+const blocks = await service.getManyBlocksByHeights(
+  [100, 200, 300], 
+  true,  // useHex = true (requestHexBlocks + HexTransformer)
+  1,     // verbosity (ignored for hex)
+  false  // verifyMerkle
+);
 
-// Get block hashes with sync awareness
-const hashes = await service.getManyHashesByHeights([1000, 2000, 3000], {
-  waitForP2PSync: false  // Use partial data if available
-});
+// Get blocks with JSON for debugging
+const blocksJson = await service.getManyBlocksByHeights(
+  [100, 200, 300],
+  false, // useHex = false (batchCall + normalization)
+  2,     // verbosity = 2 (full transaction objects)
+  true   // verifyMerkle = true
+);
 ```
 
-### Real-time Block Subscriptions (ENHANCED)
+### Real-time Block Subscriptions
 ```typescript
 // Works with both RPC (ZMQ) and P2P transports
 const subscription = service.subscribeToNewBlocks((block: Block) => {
@@ -507,25 +464,43 @@ subscription.unsubscribe();
 await subscription; // Promise resolves when unsubscribed
 ```
 
-## Benefits
+## Key Architectural Benefits
 
-1. **🔄 Automatic Failover** - NetworkConnectionManager handles provider switching
-2. **⚡ High Performance** - Parallel mempool operations with strategy selection
-3. **🔧 Easy Configuration** - Clear error messages and validation at factory level
-4. **📈 Scalable** - Type-safe extensibility for new provider/transport types
-5. **🛡️ Type Safe** - Full TypeScript support with proper generic constraints
-6. **🔍 Observable** - Connection statistics and monitoring capabilities
-7. **🔀 Flexible** - Mix RPC and P2P transports as needed
-8. **🚨 Error Resilient** - Graceful handling of empty configurations and provider failures
-9. **🧩 Modular** - Clean separation of concerns across layers
-10. **📚 Developer Friendly** - Clear error messages and intuitive API design
-11. **🌐 P2P Native** - **NEW**: Direct blockchain access with automatic header synchronization
-12. **⚡ Memory Efficient** - **NEW**: Optimized height→hash mapping (~60MB for full chain)
-13. **🔄 Reorg Aware** - **NEW**: Automatic blockchain reorganization detection and handling
-14. **🎯 Trusted Peers** - **NEW**: Optimized for connecting to your own Bitcoin nodes
-15. **📡 Real-time** - **NEW**: Live block processing with immediate height calculation
+### ✅ **Clear Method Naming**
+- `requestHexBlocks()` - Clearly indicates hex block data as Buffer[]
+- `batchCall()` - Universal RPC access for JSON responses
+- `getManyBlockHashesByHeights()` - Explicit hash lookup functionality
 
-## P2P Transport Technical Details (NEW)
+### ✅ **Order Guarantees**
+- **RPC**: UUID matching preserves request-response order
+- **P2P**: Position mapping maintains array order
+- **Providers**: Map operations preserve relationships
+- **Service**: Filters maintain original relationships
+
+### ✅ **Consistent Null Handling**
+- **Transport**: Returns null for missing/failed items in batch operations
+- **Provider**: Graceful normalization with try-catch → null fallback
+- **Service**: Filters nulls for clean consumer API
+
+### ✅ **Performance Optimizations**
+- **Hex vs JSON**: Choose optimal data format per use case
+- **Batch Operations**: Minimize network round-trips
+- **P2P Direct Access**: Bypass RPC layer for blockchain operations
+- **Memory Efficient**: ChainTracker uses only ~60MB for full Bitcoin chain
+
+### ✅ **Type Safety & Extensibility**
+- **Transport Level**: Generic factory methods with proper constraints
+- **Provider Level**: Strongly typed business logic
+- **Service Level**: Clean, typed API for consumers
+- **Configuration**: Detailed validation with specific error messages
+
+### ✅ **Graceful Degradation**
+- **Empty Configurations**: Managers created, operations fail with clear messages
+- **P2P Partial Sync**: Transport functional even with incomplete header sync
+- **Provider Failures**: Automatic failover with connection management
+- **Missing Data**: Null handling preserves operation continuity
+
+## P2P Transport Technical Details
 
 ### Header Synchronization Process
 1. **Connection**: P2P transport connects to trusted Bitcoin peers
@@ -558,4 +533,4 @@ class ChainTracker {
 - **Reorg Detection**: Identifies conflicting blocks at same height
 - **Subscription Pass-through**: Blocks immediately forwarded to subscribers
 
-This enhanced architecture provides a robust, type-safe, and high-performance foundation for Bitcoin blockchain operations with both traditional RPC and modern P2P connectivity options.
+This architecture provides a robust, type-safe, and high-performance foundation for Bitcoin blockchain operations with both traditional RPC and modern P2P connectivity options.

@@ -3,11 +3,11 @@ import type { BaseTransport, NetworkConfig, RateLimits } from '../transports';
 import { RPCTransport as RPCTransportClass, P2PTransport as P2PTransportClass } from '../transports';
 
 export const TRANSPORT_TYPES = {
-  RPC: 'RPC',
-  P2P: 'P2P',
+  RPC: 'rpc',
+  P2P: 'p2p',
 } as const;
 
-export type TransportType = keyof typeof TRANSPORT_TYPES;
+export type TransportType = (typeof TRANSPORT_TYPES)[keyof typeof TRANSPORT_TYPES];
 
 export interface BaseTransportConfig {
   type: TransportType;
@@ -17,18 +17,17 @@ export interface BaseTransportConfig {
 }
 
 export interface RPCTransportConfig extends BaseTransportConfig {
-  type: 'RPC';
+  type: 'rpc';
   baseUrl: string;
   responseTimeout?: number;
   zmqEndpoint?: string;
 }
 
 export interface P2PTransportConfig extends BaseTransportConfig {
-  type: 'P2P';
+  type: 'p2p';
   peers: Array<{ host: string; port: number }>;
   maxPeers?: number;
   connectionTimeout?: number;
-  maxBatchSize?: number;
   maxHeight?: number;
   headerSyncEnabled?: boolean;
   headerSyncBatchSize?: number;
@@ -141,7 +140,6 @@ export class TransportFactory {
       uniqName?: string;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): P2PTransportClass {
     const config: P2PTransportConfig = {
@@ -152,7 +150,6 @@ export class TransportFactory {
       rateLimits: options.rateLimits,
       maxPeers: options.maxPeers,
       connectionTimeout: options.connectionTimeout,
-      maxBatchSize: options.maxBatchSize,
     };
 
     return this.createTransport(config) as P2PTransportClass;
@@ -188,7 +185,6 @@ export class TransportFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): P2PTransportClass[] {
     return peersArray.map((peers, index) => {
@@ -282,10 +278,6 @@ export class TransportFactory {
       (typeof config.connectionTimeout !== 'number' || config.connectionTimeout <= 0)
     ) {
       throw new Error('P2P transport connectionTimeout must be a positive number');
-    }
-
-    if (config.maxBatchSize !== undefined && (typeof config.maxBatchSize !== 'number' || config.maxBatchSize <= 0)) {
-      throw new Error('P2P transport maxBatchSize must be a positive number');
     }
   }
 

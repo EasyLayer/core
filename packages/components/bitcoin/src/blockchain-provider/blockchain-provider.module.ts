@@ -2,84 +2,18 @@ import { Module, DynamicModule } from '@nestjs/common';
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { NetworkConnectionManager, MempoolConnectionManager } from './managers';
-import { ConnectionManagerFactory } from './factories';
+import { ConnectionManagerFactory, ModuleProviderConfig } from './factories';
 import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from './utils';
 import type { NetworkConfig, RateLimits } from './transports';
-
-/**
- * Provider configuration for blockchain module
- * Each provider config contains connections of the same type (all RPC or all P2P)
- */
-export interface ProviderConfig {
-  /** Provider type - must be same for all connections in this config */
-  type: 'RPC' | 'P2P';
-  /** Array of connection endpoints/configurations */
-  connections: ProviderConnectionConfig[];
-}
-
-/**
- * Individual connection configuration within a provider
- * Contains transport-specific options
- */
-export interface ProviderConnectionConfig {
-  /** For RPC: base URL (required), for P2P: not used */
-  baseUrl?: string;
-  /** For P2P: array of peers (required), for RPC: not used */
-  peers?: Array<{ host: string; port: number }>;
-  /** Optional custom name for the provider connection */
-  uniqName?: string;
-
-  // RPC specific options
-  /** HTTP request timeout in milliseconds (default: 5000) */
-  responseTimeout?: number;
-  /** ZMQ endpoint for real-time block notifications (format: tcp://host:port) */
-  zmqEndpoint?: string;
-
-  // P2P specific options
-  /** Maximum number of peers to connect to (default: number of peers in array) */
-  maxPeers?: number;
-  /** Connection timeout in milliseconds (default: 30000) */
-  connectionTimeout?: number;
-  /** Maximum batch size for requests (default: 2000, max: 2000) */
-  maxBatchSize?: number;
-
-  // P2P Header Sync Configuration (NEW)
-  /**
-   * Maximum height to sync headers (for testing or limited sync)
-   * If undefined, syncs all headers from genesis to current tip
-   * Memory usage: ~72 bytes per block
-   * For maxHeight=100000: ~7.2MB, for full Bitcoin mainnet (~870k blocks): ~60MB
-   */
-  maxHeight?: number;
-
-  /**
-   * Enable automatic header synchronization on connect (default: true)
-   * When true, starts downloading all block headers to build height->hash mapping
-   * When false, P2P transport will only work with block hash-based operations
-   *
-   * Note: Header sync is essential for height-based block operations in P2P mode
-   * Disabling this will make getBasicBlockByHeight() and similar methods fail
-   */
-  headerSyncEnabled?: boolean;
-
-  /**
-   * Batch size for header requests during sync (default: 2000, recommended: 1000-2000)
-   * Larger batches = faster sync but more memory usage per request
-   * Smaller batches = slower sync but more granular progress tracking
-   *
-   * Time complexity: O(n/batchSize) requests where n = number of blocks to sync
-   */
-  headerSyncBatchSize?: number;
-}
 
 /**
  * Main configuration for blockchain provider module
  */
 export interface BlockchainProviderModuleOptions {
   /** Network providers configuration (for blocks, transactions, blockchain info) */
-  networkProviders: ProviderConfig;
+  networkProviders: ModuleProviderConfig;
   /** Mempool providers configuration (for mempool operations) */
-  mempoolProviders: ProviderConfig;
+  mempoolProviders: ModuleProviderConfig;
   /** Network configuration (Bitcoin mainnet, testnet, etc.) */
   network: NetworkConfig;
   /** Rate limiting configuration for transport layer */
@@ -128,10 +62,11 @@ export class BlockchainProviderModule {
     providers.push({
       provide: NetworkConnectionManager,
       useFactory: async (logger: AppLogger) => {
-        const networkProviderInstances =
-          networkProviders.connections.length > 0
-            ? ConnectionManagerFactory.createNetworkProvidersFromConfig(networkProviders, network, rateLimits)
-            : [];
+        const hasConns = (networkProviders?.connections?.length ?? 0) > 0;
+
+        const networkProviderInstances = hasConns
+          ? ConnectionManagerFactory.createNetworkProvidersFromConfig(networkProviders, network, rateLimits)
+          : [];
 
         const connectionManager = ConnectionManagerFactory.createNetworkConnectionManager(
           networkProviderInstances,
@@ -154,10 +89,11 @@ export class BlockchainProviderModule {
     providers.push({
       provide: MempoolConnectionManager,
       useFactory: async (logger: AppLogger) => {
-        const mempoolProviderInstances =
-          mempoolProviders.connections.length > 0
-            ? ConnectionManagerFactory.createMempoolProvidersFromConfig(mempoolProviders, network, rateLimits)
-            : [];
+        const hasConns = (mempoolProviders?.connections?.length ?? 0) > 0;
+
+        const mempoolProviderInstances = hasConns
+          ? ConnectionManagerFactory.createMempoolProvidersFromConfig(mempoolProviders, network, rateLimits)
+          : [];
 
         const connectionManager = ConnectionManagerFactory.createMempoolConnectionManager(
           mempoolProviderInstances,

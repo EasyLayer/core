@@ -272,7 +272,7 @@ export class BlockchainProviderService {
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
-   * @param useHex If true, uses hex parsing for better performance and complete transaction data
+   * @param useHex If true, uses hex parsing via requestHexBlocks for better performance
    * @param verbosity Verbosity level for object method (ignored if useHex=true)
    * @param verifyMerkle If true, verifies Merkle root of transactions
    * @returns Array of blocks in same order as input heights, with guaranteed height information
@@ -285,7 +285,7 @@ export class BlockchainProviderService {
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHeights', async (provider) => {
       if (useHex) {
-        // Get Universal blocks parsed from hex - GUARANTEES HEIGHT
+        // Get Universal blocks parsed from hex via transport.requestHexBlocks() - GUARANTEES HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHeights(
           heights.map((item) => Number(item)),
           verifyMerkle
@@ -295,7 +295,7 @@ export class BlockchainProviderService {
         const validBlocks = universalBlocks.filter((block: any): block is UniversalBlock => block !== null);
         return this.normalizer.normalizeManyBlocks(validBlocks);
       } else {
-        // Get structured blocks - GUARANTEES HEIGHT
+        // Get structured blocks via transport.batchCall() - GUARANTEES HEIGHT
         const rawBlocks = await provider.getManyBlocksByHeights(
           heights.map((item) => Number(item)),
           verbosity,
@@ -315,7 +315,7 @@ export class BlockchainProviderService {
    * Time complexity: O(k) where k = number of hashes
    *
    * @param hashes Array of block hashes
-   * @param useHex If true, uses hex parsing for better performance and complete transaction data
+   * @param useHex If true, uses hex parsing via requestHexBlocks for better performance
    * @param verbosity Verbosity level for object method (ignored if useHex=true)
    * @param verifyMerkle If true, verifies Merkle root of transactions
    * @returns Array of blocks in same order as input hashes, with height information
@@ -328,14 +328,14 @@ export class BlockchainProviderService {
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHashes', async (provider) => {
       if (useHex) {
-        // Get Universal blocks parsed from hex - DOES NOT GUARANTEE HEIGHT
+        // Get Universal blocks parsed from hex via transport.requestHexBlocks() - DOES NOT GUARANTEE HEIGHT
         const universalBlocks = await provider.getManyBlocksHexByHashes(hashes, verifyMerkle);
 
         // Get heights for valid blocks using public provider method
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
         if (validHashes.length === 0) return [];
 
-        // Get height info for valid hashes using structured method
+        // Get height info for valid hashes using structured method (transport.batchCall)
         const heightInfos = await provider.getManyBlocksByHashes(validHashes, 1);
 
         // Combine blocks with heights, filter out invalid
@@ -355,7 +355,7 @@ export class BlockchainProviderService {
 
         return this.normalizer.normalizeManyBlocks(completeBlocks);
       } else {
-        // Get structured blocks - GUARANTEES HEIGHT
+        // Get structured blocks via transport.batchCall() - GUARANTEES HEIGHT
         const rawBlocks = await provider.getManyBlocksByHashes(hashes, verbosity, verifyMerkle);
 
         // Filter out null blocks and normalize

@@ -11,6 +11,12 @@ export interface BaseTransportOptions {
 /**
  * Abstract base transport class defining unified interface for RPC and P2P transports
  * All transports must implement these methods or throw error for unsupported operations
+ *
+ * Key Design Principles:
+ * - All batch methods support null values for failed/missing requests
+ * - Single value methods throw errors on null responses
+ * - Order guarantees maintained across all implementations
+ * - Rate limiting handled consistently via RateLimiter
  */
 export abstract class BaseTransport<T extends BaseTransportOptions = BaseTransportOptions> {
   protected rateLimiter: RateLimiter;
@@ -33,10 +39,10 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
   abstract healthcheck(): Promise<boolean>;
 
   // Core transport methods - ALL transports must implement or throw error
-  abstract batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<TResult[]>;
+  abstract batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]>;
 
   // Block retrieval methods - must work with both RPC and P2P
-  abstract requestBlocks(hashes: string[]): Promise<Buffer[]>;
+  abstract requestHexBlocks(hashes: string[]): Promise<Buffer[]>;
   abstract getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]>;
   abstract getBlockHeight(): Promise<number>;
 

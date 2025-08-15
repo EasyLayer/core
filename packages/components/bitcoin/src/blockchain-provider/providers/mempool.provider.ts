@@ -35,7 +35,12 @@ export class MempoolProvider extends BaseProvider {
 
     return results.map((rawTx) => {
       if (rawTx === null) return null;
-      return this.normalizeRawTransaction(rawTx);
+
+      try {
+        return this.normalizeRawTransaction(rawTx);
+      } catch (error) {
+        return null;
+      }
     });
   }
 
@@ -81,10 +86,14 @@ export class MempoolProvider extends BaseProvider {
     const rawInfo = results[0];
 
     if (!rawInfo) {
-      throw new Error('Failed to get mempool info');
+      throw new Error('Failed to get mempool info: null response from transport');
     }
 
-    return this.normalizeMempoolInfo(rawInfo);
+    try {
+      return this.normalizeMempoolInfo(rawInfo);
+    } catch (error) {
+      throw new Error(`Failed to normalize mempool info: ${error}`);
+    }
   }
 
   /**
@@ -100,6 +109,10 @@ export class MempoolProvider extends BaseProvider {
     const results = await this.transport.batchCall([{ method: 'getrawmempool', params: [verbose] }]);
     const rawResult = results[0];
 
+    if (rawResult === null) {
+      throw new Error('Failed to get raw mempool: null response from transport');
+    }
+
     if (!verbose) {
       return rawResult; // string[] of transaction IDs
     }
@@ -108,7 +121,11 @@ export class MempoolProvider extends BaseProvider {
       const normalizedMempool: { [txid: string]: UniversalMempoolTransaction } = {};
 
       for (const [txid, rawEntry] of Object.entries(rawResult)) {
-        normalizedMempool[txid] = this.normalizeMempoolEntry(txid, rawEntry);
+        try {
+          normalizedMempool[txid] = this.normalizeMempoolEntry(txid, rawEntry);
+        } catch (error) {
+          // Skip problematic entries and continue processing
+        }
       }
 
       return normalizedMempool;
@@ -131,7 +148,12 @@ export class MempoolProvider extends BaseProvider {
 
     return results.map((entry, index) => {
       if (entry === null) return null;
-      return this.normalizeMempoolEntry(txids[index]!, entry);
+
+      try {
+        return this.normalizeMempoolEntry(txids[index]!, entry);
+      } catch (error) {
+        return null;
+      }
     });
   }
 
@@ -148,7 +170,14 @@ export class MempoolProvider extends BaseProvider {
     const results = await this.transport.batchCall([
       { method: 'estimatesmartfee', params: [confTarget, estimateMode] },
     ]);
-    return results[0];
+
+    const feeData = results[0];
+
+    if (feeData === null) {
+      throw new Error('Failed to estimate smart fee: null response from transport');
+    }
+
+    return feeData;
   }
 
   /**
@@ -158,7 +187,13 @@ export class MempoolProvider extends BaseProvider {
    */
   async getBlockHeight(): Promise<number> {
     const results = await this.transport.batchCall([{ method: 'getblockcount', params: [] }]);
-    return results[0];
+    const height = results[0];
+
+    if (height === null || height === undefined) {
+      throw new Error('Failed to get block height: null response from transport');
+    }
+
+    return height;
   }
 
   // ===== NORMALIZATION METHODS =====

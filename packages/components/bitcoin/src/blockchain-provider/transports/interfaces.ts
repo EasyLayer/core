@@ -1,8 +1,3 @@
-export const enum NodeProviderTypes {
-  RPC = 'rpc',
-  P2P = 'p2p',
-}
-
 /**
  * Rate limiting configuration interface
  */
@@ -13,10 +8,6 @@ export interface RateLimits {
   maxBatchSize?: number;
   /** Delay between requests in milliseconds (default: 1000) */
   requestDelayMs?: number;
-}
-
-export interface NodeProviderTypeInterface {
-  type: NodeProviderTypes;
 }
 
 // Bitcoin Network Configuration

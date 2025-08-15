@@ -5,21 +5,77 @@ import { ProviderFactory } from './providers-factory';
 import type { TransportConfig } from './transports-factory';
 import type { NetworkConfig, RateLimits } from '../transports';
 
-// Type for module provider configuration (from module)
 export interface ModuleProviderConfig {
-  type: 'RPC' | 'P2P';
-  connections: Array<{
-    baseUrl?: string;
-    peers?: Array<{ host: string; port: number }>;
-    uniqName?: string;
-    responseTimeout?: number;
-    zmqEndpoint?: string;
-    maxPeers?: number;
-    connectionTimeout?: number;
-    maxBatchSize?: number;
-  }>;
+  type: 'rpc' | 'p2p';
+  connections: ProviderConnectionConfig[];
+}
+
+export interface ProviderConnectionConfig {
+  /** For RPC: base URL (required), for P2P: not used */
+  baseUrl?: string;
+  /** For P2P: array of peers (required), for RPC: not used */
+  peers?: Array<{ host: string; port: number }>;
+  /** Optional custom name for the provider connection */
+  uniqName?: string;
+
+  // RPC specific options
+  /** HTTP request timeout in milliseconds (default: 5000) */
+  responseTimeout?: number;
+  /** ZMQ endpoint for real-time block notifications (format: tcp://host:port) */
+  zmqEndpoint?: string;
+
+  // P2P specific options
+  /** Maximum number of peers to connect to (default: number of peers in array) */
+  maxPeers?: number;
+  /** Connection timeout in milliseconds (default: 30000) */
+  connectionTimeout?: number;
+
+  // P2P Header Sync Configuration (NEW)
+  /**
+   * Maximum height to sync headers (for testing or limited sync)
+   * If undefined, syncs all headers from genesis to current tip
+   * Memory usage: ~72 bytes per block
+   * For maxHeight=100000: ~7.2MB, for full Bitcoin mainnet (~870k blocks): ~60MB
+   */
+  maxHeight?: number;
+
+  /**
+   * Enable automatic header synchronization on connect (default: true)
+   * When true, starts downloading all block headers to build height->hash mapping
+   * When false, P2P transport will only work with block hash-based operations
+   *
+   * Note: Header sync is essential for height-based block operations in P2P mode
+   * Disabling this will make getBasicBlockByHeight() and similar methods fail
+   */
+  headerSyncEnabled?: boolean;
+
+  /**
+   * Batch size for header requests during sync (default: 2000, recommended: 1000-2000)
+   * Larger batches = faster sync but more memory usage per request
+   * Smaller batches = slower sync but more granular progress tracking
+   *
+   * Time complexity: O(n/batchSize) requests where n = number of blocks to sync
+   */
+  headerSyncBatchSize?: number;
+
   defaultStrategy?: 'parallel' | 'round-robin' | 'fastest';
 }
+
+// Type for module provider configuration (from module)
+// export interface ModuleProviderConfig {
+//   type: 'rpc' | 'p2p';
+//   connections: Array<{
+//     baseUrl?: string;
+//     peers?: Array<{ host: string; port: number }>;
+//     uniqName?: string;
+//     responseTimeout?: number;
+//     zmqEndpoint?: string;
+//     maxPeers?: number;
+//     connectionTimeout?: number;
+//     defaultStrategy?: 'parallel' | 'round-robin' | 'fastest';
+//   }>;
+//   // defaultStrategy?: 'parallel' | 'round-robin' | 'fastest';
+// }
 
 export class ConnectionManagerFactory {
   /**
@@ -126,7 +182,6 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     },
     logger: AppLogger
   ): NetworkConnectionManager {
@@ -144,7 +199,6 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     },
     logger: AppLogger
   ): MempoolConnectionManager {
@@ -169,35 +223,34 @@ export class ConnectionManagerFactory {
       };
 
       switch (config.type) {
-        case 'RPC':
+        case 'rpc':
           if (!connection.baseUrl) {
             throw new Error(`RPC provider connection ${index}: baseUrl is required for RPC type`);
           }
 
           return {
-            type: 'RPC' as const,
+            type: 'rpc' as const,
             baseUrl: connection.baseUrl,
             responseTimeout: connection.responseTimeout,
             zmqEndpoint: connection.zmqEndpoint,
             ...baseConfig,
           };
 
-        case 'P2P':
+        case 'p2p':
           if (!connection.peers || !Array.isArray(connection.peers) || connection.peers.length === 0) {
             throw new Error(`P2P provider connection ${index}: peers array is required for P2P type`);
           }
 
           return {
-            type: 'P2P' as const,
+            type: 'p2p' as const,
             peers: connection.peers,
             maxPeers: connection.maxPeers,
             connectionTimeout: connection.connectionTimeout,
-            maxBatchSize: connection.maxBatchSize,
             ...baseConfig,
           };
 
         default:
-          throw new Error(`Unsupported provider type: ${(config as any).type}`);
+          throw new Error(`Unsupported transport type: ${(config as any).type}`);
       }
     });
   }

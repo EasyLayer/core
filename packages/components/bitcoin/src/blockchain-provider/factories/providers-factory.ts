@@ -99,7 +99,6 @@ export class ProviderFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): NetworkProvider[] {
     const transports = TransportFactory.createP2PTransportsFromPeers(peersArray, options);
@@ -116,7 +115,6 @@ export class ProviderFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): MempoolProvider[] {
     const transports = TransportFactory.createP2PTransportsFromPeers(peersArray, options);
@@ -168,7 +166,6 @@ export class ProviderFactory {
       uniqName?: string;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): NetworkProvider {
     const transport = TransportFactory.createP2PTransport(peers, options);
@@ -186,7 +183,6 @@ export class ProviderFactory {
       uniqName?: string;
       maxPeers?: number;
       connectionTimeout?: number;
-      maxBatchSize?: number;
     }
   ): MempoolProvider {
     const transport = TransportFactory.createP2PTransport(peers, options);

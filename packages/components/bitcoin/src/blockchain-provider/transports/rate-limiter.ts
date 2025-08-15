@@ -2,8 +2,13 @@ import Bottleneck from 'bottleneck';
 import type { RateLimits } from './interfaces';
 
 /**
- * Internal rate limiter for RPCNodeProvider
- * All requests are executed as batches, even single requests
+ * Simple Rate Limiter - only handles rate limiting and batching
+ *
+ * Key features:
+ * - Splits requests into batches based on maxBatchSize
+ * - Handles rate limiting and concurrency via Bottleneck
+ * - Does NOT group by method - that's RPC provider's job
+ * - Preserves exact request order
  */
 export class RateLimiter {
   private limiter: Bottleneck;
@@ -23,54 +28,46 @@ export class RateLimiter {
   }
 
   /**
-   * Execute all requests as batches
-   * Groups by method and splits into batches based on maxBatchSize
-   * Bottleneck handles all scheduling and concurrency
+   * Execute batch of requests with rate limiting
+   * Simply splits into batches and calls batchRpcCall for each
    */
   async execute<T>(
     requests: Array<{ method: string; params: any[] }>,
-    batchRpcCall: (calls: typeof requests) => Promise<T[]>
-  ): Promise<T[]> {
+    batchRpcCall: (calls: typeof requests) => Promise<(T | null)[]>
+  ): Promise<(T | null)[]> {
     if (requests.length === 0) return [];
 
-    // Group requests by method
-    const methodGroups = new Map<string, Array<{ params: any[]; index: number }>>();
+    // Simple batching without grouping by method
+    const batches = this.createBatches(requests, this.config.maxBatchSize);
+    const allResults: (T | null)[] = [];
 
-    requests.forEach((request, index) => {
-      if (!methodGroups.has(request.method)) {
-        methodGroups.set(request.method, []);
+    // Execute each batch with rate limiting
+    for (const batch of batches) {
+      try {
+        const batchResults = await this.limiter.schedule(() => batchRpcCall(batch));
+
+        if (!Array.isArray(batchResults)) {
+          throw new Error('Invalid batch response: expected array');
+        }
+
+        // Handle partial responses - fill missing with null
+        for (let i = 0; i < batch.length; i++) {
+          const result = i < batchResults.length ? batchResults[i] ?? null : null;
+          allResults.push(result);
+        }
+      } catch (error) {
+        throw new Error(`Failed to execute batch: ${(error as any)?.message}`);
       }
-      methodGroups.get(request.method)!.push({ params: request.params, index });
-    });
-
-    const results: T[] = new Array(requests.length);
-    const allBatches: Array<{ batch: Array<{ params: any[]; index: number }>; method: string }> = [];
-
-    // Collect all batches
-    for (const [method, items] of methodGroups) {
-      const batches = this.createBatches(items, this.config.maxBatchSize);
-      batches.forEach((batch) => {
-        allBatches.push({ batch, method });
-      });
     }
 
-    // Execute all batches through bottleneck sequentially
-    for (const { batch, method } of allBatches) {
-      const batchCalls = batch.map((item) => ({ method, params: item.params }));
-      const batchResults = await this.limiter.schedule(() => batchRpcCall(batchCalls));
-
-      batch.forEach((item, i) => {
-        results[item.index] = batchResults[i]!;
-      });
-    }
-
-    return results;
+    return allResults;
   }
 
-  /**
-   * Split items into batches based on maxBatchSize
-   */
   private createBatches<T>(items: T[], batchSize: number): T[][] {
+    if (batchSize <= 0) {
+      throw new Error('Batch size must be greater than 0');
+    }
+
     const batches: T[][] = [];
     for (let i = 0; i < items.length; i += batchSize) {
       batches.push(items.slice(i, i + batchSize));
@@ -78,11 +75,7 @@ export class RateLimiter {
     return batches;
   }
 
-  /**
-   * Stop the bottleneck limiter
-   */
   async stop(): Promise<void> {
-    // CRITICAL: Just stop with dropWaitingJobs, that's it
     await this.limiter.stop({ dropWaitingJobs: true });
   }
 }

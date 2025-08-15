@@ -8,8 +8,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
     await super.initialize();
 
     // Initialize P2P providers first (they may need header sync)
-    const p2pProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type === 'P2P');
-    const otherProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type !== 'P2P');
+    const p2pProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type === 'p2p');
+    const otherProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type !== 'p2p');
 
     // Try P2P providers first
     for (const provider of p2pProviders) {
@@ -132,7 +132,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
           this.activeProviderName = nextProvider.uniqName;
 
           // Initialize P2P if needed
-          if (nextProvider.transport?.type === 'P2P') {
+          if (nextProvider.transport?.type === 'p2p') {
             await nextProvider.initializeP2P({ waitForHeaderSync: false });
           }
 

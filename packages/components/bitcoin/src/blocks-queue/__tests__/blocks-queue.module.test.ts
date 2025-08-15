@@ -41,11 +41,11 @@ describe('BlocksQueueModule', () => {
           network: {} as any,
           rateLimits: {} as any,
           networkProviders: {
-            type: 'RPC',
+            type: 'rpc',
             connections: []
           },
           mempoolProviders: {
-            type: 'RPC',
+            type: 'rpc',
             connections: []
           }
         }),

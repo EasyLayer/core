@@ -14,6 +14,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   protected _resolveNextBatch!: () => void;
   private _blocksBatchSize: number = 1024;
   private _timer: ExponentialTimer | null = null;
+  private readonly _monitoringInterval: number;
 
   constructor(
     private readonly log: AppLogger,
@@ -22,6 +23,10 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
+
+    // Calculate monitoring interval once in constructor
+    // Half of block time, minimum 30 seconds
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
 
     // TODO: This should be removed when we figure out where to initialize the queue correctly.
     // Now, without this line, we can get a situation where the queue is not initialized
@@ -90,9 +95,9 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         }
       },
       {
-        interval: 500,
-        maxInterval: 3000,
-        multiplier: 2,
+        interval: 1000, // Start with 1000ms for first attempts
+        maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
+        multiplier: 2, // Exponential backoff multiplier
       }
     );
 

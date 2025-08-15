@@ -182,7 +182,7 @@ export class BitcoinErrorHandler {
     }
 
     // RPC errors
-    if (errorMessage.includes('rpc error') || errorMessage.includes('jsonrpc')) {
+    if (errorMessage.includes('RPC error') || errorMessage.includes('jsonrpc')) {
       throw new RpcError({ message: `${operation} failed: ${error.message}`, params });
     }
 
