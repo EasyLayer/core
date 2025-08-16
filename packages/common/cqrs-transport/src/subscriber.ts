@@ -54,9 +54,10 @@ export class Subscriber implements IMessageSource<BasicEvent<EventBasePayload>>,
     // that the events do not have time to be stored in the EventStore.
     // They then commit, but they may simply not have time to insert into the database.
     // await new Promise((resolve) => setTimeout(resolve, 0));
-    setTimeout(() => {
-      this.log.debug('Forwarding event to bridge', { args: { event } });
-      this.bridge.next(event);
-    }, 0);
+    // setTimeout(() => {
+    //   this.log.debug('Forwarding event to bridge', { args: { event } });
+    //   this.bridge.next(event);
+    // }, 0);
+    this.bridge.next(event);
   }
 }
