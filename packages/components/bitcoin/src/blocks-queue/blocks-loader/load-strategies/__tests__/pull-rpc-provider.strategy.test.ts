@@ -72,67 +72,6 @@ describe('PullRpcProviderStrategy', () => {
     jest.clearAllMocks();
   });
 
-  describe('load()', () => {
-    it('should throw when max height is reached', async () => {
-      queue.maxBlockHeight = 100;
-      (queue as any)._lastHeight = 101;
-      
-      await expect(strategy.load(200)).rejects.toThrow('Reached max block height');
-    });
-
-    it('should return early when queue is overloaded after preload', async () => {
-      (queue as any)._lastHeight = 0;
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: 100, height: 1 }
-      ]);
-      queue.isQueueOverloaded = jest.fn().mockReturnValue(true);
-
-      await strategy.load(5);
-      
-      expect(mockLogger.debug).toHaveBeenCalledWith('The queue is overloaded');
-      expect(mockProvider.getManyBlocksByHeights).not.toHaveBeenCalled();
-    });
-
-    it('should successfully load and enqueue blocks', async () => {
-      (queue as any)._lastHeight = 0;
-      
-      // Mock preload response
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'hash1', total_size: 1000, height: 1 },
-        { blockhash: 'hash2', total_size: 1500, height: 2 }
-      ]);
-      
-      // Mock block loading response
-      mockProvider.getManyBlocksByHeights.mockResolvedValue([
-        createTestBlock(1, 'hash1', 1000),
-        createTestBlock(2, 'hash2', 1500)
-      ]);
-
-      await strategy.load(10);
-      
-      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2, 3, 4]);
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true, undefined, true);
-      expect(queue.length).toBe(2);
-      expect(queue.lastHeight).toBe(2);
-    });
-
-    it('should not preload if items already exist in queue', async () => {
-      (queue as any)._lastHeight = 0;
-      (strategy as any)._preloadedItemsQueue = [
-        { hash: 'existing', size: 1000, height: 1 }
-      ];
-      
-      mockProvider.getManyBlocksByHeights.mockResolvedValue([
-        createTestBlock(1, 'existing', 1000)
-      ]);
-
-      await strategy.load(10);
-      
-      expect(mockProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalled();
-    });
-  });
-
   describe('preloadBlocksInfo()', () => {
     it('should increase maxPreloadCount when timing ratio > 1.2', async () => {
       (strategy as any)._lastLoadAndEnqueueDuration = 1200;

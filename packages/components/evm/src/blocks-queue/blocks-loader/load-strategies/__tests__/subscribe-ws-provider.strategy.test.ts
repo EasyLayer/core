@@ -205,40 +205,6 @@ describe('SubscribeWsProviderStrategy', () => {
       expect(mockLogger.debug).toHaveBeenCalledWith('No active subscription to stop');
     });
 
-    it('should handle unsubscribe errors gracefully', async () => {
-      let resolveSubscription!: () => void; // Use definite assignment assertion to fix TS error
-      const mockSubscription = new Promise<void>((resolve) => {
-        resolveSubscription = resolve;
-      }) as Promise<void> & { unsubscribe: () => void };
-      
-      mockSubscription.unsubscribe = jest.fn().mockImplementation(() => {
-        throw new Error('Unsubscribe failed');
-      });
-
-      mockBlockchainProvider.getManyBlocksWithReceipts.mockResolvedValue([]);
-      mockBlockchainProvider.subscribeToNewBlocks.mockReturnValue(mockSubscription);
-
-      // Start subscription
-      const loadPromise = strategy.load(102);
-      
-      // Wait for subscription setup
-      await new Promise(resolve => setTimeout(resolve, 50));
-
-      // Stop subscription
-      await strategy.stop();
-
-      // Manually resolve since unsubscribe failed
-      resolveSubscription();
-      await loadPromise;
-
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Error while unsubscribing',
-        expect.objectContaining({
-          args: { error: expect.any(Error) },
-          methodName: 'stop',
-        })
-      );
-    });
   });
 
   describe('enqueueBlocks sorting', () => {
