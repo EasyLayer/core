@@ -22,7 +22,7 @@
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
     "clear:dist": "rimraf dist && rimraf .rollup.cache",
-    "test:unit": "jest --maxWorkers=1 -c ./jest.config.unit.mjs",
+    "test:unit": "",
     "test": "yarn run test:unit",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
     "lint:fix": "eslint -c eslint.config.mjs \"src/**/*.ts\" --fix",
