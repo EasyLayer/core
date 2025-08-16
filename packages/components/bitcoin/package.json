@@ -19,9 +19,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "clear": "yarn run clear:dist && yarn run clear:node_modules",
+    "clear": "yarn clear:native && yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
     "clear:dist": "rimraf dist && rimraf .rollup.cache",
+    "clear:native": "rimraf ./bitcoin-merkle-native/target && rimraf ./bitcoin-merkle-native/index.*.node",
     "test:unit": "jest --maxWorkers=1 -c ./jest.config.unit.mjs",
     "test": "yarn run test:unit",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
@@ -29,7 +30,9 @@
     "format": "prettier -с prettier.config.mjs --write \"src/**/*.ts\"",
     "build:cjs": "tsc -b tsconfig.cjs.json",
     "build:esm": "rollup --config",
-    "build": "yarn build:cjs && yarn build:esm",
+    "build:native": "npx @napi-rs/cli build --platform --release --config bitcoin-merkle-native/napi.config.js --cargo-cwd bitcoin-merkle-native bitcoin-merkle-native",
+    "copy:native": "ts-node scripts/copy-native-packages.ts",
+    "build": "yarn build:native && yarn build:cjs && yarn build:esm && yarn copy:native",
     "prepublishOnly": "yarn clear:dist && yarn build"
   },
   "author": "Yaroslav Pavliuk",
@@ -59,6 +62,7 @@
     "zeromq": "6.5.0"
   },
   "devDependencies": {
+    "@napi-rs/cli": "2.16.0",
     "@nestjs/testing": "10.2.10",
     "@rollup/plugin-typescript": "11.1.6",
     "@types/bip32": "2.0.0",

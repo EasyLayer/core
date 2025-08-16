@@ -43,6 +43,13 @@ package-lock.json
 *.heapsnapshot
 
 ############################
+# Rust
+############################
+
+*.node
+target
+
+############################
 # Tests
 ############################
 
@@ -172,3 +179,4 @@ typedoc
 
 .rollup.cache
 .rollup
+

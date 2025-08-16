@@ -4,7 +4,7 @@ import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequest
 import type { NetworkProvider, MempoolProvider } from './providers';
 import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
 import { BitcoinNormalizer } from './normalizer';
-import { BitcoinMerkleVerifier } from './merkle-verifier';
+import { BitcoinMerkleVerifierWrapper as BitcoinMerkleVerifier } from './merkle-verifier';
 import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
 
 /**

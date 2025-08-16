@@ -1,0 +1,16 @@
+[package]
+name = "bitcoin-merkle-native"
+version = "0.9.5"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi8"] }
+napi-derive = "2"
+sha2 = "0.10"
+hex = "0.4"
+
+[build-dependencies]
+napi-build = "2"

@@ -6,7 +6,16 @@
     "outDir": "dist",
     "declaration": true,
     "sourceMap": false,
-    "declarationMap": false
+    "declarationMap": false,
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
   },
   "references": [
     { "path": "../../common/cqrs/tsconfig.cjs.json" },
@@ -17,6 +26,7 @@
   "include": ["src"],
   "exclude": [
     "dist",
+    "bitcoin-merkle-native",
     "**/*.test.ts",
     "**/__tests__",
   ],

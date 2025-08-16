@@ -21,7 +21,7 @@
     ]
   },
   "scripts": {
-    "clear": "lerna run clear:dist && lerna run clear:node_modules && rimraf node_modules && yarn cache clean --all",
+    "clear": "lerna run clear && rimraf node_modules && yarn cache clean --all",
     "clear:node_modules": "lerna run  clear:node_modules && rimraf node_modules",
     "clear:dist": "lerna run clear:dist",
     "build": "yarn prepare && lerna run build --stream",

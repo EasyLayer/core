@@ -4,11 +4,12 @@
     { "path": "../../common/cqrs/tsconfig.cjs.json" },
     { "path": "../../common/logger/tsconfig.cjs.json" },
     { "path": "../../common/exponential-interval-async/tsconfig.cjs.json" },
-    { "path": "../../common/shared-interfaces/tsconfig.cjs.json" }
+    { "path": "../../common/shared-interfaces/tsconfig.cjs.json" },
   ],
   "include": ["src"],
   "exclude": [
     "dist",
+    "bitcoin-merkle-native",
     "**/*.test.ts",
     "**/__tests__"
   ]
