@@ -45,8 +45,8 @@ export class Network extends AggregateRoot {
     blockHeight: number;
     options?: {
       snapshotsEnabled?: boolean;
-      pruneOldSnapshots?: boolean;
-      allowEventsPruning?: boolean;
+      allowPruning?: boolean;
+      snapshotInterval?: number;
     };
   }) {
     super(aggregateId, blockHeight, options);

@@ -138,9 +138,7 @@ export class EventStoreModule {
         {
           provide: EventStoreWriteRepository,
           useFactory: async (logger, context, dataSource, readRepository) => {
-            return new EventStoreWriteRepository(logger, context, dataSource, name, readRepository, {
-              snapshotInterval,
-            });
+            return new EventStoreWriteRepository(logger, context, dataSource, name, readRepository, restOptions);
           },
           inject: [AppLogger, ContextService, getDataSourceToken(name), EventStoreReadRepository],
         },

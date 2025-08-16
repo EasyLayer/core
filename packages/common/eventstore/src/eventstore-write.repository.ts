@@ -11,7 +11,7 @@ import { AggregateRoot, EventStatus } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { ContextService } from '@easylayer/common/context';
 import { EventDataParameters, serialize } from './event-data.model';
-import { toSnapshot } from './snapshots.model';
+import { serializeSnapshot } from './snapshots.model';
 import { EventStoreReadRepository } from './eventstore-read.repository';
 
 type DriverType = 'sqlite' | 'postgres';
@@ -19,7 +19,6 @@ type DriverType = 'sqlite' | 'postgres';
 @Injectable()
 export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> implements OnModuleDestroy {
   private isSqlite: boolean;
-  private snapshotInterval: number = 50;
   private sqliteBatchSize: number = 999;
   private commitTimer: ExponentialTimer | null = null;
   private pendingToCommitAggregates: Map<string, T> = new Map();
@@ -31,14 +30,11 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     private readonly dataSource: DataSource,
     private readonly dataSourceName: string,
     private readonly readRepository: EventStoreReadRepository,
-    config: { sqliteBatchSize?: number; snapshotInterval?: number }
+    config: { sqliteBatchSize?: number }
   ) {
     this.isSqlite = this.dataSource.options.type === 'sqlite';
     this.dbDriver = this.isSqlite ? 'sqlite' : 'postgres';
 
-    if (config.snapshotInterval) {
-      this.snapshotInterval = config.snapshotInterval;
-    }
     if (config.sqliteBatchSize) {
       this.sqliteBatchSize = config.sqliteBatchSize;
     }
@@ -578,34 +574,23 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
   private async onSaveUpdateSnapshot(aggregate: T) {
     try {
       // Check if snapshots are enabled for this aggregate
-      if (!aggregate.snapshotsEnabled) {
+      if (!aggregate.canMakeSnapshot()) {
+        // return or throw
         return;
       }
 
-      if (aggregate.versionsFromSnapshot < this.snapshotInterval) {
-        return;
-      }
-
-      // Serialize the cloned aggregate - toSnapshot() now handles compression internally
-      aggregate.resetSnapshotCounter();
-      const snapshot = await toSnapshot(aggregate as any, this.dbDriver);
+      // Serialize the cloned aggregate - serializeSnapshot() now handles compression internally
+      const snapshot = await serializeSnapshot(aggregate as any, this.dbDriver);
 
       const repository = this.getRepository('snapshots');
 
       // IMPORTANT: we keep all snapshots instead of overwriting
       await repository.createQueryBuilder().insert().values(snapshot).updateEntity(false).execute();
 
-      this.log.debug('Snapshot created', {
-        args: {
-          aggregateId: aggregate.aggregateId,
-          blockHeight: aggregate.lastBlockHeight,
-          version: aggregate.version,
-          compressed: snapshot.isCompressed || false,
-        },
-      });
+      aggregate.resetSnapshotCounter();
 
       // Prune old snapshots if enabled for this aggregate
-      if (aggregate.pruneOldSnapshots) {
+      if (aggregate.allowPruning) {
         await this.pruneOldSnapshots(aggregate.aggregateId, snapshot.blockHeight);
       }
     } catch (error) {
@@ -712,7 +697,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
    */
   async pruneEventsToBlockHeight(aggregate: T, pruneToBlockHeight: number): Promise<void> {
     // Check if pruning is allowed for this aggregate
-    if (!aggregate.allowEventsPruning) {
+    if (!aggregate.allowPruning) {
       throw new Error(`Event pruning is disabled for aggregate: ${aggregate.aggregateId}`);
     }
 

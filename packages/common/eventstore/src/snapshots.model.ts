@@ -86,7 +86,7 @@ export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): Entity
   });
 };
 
-export async function toSnapshot<T extends AggregateRoot<BasicEvent<EventBasePayload>>>(
+export async function serializeSnapshot<T extends AggregateRoot<BasicEvent<EventBasePayload>>>(
   aggregate: T,
   dbDriver: DriverType = 'postgres'
 ): Promise<SnapshotParameters> {
@@ -138,7 +138,7 @@ export async function toSnapshot<T extends AggregateRoot<BasicEvent<EventBasePay
   return model;
 }
 
-export async function fromSnapshot(
+export async function deserializeSnapshot(
   snapshotData: SnapshotParameters,
   dbDriver: DriverType = 'postgres'
 ): Promise<SnapshotParameters> {

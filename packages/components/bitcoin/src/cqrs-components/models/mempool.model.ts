@@ -79,8 +79,8 @@ export class Mempool extends AggregateRoot {
     feeRatePrecision?: number;
     options?: {
       snapshotsEnabled?: boolean;
-      pruneOldSnapshots?: boolean;
-      allowEventsPruning?: boolean;
+      allowPruning?: boolean;
+      snapshotInterval?: number;
     };
   }) {
     super(aggregateId, blockHeight, options);

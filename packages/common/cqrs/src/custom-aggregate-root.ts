@@ -30,18 +30,18 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
 
   // Snapshot control parameters
   private _snapshotsEnabled: boolean = true;
-  private _pruneOldSnapshots: boolean = false;
+  private _snapshotInterval: number = 1000;
 
-  // Event pruning control parameter
-  private _allowEventsPruning: boolean = false;
+  // Pruning control parameter
+  private _allowPruning: boolean = false;
 
   constructor(
     aggregateId: string,
     lastBlockHeight = -1,
     options?: {
       snapshotsEnabled?: boolean;
-      pruneOldSnapshots?: boolean;
-      allowEventsPruning?: boolean;
+      allowPruning?: boolean;
+      snapshotInterval?: number;
     }
   ) {
     if (!aggregateId) throw new Error('aggregateId is required');
@@ -52,11 +52,11 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     if (options?.snapshotsEnabled !== undefined) {
       this._snapshotsEnabled = options.snapshotsEnabled;
     }
-    if (options?.pruneOldSnapshots !== undefined) {
-      this._pruneOldSnapshots = options.pruneOldSnapshots;
+    if (options?.allowPruning !== undefined) {
+      this._allowPruning = options.allowPruning;
     }
-    if (options?.allowEventsPruning !== undefined) {
-      this._allowEventsPruning = options.allowEventsPruning;
+    if (options?.snapshotInterval !== undefined) {
+      this._snapshotInterval = options.snapshotInterval;
     }
   }
 
@@ -72,6 +72,9 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   get versionsFromSnapshot() {
     return this._versionsFromSnapshot;
   }
+  get snapshotInterval() {
+    return this._snapshotInterval;
+  }
 
   /**
    * Indicates whether old events can be pruned for this aggregate.
@@ -79,12 +82,16 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    * to save storage space, provided there are appropriate snapshots.
    * When disabled, all events are preserved for complete audit trail.
    *
-   * IMPORTANT: Event pruning should only be enabled for aggregates that:
+   * Also, indicates whether old snapshots should be automatically pruned when creating new ones.
+   * When enabled, only the latest snapshot is kept to save storage space.
+   * When disabled, all snapshots are preserved for historical access.
+   *
+   * IMPORTANT: Pruning should only be enabled for aggregates that:
    * 1. Can safely reconstruct state from any point in event history
    * 2. Don't require complete event audit trail for compliance
    */
-  get allowEventsPruning(): boolean {
-    return this._allowEventsPruning;
+  get allowPruning(): boolean {
+    return this._allowPruning;
   }
 
   /**
@@ -93,15 +100,6 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    */
   get snapshotsEnabled(): boolean {
     return this._snapshotsEnabled;
-  }
-
-  /**
-   * Indicates whether old snapshots should be automatically pruned when creating new ones.
-   * When enabled, only the latest snapshot is kept to save storage space.
-   * When disabled, all snapshots are preserved for historical access.
-   */
-  get pruneOldSnapshots(): boolean {
-    return this._pruneOldSnapshots;
   }
 
   // Method to reset snapshot counter (called after creating snapshot)
@@ -170,6 +168,32 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
         wrapper.isSaved = true;
       }
     }
+  }
+
+  /**
+   * Checks if the aggregate is ready for snapshot creation.
+   * Snapshot cannot be created if there are unsaved or uncommitted events.
+   *
+   * @returns true if snapshot can be safely created
+   */
+  public canMakeSnapshot(): boolean {
+    // Check if snapshots are enabled for this aggregate
+    if (!this.snapshotsEnabled) {
+      return false;
+    }
+
+    // Check if snapshot interval is reached
+    if (this.versionsFromSnapshot < this.snapshotInterval) {
+      return false;
+    }
+
+    // IMPORTANT: Cannot make snapshot if there are any events in INTERNAL_EVENTS
+    // These events need to be saved and published first
+    if (this[INTERNAL_EVENTS].length > 0) {
+      return false;
+    }
+
+    return true;
   }
 
   public async loadFromHistory<T extends E>(history: HistoryEvent<T>[]): Promise<void> {

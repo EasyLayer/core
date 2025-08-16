@@ -5,7 +5,7 @@ import type { ObjectLiteral } from 'typeorm';
 import { AggregateRoot, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { EventDataParameters, deserialize } from './event-data.model';
-import { toSnapshot, SnapshotInterface, SnapshotParameters, fromSnapshot } from './snapshots.model';
+import { serializeSnapshot, SnapshotInterface, SnapshotParameters, deserializeSnapshot } from './snapshots.model';
 import { CompressionMetrics } from './compression.utils';
 
 type DriverType = 'sqlite' | 'postgres';
@@ -151,7 +151,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     // its relevance by getting events according to a version higher than that of the snapshot.
 
     // fromSnapshot() handles decompression internally and returns object
-    const decompressedSnapshot = await fromSnapshot(snapshot, this.dbDriver);
+    const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
     // Aggregate receives object directly in loadFromSnapshot
     model.loadFromSnapshot(decompressedSnapshot);
@@ -377,7 +377,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       });
 
       // fromSnapshot() handles decompression internally and returns object
-      const decompressedSnapshot = await fromSnapshot(snapshot, this.dbDriver);
+      const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
       // Aggregate receives object directly in loadFromSnapshot
       model.loadFromSnapshot(decompressedSnapshot);
@@ -387,13 +387,13 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       this.log.debug('Exact snapshot matches blockHeight', { args: { aggregateId, blockHeight } });
 
       // fromSnapshot() handles decompression internally and returns object
-      const decompressedSnapshot = await fromSnapshot(snapshot, this.dbDriver);
+      const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
       // Aggregate receives object directly in loadFromSnapshot
       model.loadFromSnapshot(decompressedSnapshot);
     }
 
-    return toSnapshot(model as any, this.dbDriver);
+    return serializeSnapshot(model as any, this.dbDriver);
   }
 
   public async getManySnapshotByHeight<K extends T>(models: K[], blockHeight: number): Promise<SnapshotParameters[]> {
