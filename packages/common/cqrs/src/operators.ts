@@ -2,7 +2,7 @@ import type { Observable, OperatorFunction } from 'rxjs';
 import { defer, of, from, mergeMap, map, catchError, delay, throwError, retryWhen } from 'rxjs';
 import type { Type } from '@nestjs/common';
 import { filter } from 'rxjs/operators';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 /**
  * Configuration options for retry behavior.
@@ -22,7 +22,7 @@ export interface RetryOptions {
  * Parameters for executing a command when an event is received, with retry logic only.
  * @template T The event type.
  */
-export interface ExecuteParams<T extends BasicEvent<EventBasePayload>> {
+export interface ExecuteParams<T extends DomainEvent = DomainEvent> {
   /**
    * The event class to filter for.
    */
@@ -37,7 +37,7 @@ export interface ExecuteParams<T extends BasicEvent<EventBasePayload>> {
  * Parameters for executing a command with rollback and optional retry when an event is received.
  * @template T The event type.
  */
-export interface ExecuteWithRollbackParams<T extends BasicEvent<EventBasePayload>> {
+export interface ExecuteWithRollbackParams<T extends DomainEvent = DomainEvent> {
   /**
    * The event class to filter for.
    */
@@ -72,7 +72,7 @@ const exponentialBackoff = (attempt: number, base: number = 1000) => Math.pow(2,
  * @param baseDelay Optional base delay for exponential backoff.
  * @returns An RxJS operator function.
  */
-export function executeWithRetry<T extends BasicEvent<EventBasePayload>>(
+export function executeWithRetry<T extends DomainEvent = DomainEvent>(
   { event, command }: ExecuteParams<T>,
   baseDelay: number = 1000
 ): OperatorFunction<T, T> {
@@ -107,7 +107,7 @@ export function executeWithRetry<T extends BasicEvent<EventBasePayload>>(
  * @param params Event and command configuration.
  * @returns An RxJS operator function.
  */
-export function executeWithSkip<T extends BasicEvent<EventBasePayload>>({
+export function executeWithSkip<T extends DomainEvent = DomainEvent>({
   event,
   command,
 }: ExecuteParams<T>): OperatorFunction<T, T> {
@@ -133,7 +133,7 @@ export function executeWithSkip<T extends BasicEvent<EventBasePayload>>({
  * @param params Event, command, rollback, and retry configuration.
  * @returns An RxJS operator function.
  */
-export function executeWithRollback<T extends BasicEvent<EventBasePayload>>({
+export function executeWithRollback<T extends DomainEvent = DomainEvent>({
   event,
   command,
   rollback,
@@ -171,7 +171,7 @@ export function executeWithRollback<T extends BasicEvent<EventBasePayload>>({
  * @param types One or more event classes to filter.
  * @returns An RxJS operator function narrowing the stream.
  */
-export function ofType<TInput extends BasicEvent<EventBasePayload>, TOutput extends TInput>(
+export function ofType<TInput extends DomainEvent, TOutput extends TInput>(
   ...types: Type<TOutput>[]
 ): (source: Observable<TInput>) => Observable<TOutput> {
   const isInstanceOf = (event: TInput): event is TOutput => {

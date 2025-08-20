@@ -1,5 +1,5 @@
 import { EntitySchema } from 'typeorm';
-import type { AggregateRoot, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { CompressionUtils, CompressionMetrics } from './compression.utils';
 
 type DriverType = 'sqlite' | 'postgres';
@@ -86,7 +86,30 @@ export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): Entity
   });
 };
 
-export async function serializeSnapshot<T extends AggregateRoot<BasicEvent<EventBasePayload>>>(
+export async function deserializeSnapshot(
+  snapshotData: SnapshotParameters,
+  dbDriver: DriverType = 'postgres'
+): Promise<SnapshotParameters> {
+  const isSqlite = dbDriver === 'sqlite';
+  let finalPayload = snapshotData.payload;
+
+  // Decompress payload if it was compressed and we're not using SQLite
+  if (!isSqlite && snapshotData.isCompressed && typeof snapshotData.payload === 'string') {
+    try {
+      finalPayload = await CompressionUtils.decompressAndParse(snapshotData.payload);
+    } catch (error) {
+      // Use original payload as fallback
+    }
+  }
+
+  return {
+    ...snapshotData,
+    payload: finalPayload,
+    isCompressed: false, // After decompression, it's no longer compressed
+  };
+}
+
+export async function serializeSnapshot<T extends AggregateRoot<DomainEvent>>(
   aggregate: T,
   dbDriver: DriverType = 'postgres'
 ): Promise<SnapshotParameters> {
@@ -105,61 +128,27 @@ export async function serializeSnapshot<T extends AggregateRoot<BasicEvent<Event
   }
 
   // Get JSON string from aggregate
-  const payloadString = aggregate.toSnapshotPayload();
+  const payloadString = aggregate.toSnapshot();
   const isSqlite = dbDriver === 'sqlite';
   let finalPayload: string = payloadString;
   let isCompressed = false;
 
   // Compress payload for PostgreSQL if beneficial
-  if (!isSqlite && payloadString) {
-    if (CompressionUtils.shouldCompress(payloadString)) {
-      try {
-        const startTime = Date.now();
-        const result = await CompressionUtils.compress(payloadString);
-        finalPayload = result.data;
-        isCompressed = true;
-
-        CompressionMetrics.recordCompression(result, Date.now() - startTime);
-      } catch (error) {
-        CompressionMetrics.recordError();
-        // Keep original payload
-      }
+  if (!isSqlite && payloadString && CompressionUtils.shouldCompress(payloadString)) {
+    try {
+      const result = await CompressionUtils.compress(payloadString);
+      finalPayload = result.data;
+      isCompressed = true;
+    } catch (error) {
+      // Keep original payload
     }
   }
 
-  const model: SnapshotParameters = {
+  return {
     aggregateId,
     blockHeight: lastBlockHeight,
     version,
     payload: finalPayload,
     isCompressed,
-  };
-
-  return model;
-}
-
-export async function deserializeSnapshot(
-  snapshotData: SnapshotParameters,
-  dbDriver: DriverType = 'postgres'
-): Promise<SnapshotParameters> {
-  const isSqlite = dbDriver === 'sqlite';
-  let finalPayload = snapshotData.payload;
-
-  // Decompress payload if it was compressed and we're not using SQLite
-  if (!isSqlite && snapshotData.isCompressed && typeof snapshotData.payload === 'string') {
-    try {
-      const startTime = Date.now();
-      finalPayload = await CompressionUtils.decompressAndParse(snapshotData.payload);
-      CompressionMetrics.recordDecompression(Date.now() - startTime);
-    } catch (error) {
-      CompressionMetrics.recordError();
-      // Use original payload as fallback
-    }
-  }
-
-  return {
-    ...snapshotData,
-    payload: finalPayload,
-    isCompressed: false, // After decompression, it's no longer compressed
   };
 }

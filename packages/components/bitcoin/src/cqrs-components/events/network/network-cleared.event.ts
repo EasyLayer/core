@@ -1,6 +1,6 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 
-interface BitcoinNetworkClearedEventPayload extends EventBasePayload {}
+interface BitcoinNetworkClearedEventPayload {}
 
 @SystemEvent()
 export class BitcoinNetworkClearedEvent extends BasicEvent<BitcoinNetworkClearedEventPayload> {}

@@ -7,7 +7,7 @@ import {
   QUERY_METADATA,
   QUERY_HANDLER_METADATA,
 } from '@nestjs/cqrs/dist/decorators/constants';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 /**
  * Sets metadata for an event.
@@ -16,7 +16,7 @@ import type { BasicEvent, EventBasePayload } from './basic-event';
  *
  * @param event The constructor of the event.
  */
-export const setEventMetadata = (event: new (...args: any[]) => BasicEvent<EventBasePayload>): void => {
+export const setEventMetadata = (event: new (...args: any[]) => DomainEvent): void => {
   // IMPORTANT: Method always overwrite the metadata to ensure it is set correctly.
   Reflect.defineMetadata(EVENT_METADATA, { id: event.name }, event);
 };
@@ -30,7 +30,7 @@ export const setEventMetadataByHandlers = (eventHandlers: Type<IEventHandler>[])
   eventHandlers.forEach((handler: Type<IEventHandler>) => {
     // IMPORTANT: One Event can have few EventHandlers
     const events = Reflect.getMetadata(EVENTS_HANDLER_METADATA, handler) || [];
-    events.forEach((event: Type<BasicEvent<EventBasePayload>>) => {
+    events.forEach((event: Type<DomainEvent>) => {
       setEventMetadata(event);
     });
   });

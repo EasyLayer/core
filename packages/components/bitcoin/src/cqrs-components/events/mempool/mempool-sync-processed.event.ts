@@ -1,6 +1,6 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 import type { Transaction } from '../../../blockchain-provider';
-export interface BitcoinMempoolSyncProcessedEventPayload extends EventBasePayload {
+export interface BitcoinMempoolSyncProcessedEventPayload {
   loadedTransactions: Array<{
     txid: string;
     transaction: Transaction;

@@ -1,6 +1,6 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 
-export interface BitcoinMempoolInitializedEventPayload extends EventBasePayload {
+export interface BitcoinMempoolInitializedEventPayload {
   allTxidsFromNode: string[];
   isSynchronized?: boolean;
   // Provider mapping data for multi-provider support

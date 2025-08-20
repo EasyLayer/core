@@ -102,44 +102,50 @@ export class Network extends AggregateRoot {
     return this.chain.toArray();
   }
 
-  protected toJsonPayload(): any {
-    return {
-      // Convert Blockchain to an array of blocks for serialization
-      chain: this.chain.toArray(),
-      maxSize: this.__maxSize,
-    };
-  }
+  // protected toJsonPayload(): any {
+  //   return {
+  //     // Convert Blockchain to an array of blocks for serialization
+  //     chain: this.chain.toArray(),
+  //     maxSize: this.__maxSize,
+  //   };
+  // }
 
-  protected fromSnapshot(state: any): void {
-    if (state.chain && Array.isArray(state.chain)) {
-      this.chain = new Blockchain({
-        maxSize: state.maxSize || this.__maxSize,
-        baseBlockHeight: this._lastBlockHeight,
-      });
-      this.chain.fromArray(state.chain);
-    }
+  // protected fromSnapshot(state: any): void {
+  //   if (state.chain && Array.isArray(state.chain)) {
+  //     this.chain = new Blockchain({
+  //       maxSize: state.maxSize || this.__maxSize,
+  //       baseBlockHeight: this._lastBlockHeight,
+  //     });
+  //     this.chain.fromArray(state.chain);
+  //   }
 
-    Object.setPrototypeOf(this, Network.prototype);
-  }
+  //   Object.setPrototypeOf(this, Network.prototype);
+  // }
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
     await this.apply(
-      new EvmNetworkInitializedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: startHeight,
-      })
+      new EvmNetworkInitializedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: startHeight,
+        },
+        {}
+      )
     );
   }
 
   // Method to clear all blockchain data(for database cleaning)
   public async clearChain({ requestId }: { requestId: string }) {
     await this.apply(
-      new EvmNetworkClearedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: -1,
-      })
+      new EvmNetworkClearedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: -1,
+        },
+        {}
+      )
     );
   }
 
@@ -149,12 +155,14 @@ export class Network extends AggregateRoot {
     }
 
     return await this.apply(
-      new EvmNetworkBlocksAddedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
-        blocks,
-      })
+      new EvmNetworkBlocksAddedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
+        },
+        { blocks }
+      )
     );
   }
 
@@ -188,12 +196,14 @@ export class Network extends AggregateRoot {
 
       if (isForkPoint) {
         return await this.apply(
-          new EvmNetworkReorganizedEvent({
-            aggregateId: this.aggregateId,
-            blockHeight: reorgHeight,
-            requestId,
-            blocks,
-          })
+          new EvmNetworkReorganizedEvent(
+            {
+              aggregateId: this.aggregateId,
+              blockHeight: reorgHeight,
+              requestId,
+            },
+            { blocks }
+          )
         );
       }
     }
@@ -210,9 +220,7 @@ export class Network extends AggregateRoot {
     });
   }
 
-  private onEvmNetworkInitializedEvent({ payload }: EvmNetworkInitializedEvent) {
-    const { blockHeight } = payload;
-
+  private onEvmNetworkInitializedEvent({ blockHeight, payload }: EvmNetworkInitializedEvent) {
     // IMPORTANT: In cases where the user specified a height less
     // than what was already saved in the model
     this.chain.truncateToBlock(Number(blockHeight));
@@ -242,8 +250,7 @@ export class Network extends AggregateRoot {
     );
   }
 
-  private onEvmNetworkReorganizedEvent({ payload }: EvmNetworkReorganizedEvent) {
-    const { blockHeight } = payload;
+  private onEvmNetworkReorganizedEvent({ blockHeight, payload }: EvmNetworkReorganizedEvent) {
     // Here we cut full at once in height
     // This method is idempotent
     this.chain.truncateToBlock(Number(blockHeight));

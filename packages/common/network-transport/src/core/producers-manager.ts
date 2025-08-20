@@ -1,4 +1,4 @@
-import type { BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AppLogger } from '@easylayer/common/logger';
 import type { BaseProducer } from './base-producer';
 import type { OutgoingMessage } from '../shared';
@@ -39,7 +39,7 @@ export class ProducersManager {
   /**
    * Broadcasts an array of CQRS events to all configured producers in parallel.
    */
-  public async broadcast<T extends BasicEvent<EventBasePayload>>(events: T[]) {
+  public async broadcast<T extends DomainEvent>(events: T[]) {
     if (this._producers.length === 0) {
       this.log.debug('No producers to broadcast');
       return;
@@ -100,7 +100,7 @@ export class ProducersManager {
   /**
    * Send a single event to all transports
    */
-  public async sendEvent<T extends BasicEvent<EventBasePayload>>(event: T) {
+  public async sendEvent<T extends DomainEvent>(event: T) {
     this.log.debug('Sending single event', {
       args: { eventType: Object.getPrototypeOf(event).constructor.name },
     });

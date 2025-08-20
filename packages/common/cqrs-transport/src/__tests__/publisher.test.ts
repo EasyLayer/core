@@ -1,20 +1,38 @@
 import { Test } from '@nestjs/testing';
 import { ProducersManager } from '@easylayer/common/network-transport';
 import { LoggerModule } from '@easylayer/common/logger';
-import { BasicEvent, SystemEvent } from '@easylayer/common/cqrs';
-import type { EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent } from '@easylayer/common/cqrs';
+import type { DomainEvent, SystemFields } from '@easylayer/common/cqrs';
 import { Publisher } from '../publisher';
 
-class TestEvent extends BasicEvent<EventBasePayload> {
-  constructor(public readonly payload: EventBasePayload) {
-    super(payload);
+class TestEvent implements DomainEvent {
+  aggregateId: string;
+  requestId: string;
+  blockHeight: number;
+
+  constructor(
+    public readonly payload: any,
+    systemFields: SystemFields
+  ) {
+    this.aggregateId = systemFields.aggregateId;
+    this.requestId = systemFields.requestId;
+    this.blockHeight = systemFields.blockHeight;
   }
 }
 
 @SystemEvent()
-class TestSystemEvent extends BasicEvent<EventBasePayload> {
-  constructor(public readonly payload: EventBasePayload) {
-    super(payload);
+class TestSystemEvent implements DomainEvent {
+  aggregateId: string;
+  requestId: string;
+  blockHeight: number;
+
+  constructor(
+    public readonly payload: any,
+    systemFields: SystemFields
+  ) {
+    this.aggregateId = systemFields.aggregateId;
+    this.requestId = systemFields.requestId;
+    this.blockHeight = systemFields.blockHeight;
   }
 }
 
@@ -45,14 +63,14 @@ describe('Publisher', () => {
 
   describe('publish()', () => {
     it('should broadcast event to external transport', async () => {
-      const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
+      const event = new TestEvent({}, { aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
       await publisher.publish(event);
 
       expect(mockProducersManager.broadcast).toHaveBeenCalledWith([event]);
     });
 
     it('should publish system event to local transport after external broadcast', async () => {
-      const event = new TestSystemEvent({ aggregateId: 'uniq2', blockHeight: 100, requestId: '123' });
+      const event = new TestSystemEvent({}, { aggregateId: 'uniq2', blockHeight: 100, requestId: '123' });
       const eventsSpy = jest.spyOn(publisher['subject$'], 'next');
 
       await publisher.publish(event);
@@ -75,8 +93,8 @@ describe('Publisher', () => {
   describe('publishAll()', () => {
     it('should broadcast all events to external transport', async () => {
       const events = [
-        new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
-        new TestSystemEvent({ aggregateId: 'uniq2', blockHeight: 100, requestId: '123' }),
+        new TestEvent({}, { aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
+        new TestSystemEvent({}, { aggregateId: 'uniq2', blockHeight: 100, requestId: '123' }),
       ];
 
       await publisher.publishAll(events);

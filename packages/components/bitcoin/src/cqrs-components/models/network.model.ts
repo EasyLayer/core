@@ -200,33 +200,33 @@ export class Network extends AggregateRoot {
 
   // ===== SNAPSHOTS =====
 
-  protected toJsonPayload(): any {
-    return {
-      // Convert Blockchain to an array of blocks for serialization
-      chain: this.chain.toArray(),
-      maxSize: this.__maxSize,
-    };
-  }
+  // protected toJsonPayload(): any {
+  //   return {
+  //     // Convert Blockchain to an array of blocks for serialization
+  //     chain: this.chain.toArray(),
+  //     maxSize: this.__maxSize,
+  //   };
+  // }
 
-  protected fromSnapshot(state: any): void {
-    // Safety check for state
-    if (!state || typeof state !== 'object') {
-      return;
-    }
+  // protected fromSnapshot(state: any): void {
+  //   // Safety check for state
+  //   if (!state || typeof state !== 'object') {
+  //     return;
+  //   }
 
-    // Safe restore with type checking
-    this.__maxSize = typeof state.maxSize === 'number' ? state.maxSize : this.__maxSize;
+  //   // Safe restore with type checking
+  //   this.__maxSize = typeof state.maxSize === 'number' ? state.maxSize : this.__maxSize;
 
-    if (state.chain && Array.isArray(state.chain)) {
-      this.chain = new Blockchain({
-        maxSize: this.__maxSize,
-        baseBlockHeight: this._lastBlockHeight,
-      });
-      this.chain.fromArray(state.chain);
-    }
+  //   if (state.chain && Array.isArray(state.chain)) {
+  //     this.chain = new Blockchain({
+  //       maxSize: this.__maxSize,
+  //       baseBlockHeight: this._lastBlockHeight,
+  //     });
+  //     this.chain.fromArray(state.chain);
+  //   }
 
-    Object.setPrototypeOf(this, Network.prototype);
-  }
+  //   Object.setPrototypeOf(this, Network.prototype);
+  // }
 
   // ===== PUBLIC COMMAND METHODS =====
 
@@ -237,11 +237,14 @@ export class Network extends AggregateRoot {
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
     // Event payload size estimation: ~1KB (minimal data)
     await this.apply(
-      new BitcoinNetworkInitializedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: startHeight,
-      })
+      new BitcoinNetworkInitializedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: startHeight,
+        },
+        {}
+      )
     );
   }
 
@@ -252,11 +255,14 @@ export class Network extends AggregateRoot {
   public async clearChain({ requestId }: { requestId: string }) {
     // Event payload size estimation: ~1KB (minimal data)
     await this.apply(
-      new BitcoinNetworkClearedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: -1,
-      })
+      new BitcoinNetworkClearedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: -1,
+        },
+        {}
+      )
     );
   }
 
@@ -274,12 +280,14 @@ export class Network extends AggregateRoot {
     // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
     // Total event size: ~9.6MB per blocks batch
     return await this.apply(
-      new BitcoinNetworkBlocksAddedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: blocks[blocks.length - 1]?.height || -1,
-        blocks,
-      })
+      new BitcoinNetworkBlocksAddedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: blocks[blocks.length - 1]?.height || -1,
+        },
+        { blocks }
+      )
     );
   }
 
@@ -322,12 +330,14 @@ export class Network extends AggregateRoot {
         // - blocks: ~d blocks × 96KB where d = reorg depth
         // Total event size: ~d × 96KB per reorganization
         return await this.apply(
-          new BitcoinNetworkReorganizedEvent({
-            aggregateId: this.aggregateId,
-            blockHeight: reorgHeight,
-            requestId,
-            blocks,
-          })
+          new BitcoinNetworkReorganizedEvent(
+            {
+              aggregateId: this.aggregateId,
+              blockHeight: reorgHeight,
+              requestId,
+            },
+            { blocks }
+          )
         );
       }
     }
@@ -346,9 +356,7 @@ export class Network extends AggregateRoot {
 
   // ===== IDEMPOTENT EVENT HANDLERS =====
 
-  private onBitcoinNetworkInitializedEvent({ payload }: BitcoinNetworkInitializedEvent) {
-    const { blockHeight } = payload;
-
+  private onBitcoinNetworkInitializedEvent({ blockHeight, payload }: BitcoinNetworkInitializedEvent) {
     // IMPORTANT: In cases where the user specified a height less
     // than what was already saved in the model
     this.chain.truncateToBlock(Number(blockHeight));
@@ -375,8 +383,7 @@ export class Network extends AggregateRoot {
     );
   }
 
-  private onBitcoinNetworkReorganizedEvent({ payload }: BitcoinNetworkReorganizedEvent) {
-    const { blockHeight } = payload;
+  private onBitcoinNetworkReorganizedEvent({ blockHeight, payload }: BitcoinNetworkReorganizedEvent) {
     // Here we cut full at once in height
     // This method is idempotent
     this.chain.truncateToBlock(Number(blockHeight));

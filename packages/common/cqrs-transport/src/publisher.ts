@@ -1,12 +1,12 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import { BasicEvent, EventBasePayload, IEventPublisher, isSystemEvent } from '@easylayer/common/cqrs';
+import { DomainEvent, IEventPublisher, isSystemEvent } from '@easylayer/common/cqrs';
 import { ProducersManager } from '@easylayer/common/network-transport';
 import { Subject } from 'rxjs';
 
 @Injectable()
-export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> {
-  private subject$ = new Subject<BasicEvent<EventBasePayload>>();
+export class Publisher implements IEventPublisher<DomainEvent> {
+  private subject$ = new Subject<DomainEvent>();
 
   constructor(
     @Inject(ProducersManager)
@@ -18,7 +18,7 @@ export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> 
     return this.subject$.asObservable();
   }
 
-  async publish<T extends BasicEvent<EventBasePayload>>(event: T): Promise<void> {
+  async publish<T extends DomainEvent>(event: T): Promise<void> {
     this.log.debug('Publishing single event', { args: { event } });
     // IMPORTANT: don't need catch here,
     // if some event makes a mistake, the commit method will roll back
@@ -33,7 +33,7 @@ export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> 
     // }
   }
 
-  async publishAll<T extends BasicEvent<EventBasePayload>>(events: T[]): Promise<void> {
+  async publishAll<T extends DomainEvent>(events: T[]): Promise<void> {
     this.log.debug('Publishing batch of events', { args: { count: events.length } });
     // const systemEvents: T[] = events.filter(isSystemEvent);
 
@@ -47,7 +47,7 @@ export class Publisher implements IEventPublisher<BasicEvent<EventBasePayload>> 
     await this.publishToLocalTransport(events);
   }
 
-  private async publishToLocalTransport<T extends BasicEvent<EventBasePayload>>(events: T[]): Promise<void> {
+  private async publishToLocalTransport<T extends DomainEvent>(events: T[]): Promise<void> {
     // IMPORTANT: We use setTimeout(0) once for entire events batch
     await new Promise((resolve) => setTimeout(resolve, 0));
 

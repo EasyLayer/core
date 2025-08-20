@@ -1,14 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { CustomEventBus } from './custom-event-bus';
 import type { CustomAggregateRoot } from './custom-aggregate-root';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { SystemFields, DomainEvent } from './basic-event';
 
 export interface Constructor<T> {
   new (...args: any[]): T;
 }
 
 @Injectable()
-export class EventPublisher<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>> {
+export class EventPublisher<E extends DomainEvent = DomainEvent> {
   constructor(private eventBus: CustomEventBus<E>) {}
 
   mergeClassContext<T extends Constructor<CustomAggregateRoot<E>>>(

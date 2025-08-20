@@ -5,16 +5,14 @@ import { CqrsModule, CommandBus, QueryBus, UnhandledExceptionBus, EventBus } fro
 import { CustomEventBus } from './custom-event-bus';
 import { CustomExplorerService } from './custom-explorer.service';
 import { EventPublisher } from './event-publisher';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 export interface CQRSModuleParameters {
   isGlobal?: boolean;
 }
 
 @Module({})
-export class CustomCqrsModule<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>>
-  implements OnModuleInit
-{
+export class CustomCqrsModule<E extends DomainEvent = DomainEvent> implements OnModuleInit {
   static forRoot(parameters: CQRSModuleParameters): DynamicModule {
     return {
       module: CustomCqrsModule,

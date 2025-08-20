@@ -1,32 +1,78 @@
 import type { Type } from '@nestjs/common';
 import type { IEventHandler } from '@nestjs/cqrs';
 import { EVENT_METADATA } from '@nestjs/cqrs/dist/decorators/constants';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { SystemFields, DomainEvent } from './basic-event';
+import { EventStatus } from './basic-event';
 
 const INTERNAL_EVENTS = Symbol();
 
-export enum EventStatus {
-  UNPUBLISHED = 'UNPUBLISHED', // saved at db and not published
-  PUBLISHED = 'PUBLISHED', // published on transport
-  RECEIVED = 'RECEIVED', // received confirm from user
-}
-
-export type HistoryEvent<E extends BasicEvent<EventBasePayload>> = {
-  event: E;
-  status: EventStatus;
+/**
+ * Helpers for snapshot transforming specific fields
+ * for exotic structures;
+ * Map/Set/BigInt/Date handled automatically.
+ */
+export type SnapshotFieldAdapter = {
+  toJSON: (value: any) => any;
+  fromJSON: (raw: any) => any;
 };
 
-interface StoredEvent<E extends BasicEvent<EventBasePayload>> {
-  event: E;
-  isSaved: boolean; // Saved to database (and these events should be pblished)
+// ===== Built-in snapshot replacer / reviver =====
+// - Serializes Map/Set/Date/BigInt
+// - Respects user-provided field adapters (if any)
+function snapshotReplacer(adapters?: Record<string, SnapshotFieldAdapter>) {
+  const seen = new WeakSet();
+  return function (key: string, value: any) {
+    if (adapters && key && adapters[key]) return adapters[key]!.toJSON(value);
+    if (typeof value === 'bigint') return { __t: 'BigInt', v: value.toString() };
+    if (typeof value === 'object' && value !== null) {
+      if (seen.has(value)) return;
+      seen.add(value);
+      if (value instanceof Map) return { __t: 'Map', v: Array.from(value.entries()) };
+      if (value instanceof Set) return { __t: 'Set', v: Array.from(value.values()) };
+      if (value instanceof Date) return { __t: 'Date', v: value.toISOString() };
+    }
+    return value;
+  };
+}
+function snapshotReviver(adapters?: Record<string, SnapshotFieldAdapter>) {
+  return function (key: string, value: any) {
+    if (adapters && key && adapters[key]) return adapters[key]!.fromJSON(value);
+    if (value && typeof value === 'object' && '__t' in value) {
+      switch (value.__t) {
+        case 'Map':
+          return new Map(value.v);
+        case 'Set':
+          return new Set(value.v);
+        case 'Date':
+          return new Date(value.v);
+        case 'BigInt':
+          return BigInt(value.v);
+      }
+    }
+    return value;
+  };
 }
 
-export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>> {
-  private readonly [INTERNAL_EVENTS]: StoredEvent<E>[] = [];
-  protected _version: number = 0;
-  protected _aggregateId: string;
-  protected _lastBlockHeight: number;
-  private _versionsFromSnapshot: number = 0;
+// ===== Dynamic event class factory =====
+// const eventClassCache = new Map<string, any>();
+function makeEventClass(eventName: string) {
+  // if (eventClassCache.has(eventName)) return eventClassCache.get(eventName);
+  // Create a class with constructor.name === eventName
+  const EventClass = new Function(`
+    return class ${eventName} { constructor(payload){ this.payload = payload; } }
+  `)();
+  // Attach Nest CQRS metadata so EventBus knows the id
+  Reflect.defineMetadata(EVENT_METADATA, { id: eventName }, EventClass);
+  // eventClassCache.set(eventName, EventClass);
+  return EventClass;
+}
+
+export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
+  private readonly [INTERNAL_EVENTS]: E[] = [];
+  private _version: number;
+  private _aggregateId: string;
+  private _lastBlockHeight: number;
+  private _versionsFromSnapshot: number;
 
   // Snapshot control parameters
   private _snapshotsEnabled: boolean = true;
@@ -35,9 +81,12 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
   // Pruning control parameter
   private _allowPruning: boolean = false;
 
+  // OPTIONAL: per-field snapshot adapters on child classes
+  // static snapshotFieldAdapters?: Record<string, SnapshotFieldAdapter>;
+
   constructor(
     aggregateId: string,
-    lastBlockHeight = -1,
+    lastBlockHeight: number,
     options?: {
       snapshotsEnabled?: boolean;
       allowPruning?: boolean;
@@ -47,17 +96,12 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     if (!aggregateId) throw new Error('aggregateId is required');
     this._aggregateId = aggregateId;
     this._lastBlockHeight = lastBlockHeight;
+    this._version = 0;
+    this._versionsFromSnapshot = 0;
 
-    // Set snapshot options if provided
-    if (options?.snapshotsEnabled !== undefined) {
-      this._snapshotsEnabled = options.snapshotsEnabled;
-    }
-    if (options?.allowPruning !== undefined) {
-      this._allowPruning = options.allowPruning;
-    }
-    if (options?.snapshotInterval !== undefined) {
-      this._snapshotInterval = options.snapshotInterval;
-    }
+    if (options?.snapshotsEnabled !== undefined) this._snapshotsEnabled = options.snapshotsEnabled;
+    if (options?.allowPruning !== undefined) this._allowPruning = options.allowPruning;
+    if (options?.snapshotInterval !== undefined) this._snapshotInterval = options.snapshotInterval;
   }
 
   get aggregateId() {
@@ -139,7 +183,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    * These are all saved events since uncommit() clears published ones
    */
   public getUncommittedEvents(): E[] {
-    return this[INTERNAL_EVENTS].filter((wrapper) => wrapper.isSaved).map((wrapper) => wrapper.event);
+    return this[INTERNAL_EVENTS].filter((e) => e.status === EventStatus.UNPUBLISHED);
   }
 
   /**
@@ -155,7 +199,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    * Does NOT change state - just returns unsaved events
    */
   public getUnsavedEvents(): E[] {
-    return this[INTERNAL_EVENTS].filter((wrapper) => !wrapper.isSaved).map((wrapper) => wrapper.event);
+    return this[INTERNAL_EVENTS].filter((e) => e.status === EventStatus.UNSAVED);
   }
 
   /**
@@ -163,10 +207,8 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    * Call this ONLY after successful database save
    */
   public markEventsAsSaved(): void {
-    for (const wrapper of this[INTERNAL_EVENTS]) {
-      if (!wrapper.isSaved) {
-        wrapper.isSaved = true;
-      }
+    for (const e of this[INTERNAL_EVENTS]) {
+      if (e.status === EventStatus.UNSAVED) e.status = EventStatus.UNPUBLISHED;
     }
   }
 
@@ -196,13 +238,9 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     return true;
   }
 
-  public async loadFromHistory<T extends E>(history: HistoryEvent<T>[]): Promise<void> {
-    for (const { event, status } of history) {
-      await this.apply(event, {
-        fromHistory: true,
-        skipHandler: false,
-        status,
-      });
+  public async loadFromHistory<T extends E>(history: T[]): Promise<void> {
+    for (const event of history) {
+      await this.apply(event, { fromHistory: true, skipHandler: false });
     }
   }
 
@@ -210,34 +248,17 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    * Apply new event (not from history)
    * Events start as unsaved
    */
-  public async apply<T extends E>(
-    event: T,
-    optionsOrIsFromHistory?: boolean | { fromHistory?: boolean; skipHandler?: boolean; status?: EventStatus }
-  ): Promise<void> {
-    let isFromHistory = false;
-    let skipHandler = false;
-    let status = EventStatus.UNPUBLISHED;
+  public async apply<T extends E>(event: T, options?: { fromHistory?: boolean; skipHandler?: boolean }): Promise<void> {
+    const fromHistory = !!options?.fromHistory;
+    const skipHandler = !!options?.skipHandler;
 
-    if (typeof optionsOrIsFromHistory === 'boolean') {
-      isFromHistory = optionsOrIsFromHistory;
-    } else if (optionsOrIsFromHistory) {
-      isFromHistory = optionsOrIsFromHistory.fromHistory ?? false;
-      skipHandler = optionsOrIsFromHistory.skipHandler ?? false;
-      status = optionsOrIsFromHistory.status ?? EventStatus.UNPUBLISHED;
-    }
-
-    if (!isFromHistory) {
+    if (!fromHistory) {
       // New event: not saved
-      this[INTERNAL_EVENTS].push({
-        event,
-        isSaved: false,
-      });
-    } else if (isFromHistory && status === EventStatus.UNPUBLISHED) {
+      if (event.status !== EventStatus.UNSAVED) event.status = EventStatus.UNSAVED;
+      this[INTERNAL_EVENTS].push(event);
+    } else if (fromHistory && event.status === EventStatus.UNPUBLISHED) {
       // From history: saved but not published - add to array for future publishing
-      this[INTERNAL_EVENTS].push({
-        event,
-        isSaved: true,
-      });
+      this[INTERNAL_EVENTS].push(event);
     }
 
     // IMPORTANT: If status is PUBLISHED or RECEIVED, we don't add to array
@@ -249,27 +270,32 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
         handler.call(this, event);
         this._version++;
         this._versionsFromSnapshot++;
-        this._lastBlockHeight = event.payload.blockHeight;
+        this._lastBlockHeight = event.blockHeight ?? this._lastBlockHeight;
       }
     }
   }
 
-  public toSnapshotPayload(): string {
+  public toSnapshot(): string {
     // IMPORTANT: We do not put the values _version, _aggregateId, _lastBlockHeight in the payload,
     // they are saved at the top level of snapshot
 
-    const systemPayload = this.getSystemPayload();
-    const userPayload = this.toJsonPayload();
+    const systemPayload = this.collectSystemProps();
+    const userPayload = this.serializeUserState();
 
     const payload: any = {
       __type: this.constructor.name,
       ...systemPayload,
       ...userPayload,
     };
-    return JSON.stringify(payload, this.getCircularReplacer());
+
+    const adapters = (this.constructor as any).snapshotFieldAdapters as
+      | Record<string, SnapshotFieldAdapter>
+      | undefined;
+
+    return JSON.stringify(payload, snapshotReplacer(adapters));
   }
 
-  public loadFromSnapshot({
+  public fromSnapshot({
     aggregateId,
     version,
     blockHeight,
@@ -299,16 +325,22 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     this._lastBlockHeight = blockHeight;
     this._versionsFromSnapshot = 0; // Reset counter when loading from snapshot
 
-    // IMPORTANT: We don't need to restore the prototype and properties since loadFromSnapshot() is not a static method,
+    const adapters = (this.constructor as any).snapshotFieldAdapters as
+      | Record<string, SnapshotFieldAdapter>
+      | undefined;
+
+    const revived = JSON.parse(JSON.stringify(payload), snapshotReviver(adapters));
+
+    // IMPORTANT: We don't need to restore the prototype and properties since restoreUserState() is not a static method,
     // but a method inside an instance of the base aggregate.
     // const instance = Object.create(CustomAggregateRoot.prototype);
     // Object.assign(this, instance);
-    this.fromSnapshot(payload);
+    this.restoreUserState(revived);
   }
 
   // IMPORTANT: This method can be overridden by user for custom transformations
   // System fields are always excluded at toSnapshotPayload level
-  protected toJsonPayload(): any {
+  protected serializeUserState(): any {
     // Default implementation returns empty object
     // User can override this method in derived classes for custom transformations
     return {};
@@ -316,15 +348,15 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
 
   // IMPORTANT: When an aggregate inherits from CustomAggregateRoot
   // and has complex structures in its properties, for the restoration of which a prototype is required,
-  // then this fromSnapshot method must be overridden in the aggregate itself,
+  // then this restoreUserState method must be overridden in the aggregate itself,
   // since it has access to the classes of its structures.
-  protected fromSnapshot(state: any): void {
+  protected restoreUserState(state: any): void {
     Object.assign(this, state);
   }
 
   // IMPORTANT: System part - always executes, automatically serializes all properties
   // except system fields. User cannot override this method.
-  private getSystemPayload(): any {
+  private collectSystemProps(): any {
     const result: any = {};
 
     // Excluded system fields - manually defined array
@@ -358,7 +390,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
     return result;
   }
 
-  protected getEventHandler<E extends BasicEvent<EventBasePayload>>(event: E): Type<IEventHandler> | undefined {
+  protected getEventHandler<T extends E>(event: T): Type<IEventHandler> | undefined {
     const handler = `on${this.getEventName(event)}`;
 
     //@ts-ignore
@@ -376,7 +408,7 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
    *
    * @param event The event for which metadata should be set.
    */
-  protected setEventMetadata<E extends BasicEvent<EventBasePayload>>(event: E): void {
+  protected setEventMetadata<T extends E>(event: T): void {
     const eventName = this.getEventName(event);
     if (!Reflect.hasOwnMetadata(EVENT_METADATA, event.constructor)) {
       Reflect.defineMetadata(EVENT_METADATA, { id: eventName }, event.constructor);
@@ -402,5 +434,37 @@ export abstract class CustomAggregateRoot<E extends BasicEvent<EventBasePayload>
       }
       return value;
     };
+  }
+
+  /**
+   * Internal helper for compilers:
+   * Create a concrete event class (constructor.name === type), attach system fields on top-level.
+   *
+   * Back-compat: if userPayload contains blockHeight/requestId/timestamp —
+   * we lift them to top-level system fields and remove from payload.
+   */
+  protected createEvent<P = any>(
+    type: string,
+    userPayload: P & Partial<Pick<SystemFields, 'blockHeight' | 'requestId' | 'timestamp'>>,
+    overrides?: Partial<Pick<SystemFields, 'blockHeight' | 'requestId' | 'timestamp' | 'status'>>
+  ): E {
+    const EventClass = makeEventClass(type);
+
+    // extract meta from payload (back-compat with existing user code)
+    const {
+      blockHeight: bhFromPayload,
+      requestId: ridFromPayload,
+      timestamp: tsFromPayload,
+      ...clean
+    } = (userPayload ?? {}) as any;
+
+    const instance: any = new EventClass(clean);
+    instance.aggregateId = this._aggregateId;
+    instance.requestId = overrides?.requestId ?? ridFromPayload;
+    instance.blockHeight = overrides?.blockHeight ?? bhFromPayload ?? this._lastBlockHeight;
+    instance.timestamp = overrides?.timestamp ?? tsFromPayload ?? Date.now();
+    instance.status = overrides?.status ?? EventStatus.UNSAVED;
+
+    return instance as E;
   }
 }

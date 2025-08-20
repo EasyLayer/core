@@ -1,18 +1,18 @@
 import 'reflect-metadata';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 export const SYSTEM_EVENT_METADATA = '__systemEvent__';
 
-const setEventMetadata = (event: new (...args: any[]) => BasicEvent<EventBasePayload>): void => {
+function setEventMetadata<E extends DomainEvent = DomainEvent>(event: new (...args: any[]) => E): void {
   Reflect.defineMetadata(SYSTEM_EVENT_METADATA, true, event);
-};
+}
 
 export const SystemEvent = (): ClassDecorator => {
   return (target: Function) => {
-    setEventMetadata(target as new (...args: any[]) => BasicEvent<EventBasePayload>);
+    setEventMetadata(target as unknown as any);
   };
 };
 
-export function isSystemEvent(event: BasicEvent<EventBasePayload>): boolean {
+export function isSystemEvent<E extends DomainEvent = DomainEvent>(event: E): boolean {
   return Reflect.getMetadata(SYSTEM_EVENT_METADATA, event.constructor) === true;
 }

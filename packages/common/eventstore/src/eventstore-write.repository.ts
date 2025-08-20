@@ -62,9 +62,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
     await runInTransaction(
       async () => {
-        this.log.debug('Storing events for aggregates');
         await Promise.all(aggregates.map((aggregate: T) => this.storeEvents(aggregate)));
-        this.log.debug('Events stored successfully');
       },
       {
         connectionName: this.dataSourceName,
@@ -72,8 +70,6 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
         isolationLevel: IsolationLevel.SERIALIZABLE,
       }
     );
-
-    this.log.debug('Invoking commit to publish events');
 
     // IMPORTANT: This is an events publish transaction
     // This transaction's error should not be thrown (if there is an error, these events will be published next time).
@@ -109,15 +105,11 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
 
     await runInTransaction(
       async () => {
-        this.log.debug('Deleting events to rollback');
         await Promise.all(modelsToRollback.map((aggregate: T) => this.deleteEvents(aggregate, blockHeight)));
-        this.log.debug('Events deleted for rollback');
 
         // TODO: think how handle this, because currently this is not good
         if (isExistModelsToSave) {
-          this.log.debug('Storing events for modelsToSave');
           await Promise.all(modelsToSave!.map((aggregate: T) => this.storeEvents(aggregate)));
-          this.log.debug('Events stored for modelsToSave');
         }
 
         this.log.debug('Clearing cache for rolled back aggregates');
@@ -125,9 +117,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
         // IMPORTANT: We can easily just clear the cache instead of restoring and overwriting it.
         // So next time the factory initializes the state it will create the cache itself.
         modelsToRollback.forEach((aggregate: T) => this.readRepository.cache.clear(aggregate.aggregateId));
-        this.log.debug('Updating snapshots after rollback');
 
-        this.log.debug('Snapshots updated after rollback');
         await Promise.all(
           modelsToRollback.map((aggregate: T) => this.onRollbackUpdateSnapshot(aggregate, blockHeight))
         );
@@ -141,9 +131,7 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     );
 
     if (isExistModelsToSave) {
-      this.log.debug('Invoking commit for modelsToSave after rollback', { args: { toSaveCount: modelsToSave.length } });
       await this.retryCommit(modelsToSave!);
-      this.log.debug('Commit returned for modelsToSave');
 
       // TODO: think, do we really need this in the rollback in save case?
       // await Promise.all(modelsToSave!.map((aggregate: T) => this.onSaveUpdateSnapshot(aggregate)));
@@ -219,36 +207,12 @@ export class EventStoreWriteRepository<T extends AggregateRoot = AggregateRoot> 
     const aggregateId = aggregate.aggregateId;
     const beforeCommitEvents = aggregate.getUncommittedEvents().length;
 
-    if (beforeCommitEvents === 0) {
-      // this.log.debug('No uncommitted events for aggregate, skipping', {
-      //   args: { aggregateId }
-      // });
-      return;
-    }
-
-    this.log.debug('Committing single aggregate', {
-      args: {
-        aggregateId,
-        uncommittedEvents: beforeCommitEvents,
-        version: aggregate.version,
-      },
-    });
-
     try {
       // Each aggregate gets its own transaction
       await runInTransaction(
         async () => {
           // Step 1: Publish events (this calls aggregate.commit() which publishes and clears events)
           await aggregate.commit();
-
-          const afterCommitEvents = aggregate.getUncommittedEvents().length;
-          this.log.debug('Events published for aggregate', {
-            args: {
-              aggregateId,
-              beforeCommit: beforeCommitEvents,
-              afterCommit: afterCommitEvents,
-            },
-          });
 
           // Step 2: Update database status to PUBLISHED
           await this.setPublishStatuses(aggregate);

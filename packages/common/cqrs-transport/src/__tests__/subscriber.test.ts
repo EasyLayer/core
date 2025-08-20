@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { LoggerModule } from '@easylayer/common/logger';
-import { EventBus, CustomEventBus, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { EventBus, CustomEventBus } from '@easylayer/common/cqrs';
+import type { DomainEvent } from '@easylayer/common/cqrs';
 import { Subject } from 'rxjs';
 import { Subscriber } from '../subscriber';
 import { Publisher } from '../publisher';
@@ -9,12 +10,12 @@ describe('Subscriber', () => {
   let subscriber: Subscriber;
   let mockPublisher: jest.Mocked<Publisher>;
   let mockEventBus: jest.Mocked<CustomEventBus>;
-  let mockBridge: Subject<BasicEvent<EventBasePayload>>;
+  let mockBridge: Subject<DomainEvent>;
 
   beforeEach(async () => {
-    mockBridge = new Subject<BasicEvent<EventBasePayload>>();
+    mockBridge = new Subject<DomainEvent>();
     mockPublisher = {
-      events$: new Subject<BasicEvent<EventBasePayload>>(),
+      events$: new Subject<DomainEvent>(),
     } as any;
 
     mockEventBus = {

@@ -1,6 +1,6 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 
-interface BitcoinMempoolBlockBatchProcessedEventPayload extends EventBasePayload {
+interface BitcoinMempoolBlockBatchProcessedEventPayload {
   txidsToRemove: string[];
 }
 

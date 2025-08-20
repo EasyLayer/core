@@ -334,15 +334,19 @@ export class Mempool extends AggregateRoot {
     // - providerTxidMapping: ~50k entries × 12 bytes = ~600KB
     // Total event size: ~7.3MB for 50k total transactions (10k high-fee)
     await this.apply(
-      new BitcoinMempoolInitializedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: currentNetworkHeight,
-        allTxidsFromNode,
-        isSynchronized: false,
-        providerTxidMapping: Object.fromEntries(providerTxidMapping),
-        aggregatedMetadata: Object.fromEntries(filteredMetadata), // Only high-fee metadata
-      })
+      new BitcoinMempoolInitializedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: currentNetworkHeight,
+        },
+        {
+          allTxidsFromNode,
+          isSynchronized: false,
+          providerTxidMapping: Object.fromEntries(providerTxidMapping),
+          aggregatedMetadata: Object.fromEntries(filteredMetadata), // Only high-fee metadata
+        }
+      )
     );
   }
 
@@ -371,12 +375,16 @@ export class Mempool extends AggregateRoot {
 
       if (loadedPercent >= this.syncThresholdPercent) {
         await this.apply(
-          new BitcoinMempoolSynchronizedEvent({
-            aggregateId: this.aggregateId,
-            requestId,
-            blockHeight: this.lastBlockHeight,
-            isSynchronized: true,
-          })
+          new BitcoinMempoolSynchronizedEvent(
+            {
+              aggregateId: this.aggregateId,
+              requestId,
+              blockHeight: this.lastBlockHeight,
+            },
+            {
+              isSynchronized: true,
+            }
+          )
         );
         return;
       }
@@ -427,13 +435,17 @@ export class Mempool extends AggregateRoot {
     // - hasMoreToProcess: 1 byte
     // Total event size: ~1MB per sync batch
     await this.apply(
-      new BitcoinMempoolSyncProcessedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: this.lastBlockHeight,
-        loadedTransactions,
-        hasMoreToProcess: hasMore,
-      })
+      new BitcoinMempoolSyncProcessedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: this.lastBlockHeight,
+        },
+        {
+          loadedTransactions,
+          hasMoreToProcess: hasMore,
+        }
+      )
     );
   }
 
@@ -479,12 +491,16 @@ export class Mempool extends AggregateRoot {
     // - txidsToRemove: ~1000 txids × 64 bytes = ~64KB per block batch
     // Total event size: ~64KB per block batch
     await this.apply(
-      new BitcoinMempoolBlockBatchProcessedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: latestBlockHeight,
-        txidsToRemove,
-      })
+      new BitcoinMempoolBlockBatchProcessedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: latestBlockHeight,
+        },
+        {
+          txidsToRemove,
+        }
+      )
     );
   }
 
@@ -558,15 +574,19 @@ export class Mempool extends AggregateRoot {
 
     // Event payload size estimation: same as init (~7.3MB for 50k total/10k high-fee transactions)
     await this.apply(
-      new BitcoinMempoolInitializedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: reorgBlockHeight,
-        allTxidsFromNode,
-        isSynchronized: false,
-        providerTxidMapping: Object.fromEntries(providerTxidMapping),
-        aggregatedMetadata: Object.fromEntries(filteredMetadata),
-      })
+      new BitcoinMempoolInitializedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: reorgBlockHeight,
+        },
+        {
+          allTxidsFromNode,
+          isSynchronized: false,
+          providerTxidMapping: Object.fromEntries(providerTxidMapping),
+          aggregatedMetadata: Object.fromEntries(filteredMetadata),
+        }
+      )
     );
   }
 
@@ -576,11 +596,14 @@ export class Mempool extends AggregateRoot {
   public async clearMempool({ requestId }: { requestId: string }) {
     // Event payload size estimation: ~1KB (minimal data)
     await this.apply(
-      new BitcoinMempoolClearedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: -1,
-      })
+      new BitcoinMempoolClearedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: -1,
+        },
+        {}
+      )
     );
   }
 
@@ -722,62 +745,62 @@ export class Mempool extends AggregateRoot {
 
   // ========== SNAPSHOTS ==========
 
-  protected toJsonPayload(): any {
-    return {
-      minFeeRate: this.minFeeRate,
-      syncThresholdPercent: this.syncThresholdPercent,
-      currentBatchSize: this.currentBatchSize,
-      isSynchronized: this.isSynchronized,
-      feeRatePrecision: this.feeRatePrecision,
-      // Convert Maps to arrays for JSON serialization
-      txidHashToTxid: Array.from(this.txidHashToTxid.entries()),
-      transactionMetadata: Array.from(this.transactionMetadata.entries()),
-      fullTransactions: Array.from(this.fullTransactions.entries()),
-      loadedTxids: Array.from(this.loadedTxids.entries()),
-      providerMapping: Array.from(this.providerMapping.entries()).map(([key, value]) => [key, Array.from(value)]),
-      providerNames: this.providerNames,
-    };
-  }
+  // protected toJsonPayload(): any {
+  //   return {
+  //     minFeeRate: this.minFeeRate,
+  //     syncThresholdPercent: this.syncThresholdPercent,
+  //     currentBatchSize: this.currentBatchSize,
+  //     isSynchronized: this.isSynchronized,
+  //     feeRatePrecision: this.feeRatePrecision,
+  //     // Convert Maps to arrays for JSON serialization
+  //     txidHashToTxid: Array.from(this.txidHashToTxid.entries()),
+  //     transactionMetadata: Array.from(this.transactionMetadata.entries()),
+  //     fullTransactions: Array.from(this.fullTransactions.entries()),
+  //     loadedTxids: Array.from(this.loadedTxids.entries()),
+  //     providerMapping: Array.from(this.providerMapping.entries()).map(([key, value]) => [key, Array.from(value)]),
+  //     providerNames: this.providerNames,
+  //   };
+  // }
 
-  protected fromSnapshot(state: any): void {
-    // Safety check for state
-    if (!state || typeof state !== 'object') {
-      return;
-    }
+  // protected fromSnapshot(state: any): void {
+  //   // Safety check for state
+  //   if (!state || typeof state !== 'object') {
+  //     return;
+  //   }
 
-    // Restore primitive values with safe defaults
-    this.minFeeRate = typeof state.minFeeRate === 'number' ? state.minFeeRate : 1;
-    this.syncThresholdPercent = typeof state.syncThresholdPercent === 'number' ? state.syncThresholdPercent : 0.9;
-    this.currentBatchSize = typeof state.currentBatchSize === 'number' ? state.currentBatchSize : 200;
-    this.isSynchronized = Boolean(state.isSynchronized);
-    this.feeRatePrecision = typeof state.feeRatePrecision === 'number' ? state.feeRatePrecision : 10;
+  //   // Restore primitive values with safe defaults
+  //   this.minFeeRate = typeof state.minFeeRate === 'number' ? state.minFeeRate : 1;
+  //   this.syncThresholdPercent = typeof state.syncThresholdPercent === 'number' ? state.syncThresholdPercent : 0.9;
+  //   this.currentBatchSize = typeof state.currentBatchSize === 'number' ? state.currentBatchSize : 200;
+  //   this.isSynchronized = Boolean(state.isSynchronized);
+  //   this.feeRatePrecision = typeof state.feeRatePrecision === 'number' ? state.feeRatePrecision : 10;
 
-    // Restore Maps from arrays with safety checks
-    this.txidHashToTxid = new Map(Array.isArray(state.txidHashToTxid) ? state.txidHashToTxid : []);
-    this.transactionMetadata = new Map(Array.isArray(state.transactionMetadata) ? state.transactionMetadata : []);
-    this.fullTransactions = new Map(Array.isArray(state.fullTransactions) ? state.fullTransactions : []);
-    this.loadedTxids = new Map(Array.isArray(state.loadedTxids) ? state.loadedTxids : []);
-    this.providerNames = Array.isArray(state.providerNames) ? state.providerNames : [];
+  //   // Restore Maps from arrays with safety checks
+  //   this.txidHashToTxid = new Map(Array.isArray(state.txidHashToTxid) ? state.txidHashToTxid : []);
+  //   this.transactionMetadata = new Map(Array.isArray(state.transactionMetadata) ? state.transactionMetadata : []);
+  //   this.fullTransactions = new Map(Array.isArray(state.fullTransactions) ? state.fullTransactions : []);
+  //   this.loadedTxids = new Map(Array.isArray(state.loadedTxids) ? state.loadedTxids : []);
+  //   this.providerNames = Array.isArray(state.providerNames) ? state.providerNames : [];
 
-    // Restore provider mapping with Set conversion and safety checks
-    this.providerMapping = new Map();
-    if (Array.isArray(state.providerMapping)) {
-      for (const [key, value] of state.providerMapping) {
-        if (typeof key === 'number' && Array.isArray(value)) {
-          this.providerMapping.set(key, new Set(value));
-        }
-      }
-    }
+  //   // Restore provider mapping with Set conversion and safety checks
+  //   this.providerMapping = new Map();
+  //   if (Array.isArray(state.providerMapping)) {
+  //     for (const [key, value] of state.providerMapping) {
+  //       if (typeof key === 'number' && Array.isArray(value)) {
+  //         this.providerMapping.set(key, new Set(value));
+  //       }
+  //     }
+  //   }
 
-    // Rebuild fee rate index from current full transactions
-    this.feeRateIndex.clear();
-    for (const [txidHash, transaction] of this.fullTransactions) {
-      const feeRate = this.calculateTransactionFeeRate(transaction);
-      this.addToFeeRateIndex(feeRate, txidHash);
-    }
+  //   // Rebuild fee rate index from current full transactions
+  //   this.feeRateIndex.clear();
+  //   for (const [txidHash, transaction] of this.fullTransactions) {
+  //     const feeRate = this.calculateTransactionFeeRate(transaction);
+  //     this.addToFeeRateIndex(feeRate, txidHash);
+  //   }
 
-    Object.setPrototypeOf(this, Mempool.prototype);
-  }
+  //   Object.setPrototypeOf(this, Mempool.prototype);
+  // }
 
   // ========== PUBLIC READ-ONLY API METHODS ==========
 

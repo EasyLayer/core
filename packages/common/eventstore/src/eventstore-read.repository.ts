@@ -2,7 +2,7 @@ import { Readable } from 'node:stream';
 import { Injectable } from '@nestjs/common';
 import { Repository, MoreThan, LessThanOrEqual, DataSource } from 'typeorm';
 import type { ObjectLiteral } from 'typeorm';
-import { AggregateRoot, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { EventDataParameters, deserialize } from './event-data.model';
 import { serializeSnapshot, SnapshotInterface, SnapshotParameters, deserializeSnapshot } from './snapshots.model';
@@ -154,7 +154,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
     // Aggregate receives object directly in loadFromSnapshot
-    model.loadFromSnapshot(decompressedSnapshot);
+    model.fromSnapshot(decompressedSnapshot);
 
     if (this.isSqlite) {
       await this.applyEventsInBatches({ model, lastVersion: model.version });
@@ -188,7 +188,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   public async fetchEventsForManyAggregates(
     aggregateIds: string[],
     options: FindEventsOptions = {}
-  ): Promise<BasicEvent<EventBasePayload>[]> {
+  ): Promise<DomainEvent[]> {
     const perAggregateArrays = await Promise.all(
       aggregateIds.map((id) => this.fetchEventsForOneAggregate(id, options))
     );
@@ -201,7 +201,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   public async fetchEventsForOneAggregate(
     aggregateId: string,
     options: FindEventsOptions = {}
-  ): Promise<BasicEvent<EventBasePayload>[]> {
+  ): Promise<DomainEvent[]> {
     const { version, blockHeight, status, limit, offset } = options;
 
     const repo = this.getRepository(aggregateId);
@@ -227,17 +227,11 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     }
 
     const rawEvents = await qb.getMany();
-    this.log.debug('Raw events fetched', { args: { aggregateId, count: rawEvents.length } });
 
     // deserialize() now handles decompression internally
     const processedEvents = await Promise.all(
-      rawEvents.map(async (raw) => {
-        const historyEvent = await deserialize(aggregateId, raw, this.dbDriver);
-        return historyEvent.event;
-      })
+      rawEvents.map(async (raw) => deserialize(aggregateId, raw, this.dbDriver))
     );
-
-    this.log.debug('Deserialized events', { args: { deserializedCount: processedEvents.length } });
 
     return processedEvents;
   }
@@ -245,7 +239,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   public async *streamEventsForOneAggregate(
     aggregateId: string,
     options: FindEventsOptions = {}
-  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+  ): AsyncGenerator<DomainEvent, void, unknown> {
     const { version, blockHeight, status, limit, offset } = options;
     const repo = this.getRepository(aggregateId);
 
@@ -277,8 +271,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       try {
         for await (const raw of stream) {
           // deserialize() handles decompression internally
-          const historyEvent = await deserialize(aggregateId, raw, this.dbDriver);
-          yield historyEvent.event;
+          yield await deserialize(aggregateId, raw, this.dbDriver);
         }
       } finally {
         stream.destroy();
@@ -289,7 +282,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
   public async *streamEventsForManyAggregates(
     aggregateIds: string[],
     options: FindEventsOptions = {}
-  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+  ): AsyncGenerator<DomainEvent, void, unknown> {
     // Stream from each aggregate sequentially to maintain order
     for (const aggregateId of aggregateIds) {
       yield* this.streamEventsForOneAggregate(aggregateId, options);
@@ -300,7 +293,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
     aggregateId: string,
     options: FindEventsOptions,
     batchSize = 5000
-  ): AsyncGenerator<BasicEvent<EventBasePayload>, void, unknown> {
+  ): AsyncGenerator<DomainEvent, void, unknown> {
     const { version, blockHeight, status, limit, offset } = options;
     const repo = this.getRepository(aggregateId);
 
@@ -335,8 +328,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       // Yield events one by one after processing
       for (const raw of rawEvents) {
         // SQLite doesn't compress payloads, but deserialize() handles both cases
-        const historyEvent = await deserialize(aggregateId, raw, this.dbDriver);
-        yield historyEvent.event;
+        yield await deserialize(aggregateId, raw, this.dbDriver);
       }
 
       currentOffset += rawEvents.length;
@@ -380,7 +372,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
       // Aggregate receives object directly in loadFromSnapshot
-      model.loadFromSnapshot(decompressedSnapshot);
+      model.fromSnapshot(decompressedSnapshot);
       await this.applyEvents(model, blockHeight);
     } else {
       // Exact match
@@ -390,7 +382,7 @@ export class EventStoreReadRepository<T extends AggregateRoot = AggregateRoot> {
       const decompressedSnapshot = await deserializeSnapshot(snapshot, this.dbDriver);
 
       // Aggregate receives object directly in loadFromSnapshot
-      model.loadFromSnapshot(decompressedSnapshot);
+      model.fromSnapshot(decompressedSnapshot);
     }
 
     return serializeSnapshot(model as any, this.dbDriver);

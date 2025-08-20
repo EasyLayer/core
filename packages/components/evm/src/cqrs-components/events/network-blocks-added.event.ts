@@ -1,7 +1,7 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 import { LightBlock } from '../../blockchain-provider';
 
-export interface EvmNetworkBlocksAddedEventPayload extends EventBasePayload {
+export interface EvmNetworkBlocksAddedEventPayload {
   blocks: LightBlock[];
 }
 

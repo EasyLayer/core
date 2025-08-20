@@ -2,12 +2,12 @@ import PQueue from 'p-queue';
 import { Subject, Subscription } from 'rxjs';
 import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import { BasicEvent, EventBasePayload, IMessageSource, EventBus, CustomEventBus } from '@easylayer/common/cqrs';
+import { DomainEvent, IMessageSource, EventBus, CustomEventBus } from '@easylayer/common/cqrs';
 import { Publisher } from './publisher';
 
 @Injectable()
-export class Subscriber implements IMessageSource<BasicEvent<EventBasePayload>>, OnModuleDestroy {
-  private bridge!: Subject<BasicEvent<EventBasePayload>>;
+export class Subscriber implements IMessageSource<DomainEvent>, OnModuleDestroy {
+  private bridge!: Subject<DomainEvent>;
   private subscription!: Subscription;
   // IMPORTANT: concurrency: 1 ensures that tasks will be started sequentially,
   // but does not guarantee sequential completion if the tasks are asynchronous internally.
@@ -47,7 +47,7 @@ export class Subscriber implements IMessageSource<BasicEvent<EventBasePayload>>,
     this.log.debug('Bridge set to EventBus subject');
   }
 
-  private asyncTask<T extends BasicEvent<EventBasePayload>>(event: T): void {
+  private asyncTask<T extends DomainEvent>(event: T): void {
     this.log.debug('Queuing task for event', { args: { event } });
     // IMPORTANT: There may be a potential problem here
     // when the insertion error into the Read database is so fast in this particular transport

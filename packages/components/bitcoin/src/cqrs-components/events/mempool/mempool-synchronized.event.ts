@@ -1,6 +1,6 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
 
-export interface BitcoinMempoolSynchronizedEventPayload extends EventBasePayload {
+export interface BitcoinMempoolSynchronizedEventPayload {
   isSynchronized: boolean;
 }
 

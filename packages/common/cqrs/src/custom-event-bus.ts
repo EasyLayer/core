@@ -8,14 +8,12 @@ import { catchError, concatMap, filter } from 'rxjs/operators';
 import { EVENTS_HANDLER_METADATA, SAGA_METADATA } from '@nestjs/cqrs/dist/decorators/constants';
 import type { UnhandledExceptionInfo } from '@nestjs/cqrs/dist/interfaces';
 import { InvalidSagaException } from '@nestjs/cqrs/dist/exceptions/invalid-saga.exception';
-import type { BasicEvent, EventBasePayload } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
-export type EventHandlerType<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>> = Type<
-  IEventHandler<E>
->;
+export type EventHandlerType<E extends DomainEvent = DomainEvent> = Type<IEventHandler<E>>;
 
 @Injectable()
-export class CustomEventBus<E extends BasicEvent<EventBasePayload> = BasicEvent<EventBasePayload>> extends EventBus<E> {
+export class CustomEventBus<E extends DomainEvent = DomainEvent> extends EventBus<E> {
   private readonly _newLogger = new Logger(CustomEventBus.name);
   private readonly _eventHandlerCompletion$ = new Subject<E>();
   private readonly _sagaCompletion$ = new Subject<E>();
@@ -141,10 +139,7 @@ export class CustomEventBus<E extends BasicEvent<EventBasePayload> = BasicEvent<
     return Reflect.getMetadata(EVENTS_HANDLER_METADATA, handler);
   }
 
-  protected mapUnhandledExceptionEvent(
-    eventOrCommand: BasicEvent<EventBasePayload> | ICommand,
-    exception: unknown
-  ): UnhandledExceptionInfo {
+  protected mapUnhandledExceptionEvent(eventOrCommand: E | ICommand, exception: unknown): UnhandledExceptionInfo {
     return {
       cause: eventOrCommand,
       exception,
