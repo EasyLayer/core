@@ -1,94 +1,137 @@
 import { EntitySchema } from 'typeorm';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
-import { CompressionUtils } from './compression.utils';
+import { CompressionUtils } from './compression'; // must provide: shouldCompress(string), compressToBuffer(string), decompressBufferToString(Buffer)
 
 export type DriverType = 'sqlite' | 'postgres';
 
+/**
+ * DB row shape: what is actually stored in the table.
+ * payload is binary (bytea/blob). isCompressed says whether payload bytes are deflated JSON.
+ */
+export interface SnapshotInterface {
+  id: string;
+  aggregateId: string;
+  blockHeight: number;
+  version: number;
+  payload: Buffer; // binary payload: deflated JSON or plain utf8 JSON bytes
+  isCompressed: boolean; // never null in practice
+  createdAt: Date;
+}
+
+/**
+ * In-memory shape after deserialize: what aggregate wants to consume.
+ * payload is a parsed JS object.
+ */
 export interface SnapshotParameters {
   aggregateId: string;
   blockHeight: number;
   version: number;
-  payload: string | any; // TEXT (possibly base64(deflate(JSON))) or plain object after deserialize
-  isCompressed?: boolean;
+  payload: any; // parsed object after decompress+parse
+  isCompressed?: boolean; // always false after deserialize()
 }
 
-export interface SnapshotInterface extends SnapshotParameters {
-  id: string;
-  createdAt: Date;
-}
-
+/** Create TypeORM entity for "snapshots" table (BLOB/bytea payload). */
 export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<SnapshotInterface> => {
   const isSqlite = dbDriver === 'sqlite';
-  const createdAtColumn: any = { type: isSqlite ? 'datetime' : 'timestamp', default: () => 'CURRENT_TIMESTAMP' };
+
+  // Auto-incrementing sequence for guaranteed order
+  const id: any = {
+    type: isSqlite ? 'integer' : 'bigserial',
+    primary: true,
+    generated: isSqlite ? 'increment' : true,
+  };
 
   return new EntitySchema<SnapshotInterface>({
     name: 'snapshots',
     tableName: 'snapshots',
     columns: {
-      id: { type: 'varchar', primary: true, generated: 'uuid' },
+      id,
       aggregateId: { type: 'varchar' },
       blockHeight: { type: 'int', default: 0 },
       version: { type: 'int', default: 0 },
-      payload: { type: 'text' },
+      // Binary payload for both drivers (no TEXT/base64 anymore)
+      payload: { type: isSqlite ? 'blob' : ('bytea' as any) },
       isCompressed: { type: 'boolean', default: false, nullable: true },
-      createdAt: createdAtColumn,
+      createdAt: { type: isSqlite ? 'datetime' : 'timestamp', default: () => 'CURRENT_TIMESTAMP' },
     },
     indices: [
       { name: 'IDX_aggregate_blockheight', columns: ['aggregateId', 'blockHeight'] },
       { name: 'IDX_blockheight', columns: ['blockHeight'] },
       { name: 'IDX_created_at', columns: ['createdAt'] },
     ],
-    // IMPORTANT: Composite unique constraint to prevent duplicate snapshots
     uniques: [
-      {
-        name: 'UQ_aggregate_blockheight',
-        columns: ['aggregateId', 'blockHeight'],
-      },
+      // prevent duplicate snapshot at the same chain height for the same aggregate
+      { name: 'UQ_aggregate_blockheight', columns: ['aggregateId', 'blockHeight'] },
     ],
   });
 };
 
+/**
+ * Deserialize snapshot DB row into in-memory object with parsed payload.
+ * - Decompress if needed (PG case)
+ * - Parse JSON and return clean SnapshotParameters (no compression flags)
+ */
 export async function deserializeSnapshot(
-  snapshotData: SnapshotParameters,
-  dbDriver: DriverType = 'postgres'
+  row: SnapshotInterface,
+  _dbDriver: DriverType = 'postgres'
 ): Promise<SnapshotParameters> {
-  const isSqlite = dbDriver === 'sqlite';
-  let finalPayload = snapshotData.payload;
+  // NOTE: We always store Buffer. If compressed => inflate to string, else => utf8 string
+  const jsonStr = row.isCompressed
+    ? await CompressionUtils.decompressBufferToString(row.payload)
+    : row.payload.toString('utf8');
 
-  if (!isSqlite && snapshotData.isCompressed && typeof snapshotData.payload === 'string') {
-    try {
-      finalPayload = await CompressionUtils.decompressAndParse(snapshotData.payload);
-    } catch {
-      // fallback: leave as-is
-    }
-  }
+  const payloadObj = JSON.parse(jsonStr);
 
-  return { ...snapshotData, payload: finalPayload, isCompressed: false };
+  return {
+    aggregateId: row.aggregateId,
+    blockHeight: row.blockHeight,
+    version: row.version,
+    payload: payloadObj,
+  };
 }
 
+/**
+ * Serialize aggregate state into a snapshot row:
+ * - aggregate.toSnapshot() MUST return a JSON string.
+ * - For Postgres: compress if it’s beneficial; store compressed bytes in payload (bytea), set isCompressed=true.
+ * - For SQLite: store plain UTF-8 bytes (blob), isCompressed=false (to keep CPU low on SQLite).
+ *
+ * The caller inserts the returned object into "snapshots" with TypeORM.
+ */
 export async function serializeSnapshot<T extends AggregateRoot<DomainEvent>>(
   aggregate: T,
   dbDriver: DriverType = 'postgres'
-): Promise<SnapshotParameters> {
+): Promise<Omit<SnapshotInterface, 'id' | 'createdAt'>> {
   const { aggregateId, lastBlockHeight, version } = aggregate;
   if (!aggregateId) throw new Error('aggregate Id is missed');
   if (lastBlockHeight == null) throw new Error('lastBlockHeight is missing');
   if (version == null) throw new Error('version is missing');
 
-  const payloadString = aggregate.toSnapshot();
+  const json = aggregate.toSnapshot(); // JSON string
   const isSqlite = dbDriver === 'sqlite';
-  let finalPayload: string = payloadString;
+
+  // start with plain utf8 bytes (ONE buffer)
+  let payloadBuf = Buffer.from(json, 'utf8');
   let isCompressed = false;
 
-  if (!isSqlite && payloadString && CompressionUtils.shouldCompress(payloadString)) {
+  if (!isSqlite && CompressionUtils.shouldCompress(json)) {
     try {
-      const result = await CompressionUtils.compress(payloadString);
-      finalPayload = result.data;
-      isCompressed = true;
+      const comp = await CompressionUtils.compressToBuffer(json); // <- object with .buffer/.compressedSize
+      // keep compression only if it really saves space (~10%+)
+      if (comp.compressedSize < payloadBuf.length * 0.9) {
+        payloadBuf = comp.buffer; // use compressed bytes
+        isCompressed = true;
+      }
     } catch {
-      /* keep plain */
+      // keep plain
     }
   }
 
-  return { aggregateId, blockHeight: lastBlockHeight, version, payload: finalPayload, isCompressed };
+  return {
+    aggregateId,
+    blockHeight: lastBlockHeight,
+    version,
+    payload: payloadBuf,
+    isCompressed,
+  };
 }

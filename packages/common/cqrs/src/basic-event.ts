@@ -35,7 +35,13 @@ export abstract class BasicEvent<P = any> implements DomainEvent<P> {
     this.blockHeight = systemFields.blockHeight;
 
     // Use high-resolution time for better ordering precision
-    // Convert nanoseconds to microseconds for practical precision without BigInt complexity
-    this.timestamp = Number(process.hrtime.bigint() / 1000n);
+    this.timestamp = nowMicroseconds();
   }
+}
+
+const BOOT_EPOCH_US = BigInt(Date.now()) * 1000n - process.hrtime.bigint() / 1000n;
+
+export function nowMicroseconds(): number {
+  // <= 2^53-1 is guaranteed to be long: 1.7e15 us for the current epoch - safe for JS Number
+  return Number(BOOT_EPOCH_US + process.hrtime.bigint() / 1000n);
 }

@@ -1,105 +1,60 @@
 import { EntitySchema } from 'typeorm';
 import type { DomainEvent } from '@easylayer/common/cqrs';
-import { CompressionUtils, CompressionMetrics } from './compression.utils';
+import { CompressionUtils } from './compression';
 
-type DriverType = 'sqlite' | 'postgres';
+export type DriverType = 'sqlite' | 'postgres';
 
+/** Event row as stored in aggregate tables – payload is binary buffer now. */
 export interface EventDataParameters {
-  type: string; // constructor.name
-  payload: string; // JSON string or base64(deflate(JSON)) for aggregate tables
+  id?: number; // bigserial/integer autoincrement
+  type: string;
+  payload: Buffer; // BLOB/bytea for aggregate tables
   version: number;
   requestId: string;
   blockHeight: number;
   isCompressed?: boolean;
 }
 
+/**
+ * Aggregate event table schema generator (per-aggregate).
+ * The payload column is BLOB/bytea, so both aggregates and outbox share the same bytes.
+ */
 export const createEventDataEntity = (
   aggregateId: string,
   dbDriver: DriverType = 'sqlite'
 ): EntitySchema<EventDataParameters> => {
+  const isSqlite = dbDriver === 'sqlite';
+
+  // Auto-incrementing sequence for guaranteed order
+  const id: any = {
+    type: isSqlite ? 'integer' : 'bigserial',
+    primary: true,
+    generated: isSqlite ? 'increment' : true,
+  };
+
   return new EntitySchema<EventDataParameters>({
     name: aggregateId,
     tableName: aggregateId,
     columns: {
-      version: {
-        type: 'bigint',
-        primary: true,
-        default: 0,
-      },
-      requestId: {
-        type: 'varchar',
-        default: null,
-      },
-      type: {
-        type: 'varchar',
-      },
-      payload: {
-        type: 'text',
-      },
-      blockHeight: {
-        type: 'int',
-        default: 0,
-      },
-      isCompressed: {
-        type: 'boolean',
-        default: false,
-        nullable: true,
-      },
+      id,
+      version: { type: 'int', default: 0 },
+      requestId: { type: 'varchar', default: null },
+      type: { type: 'varchar' },
+      // Store binary payload; exact same bytes as we put to outbox:
+      payload: { type: isSqlite ? 'blob' : 'bytea' },
+      blockHeight: { type: 'int', default: 0 },
+      isCompressed: { type: 'boolean', default: false, nullable: true },
     },
-    uniques: [
-      {
-        name: `UQ_${aggregateId}_v_reqid`,
-        columns: ['version', 'requestId'],
-      },
-    ],
-    indices: [
-      {
-        name: `IDX_${aggregateId}_blockh`,
-        columns: ['blockHeight'],
-      },
-    ],
+    uniques: [{ name: `UQ_${aggregateId}_v_reqid`, columns: ['version', 'requestId'] }],
+    indices: [{ name: `IDX_${aggregateId}_blockh`, columns: ['blockHeight'] }],
   });
 };
 
-/** Read-side helper (OK to parse). Not used on publish path. */
-export async function deserializeToDomainEvent(
-  aggregateId: string,
-  { type, requestId, blockHeight, payload, isCompressed, version }: EventDataParameters,
-  dbDriver: DriverType = 'postgres'
-): Promise<DomainEvent> {
-  const isSqlite = dbDriver === 'sqlite';
-  let body: any;
-
-  if (!isSqlite && isCompressed) {
-    try {
-      body = await CompressionUtils.decompressAndParse(payload);
-    } catch (error) {
-      CompressionMetrics.recordError();
-      // Fallback to JSON.parse
-      body = JSON.parse(payload);
-    }
-  } else {
-    body = JSON.parse(payload);
-  }
-
-  const proto: any = { payload: body };
-  proto.constructor = { name: type } as any;
-
-  const event: DomainEvent = Object.assign(Object.create(proto), {
-    aggregateId,
-    requestId,
-    blockHeight,
-    version, // Include version from database
-    timestamp: body.timestamp, // Extract timestamp from payload if needed
-  });
-
-  return event;
-}
-
 /**
- * Single-pass serialization; output is used for BOTH:
- *  - aggregate tables (TEXT payload, possibly base64(deflate))
- *  - outbox (binary Buffer + uncompressed byte length)
+ * Single-pass serialization; ONE buffer feeds BOTH:
+ *  - aggregate tables (BLOB/bytea)
+ *  - outbox (BLOB/bytea)
+ * No extra plain-buffer if compression is used.
  */
 export async function serializeEventRow(
   event: Record<string, any>,
@@ -107,9 +62,9 @@ export async function serializeEventRow(
   dbDriver: DriverType = 'postgres'
 ): Promise<
   EventDataParameters & {
-    // additional fields used for outbox mapping (no duplication of logic)
     payloadUncompressedBytes: number;
-    payloadForOutboxBuffer: Buffer; // binary for outbox (compressed or plain UTF-8)
+    payloadAggregate: Buffer; // binary buffer for aggregate table
+    payloadOutbox: Buffer; // same reference as above for outbox
   }
 > {
   const { aggregateId, requestId, blockHeight, ...payload } = event;
@@ -119,41 +74,59 @@ export async function serializeEventRow(
   if (blockHeight == null) throw new Error('blockHeight is missing in the event');
 
   const type = Object.getPrototypeOf(event).constructor.name;
-  const isSqlite = dbDriver === 'sqlite';
+  const json = JSON.stringify(payload ?? {}); // string once
+  const uncompressedLen = Buffer.byteLength(json, 'utf8'); // exact uncompressed size
+  const tryCompress = dbDriver === 'postgres' && CompressionUtils.shouldCompress(json);
 
-  // JSON once
-  const json = JSON.stringify(payload ?? {});
-  const uncompressedLen = Buffer.byteLength(json, 'utf8');
-
+  let buf: Buffer;
   let isCompressed = false;
-  let aggregatePayloadText = json; // what goes to aggregate tables (TEXT)
-  let outboxPayloadBuffer = Buffer.from(json, 'utf8'); // what goes to outbox (BLOB/BYTEA)
 
-  if (!isSqlite && uncompressedLen > 2048 && CompressionUtils.shouldCompress(json)) {
-    try {
-      const t0 = Date.now();
-      const res = await CompressionUtils.compress(json); // base64
-      CompressionMetrics.recordCompression(res, Date.now() - t0);
-
-      // Only keep compression if it actually saves space
-      if (res.compressedSize / res.originalSize < 0.9) {
-        isCompressed = true;
-        aggregatePayloadText = res.data; // base64 string for TEXT column
-        outboxPayloadBuffer = Buffer.from(res.data, 'base64'); // binary bytes for BYTEA/BLOB
-      }
-    } catch {
-      // keep json plain
+  if (tryCompress) {
+    const res = await CompressionUtils.compressToBuffer(json); // produces compressed Buffer
+    // keep compression only if it saves at least ~10%
+    if (res.compressedSize / res.originalSize < 0.9) {
+      buf = res.buffer; // compressed bytes
+      isCompressed = true;
+    } else {
+      buf = Buffer.from(json, 'utf8'); // fallback to plain bytes
     }
+  } else {
+    buf = Buffer.from(json, 'utf8'); // plain bytes (one buffer only)
   }
 
+  // IMPORTANT: same Buffer instance goes to both aggregate and outbox
   return {
     type,
-    payload: aggregatePayloadText,
+    payload: buf, // for aggregate table
     version,
     requestId,
     blockHeight,
     isCompressed,
     payloadUncompressedBytes: uncompressedLen,
-    payloadForOutboxBuffer: outboxPayloadBuffer,
+    payloadAggregate: buf,
+    payloadOutbox: buf,
   };
+}
+
+/** Read-side helper (OK to parse). Aggregate row uses Buffer payload. */
+export async function deserializeToDomainEvent(
+  aggregateId: string,
+  { type, requestId, blockHeight, payload, isCompressed, version }: EventDataParameters,
+  _dbDriver: DriverType = 'postgres'
+): Promise<DomainEvent> {
+  const jsonStr = isCompressed ? await CompressionUtils.decompressBufferToString(payload) : payload.toString('utf8');
+  const body = JSON.parse(jsonStr);
+
+  const proto: any = { payload: body };
+  proto.constructor = { name: type } as any;
+
+  const event: DomainEvent = Object.assign(Object.create(proto), {
+    aggregateId,
+    requestId,
+    blockHeight,
+    version,
+    timestamp: body?.timestamp,
+  });
+
+  return event;
 }

@@ -11,14 +11,14 @@ import {
 import { PostgresError } from 'pg-error-enum';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
-import { BaseAdapter } from './base-adapter';
+import { BaseAdapter, SnapshotRetention } from './base-adapter';
 import { OutboxRowInternal } from '../outbox.model';
 import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
 import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import { CompressionUtils } from '../compression.utils';
+import { CompressionUtils } from '../compression';
 
-const FIXED_OVERHEAD = 160; // conservative per-event envelope overhead
+const FIXED_OVERHEAD = 160; // conservative per-event envelope overhead (wire-level)
 
 @Injectable()
 export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
@@ -36,12 +36,20 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   // ======== Persist (single tx) ========
 
+  /**
+   * Persist aggregates + outbox in a single READ COMMITTED tx.
+   * We generate exactly ONE Buffer per event, and reuse it for BOTH inserts.
+   */
   async persistAggregatesAndOutbox(aggregates: T[]): Promise<void> {
     if (!aggregates.length) return;
 
-    await this.runInTx(async (qr) => {
-      const perAgg = new Map<string, EventDataParameters[]>();
-      const flat: Array<{ aggId: string; row: EventDataParameters; ts: number }> = [];
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction('READ COMMITTED');
+
+    try {
+      const perAgg = new Map<string, EventDataParameters[]>(); // aggregate rows
+      const outRows: Omit<OutboxRowInternal, 'id'>[] = []; // outbox rows
 
       for (const agg of aggregates) {
         const unsaved = agg.getUnsavedEvents();
@@ -49,49 +57,87 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
         const base = agg.version - unsaved.length;
         const rows: EventDataParameters[] = [];
+
         for (let i = 0; i < unsaved.length; i++) {
           const ev = unsaved[i]!;
-          const ser = await serializeEventRow(ev, base + i + 1, 'postgres');
-          rows.push(ser);
-          flat.push({ aggId: agg.aggregateId, row: ser, ts: ev.timestamp ?? Date.now() });
+          const ser = await serializeEventRow(ev, base + i + 1, 'postgres'); // ONE buffer created inside
+
+          // Aggregate row (binary payload)
+          rows.push({
+            type: ser.type,
+            payload: ser.payloadAggregate, // same Buffer
+            version: ser.version,
+            requestId: ser.requestId,
+            blockHeight: ser.blockHeight,
+            isCompressed: ser.isCompressed,
+          });
+
+          // Outbox row (binary payload + uncompressed byte length)
+          outRows.push({
+            aggregateId: agg.aggregateId,
+            eventType: ser.type,
+            eventVersion: ser.version,
+            requestId: ser.requestId,
+            blockHeight: ser.blockHeight,
+            payload: ser.payloadOutbox, // same Buffer
+            timestamp: ev.timestamp ?? Date.now(),
+            isCompressed: ser.isCompressed ?? false,
+            payload_uncompressed_bytes: ser.payloadUncompressedBytes,
+          });
         }
+
         perAgg.set(agg.aggregateId, rows);
       }
 
-      if (!flat.length) return;
-      flat.sort((a, b) => a.ts - b.ts);
+      if (!outRows.length) {
+        await qr.commitTransaction();
+        await qr.release();
+        return;
+      }
 
-      // insert into aggregate tables (use QueryBuilder insert bulk)
+      // Insert aggregate rows
       for (const [aggId, rows] of perAgg.entries()) {
         const repo = qr.manager.getRepository<EventDataParameters>(aggId);
         await repo.createQueryBuilder().insert().values(rows).updateEntity(false).execute();
       }
 
-      // insert into outbox (binary payload + uncompressed length)
+      // Insert outbox rows
       const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
-      const outRows = flat.map(({ aggId, row, ts }) => ({
-        aggregateId: aggId,
-        eventType: row.type,
-        eventVersion: row.version,
-        requestId: row.requestId,
-        blockHeight: row.blockHeight,
-        payload: (row as any).payloadForOutboxBuffer as Buffer,
-        timestamp: ts,
-        isCompressed: row.isCompressed ?? false,
-        payload_uncompressed_bytes: (row as any).payloadUncompressedBytes as number,
-      }));
-      try {
-        await outboxRepo.createQueryBuilder().insert().values(outRows).updateEntity(false).execute();
-      } catch (err) {
-        this.handleDatabaseError(err as any);
-      }
+      await outboxRepo.createQueryBuilder().insert().values(outRows).updateEntity(false).execute();
 
+      // Mark events saved (whole batch is one tx)
       for (const agg of aggregates) agg.markEventsAsSaved();
-    });
+
+      await qr.commitTransaction();
+      await qr.release();
+    } catch (err) {
+      await qr.rollbackTransaction().catch(() => undefined);
+      await qr.release().catch(() => undefined);
+
+      if (err instanceof QueryFailedError) {
+        const code = (err as any).driverError?.code;
+        if (
+          code === PostgresError.UNIQUE_VIOLATION &&
+          String((err as any).driverError?.detail || '').includes('Key (aggregateId, eventVersion)')
+        ) {
+          // outbox idempotency
+          this.log.debug('Idempotency: duplicate outbox row — skipping (Postgres)');
+          return;
+        }
+        if (
+          code === PostgresError.UNIQUE_VIOLATION &&
+          String((err as any).driverError?.detail || '').includes('Key (version, request_id)')
+        ) {
+          // aggregate table idempotency
+          this.log.debug('Idempotency: duplicate event — skipping (Postgres)');
+          return;
+        }
+      }
+      throw err;
+    }
   }
 
-  // ======== Streaming one chunk per tx ========
-
+  // ======== Outbox streaming: lock -> deliver+ACK -> delete -> commit (ORDER BY timestamp,id) ========
   async fetchDeliverAckChunk(
     wireBudgetBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
@@ -99,19 +145,20 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.startTransaction('READ COMMITTED');
+
     try {
       const ids: number[] = [];
       const events: WireEventRecord[] = [];
       let budget = wireBudgetBytes;
 
-      // loop: pick 1 row at a time under lock
+      // We type one by one under the blocking, in a strict order (timestamp,id)
       while (true) {
         const rows = (await qr.manager.query(`
           SELECT id, "aggregateId", "eventType", "eventVersion", "requestId",
-                 "blockHeight", payload, "isCompressed",
-                 "payload_uncompressed_bytes" AS "ulen", "timestamp"
+                "blockHeight", payload, "isCompressed",
+                "payload_uncompressed_bytes" AS "ulen", "timestamp"
           FROM outbox
-          ORDER BY id
+          ORDER BY "timestamp" ASC, id ASC
           FOR UPDATE SKIP LOCKED
           LIMIT 1
         `)) as Array<{
@@ -130,11 +177,9 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         if (rows.length === 0) break;
 
         const r = rows[0]!;
-        // decompress if needed (binary or base64 handled)
         const jsonStr = r.isCompressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
 
         const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
-
         if (events.length > 0 && rowBytes > budget) break;
 
         ids.push(r.id);
@@ -156,10 +201,10 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         return 0;
       }
 
-      // deliver and await ACK
+      // We send the batch and wait for ACK
       await deliver(events);
 
-      // delete acked ids in the same tx
+      // Remove ACK'ed rows in the same transaction
       await qr.manager.query(`DELETE FROM outbox WHERE id = ANY($1)`, [ids]);
 
       await qr.commitTransaction();
@@ -172,26 +217,47 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     }
   }
 
-  // ======== Optional fallback (not used by new path) ========
-  async toWireEvents(rows: OutboxRowInternal[]): Promise<WireEventRecord[]> {
-    const list = new Array(rows.length);
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i]!;
-      const payloadStr = r.isCompressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
-      list[i] = {
-        modelName: r.aggregateId,
-        eventType: r.eventType,
-        eventVersion: Number(r.eventVersion),
-        requestId: r.requestId,
-        blockHeight: Number(r.blockHeight),
-        payload: payloadStr,
-        timestamp: Number(r.timestamp),
-      };
-    }
-    return list;
+  // ======== Rollback (single tx) ========
+
+  async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    await this.runInTx(async (qr) => {
+      // events
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
+      }
+      // snapshots
+      await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = ANY($1) AND "blockHeight" > $2`, [
+        aggregateIds,
+        blockHeight,
+      ]);
+      // outbox
+      await qr.manager.query(`DELETE FROM "outbox" WHERE "aggregateId" = ANY($1) AND "blockHeight" > $2`, [
+        aggregateIds,
+        blockHeight,
+      ]);
+    });
   }
 
-  // ======== Read / Snapshots (как было) ========
+  async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
+    const { aggregateId } = model;
+    if (!aggregateId) throw new Error('Model does not have aggregateId');
+
+    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
+    if (!snap) {
+      await this.applyEventsToAggregateAtHeight(model, blockHeight);
+      return;
+    }
+    if (snap.blockHeight < blockHeight) {
+      const decomp = await deserializeSnapshot(snap, 'postgres');
+      model.fromSnapshot(decomp);
+      await this.applyEventsToAggregateAtHeight(model, blockHeight);
+    } else {
+      const decomp = await deserializeSnapshot(snap, 'postgres');
+      model.fromSnapshot(decomp);
+    }
+  }
+
+  // ======== Reads / Snapshots ========
 
   async findLatestSnapshot(aggregateId: string): Promise<SnapshotInterface | null> {
     const repo = this.getRepository<SnapshotInterface>('snapshots');
@@ -227,15 +293,16 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     }
   }
 
-  async createSnapshot(aggregate: T): Promise<void> {
+  async createSnapshot(aggregate: T, ret?: SnapshotRetention): Promise<void> {
     if (!aggregate.canMakeSnapshot()) return;
     try {
       const snapshot = await serializeSnapshot(aggregate as any, 'postgres');
       const repo = this.getRepository('snapshots');
       await repo.createQueryBuilder().insert().values(snapshot).updateEntity(false).execute();
       aggregate.resetSnapshotCounter();
+
       if (aggregate.allowPruning) {
-        await this.pruneOldSnapshots(aggregate.aggregateId, snapshot.blockHeight);
+        await this.applySnapshotRetention(aggregate.aggregateId, snapshot.blockHeight, ret);
       }
     } catch (error) {
       if (error instanceof QueryFailedError) {
@@ -256,23 +323,13 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         .createQueryBuilder()
         .delete()
         .where('aggregateId = :aggregateId', { aggregateId })
-        .andWhere('blockHeight >= :blockHeight', { blockHeight })
+        .andWhere('blockHeight > :blockHeight', { blockHeight })
         .execute();
     }
   }
 
-  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number): Promise<void> {
-    try {
-      const repo = this.getRepository('snapshots');
-      await repo
-        .createQueryBuilder()
-        .delete()
-        .where('aggregateId = :aggregateId', { aggregateId })
-        .andWhere('blockHeight < :blockHeight', { blockHeight: currentBlockHeight })
-        .execute();
-    } catch (error) {
-      this.log.debug('Error pruning old snapshots', { args: { aggregateId, currentBlockHeight, error } });
-    }
+  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number, ret?: SnapshotRetention): Promise<void> {
+    await this.applySnapshotRetention(aggregateId, currentBlockHeight, ret);
   }
 
   async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
@@ -327,7 +384,8 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     return results.flat();
   }
 
-  // internals
+  // ======== internals ========
+
   private async runInTx<T>(fn: (qr: QueryRunner) => Promise<T>): Promise<T> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -353,20 +411,22 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   private handleDatabaseError(error: any): void {
     if (error instanceof QueryFailedError) {
-      const code = error.driverError?.code;
-      if (
-        code === PostgresError.UNIQUE_VIOLATION &&
-        String(error.driverError?.detail || '').includes('Key (aggregateId, eventVersion)')
-      ) {
-        this.log.debug('Idempotency: duplicate outbox row — skipping (Postgres)');
-        return;
-      }
-      if (
-        code === PostgresError.UNIQUE_VIOLATION &&
-        String(error.driverError?.detail || '').includes('Key (version, request_id)')
-      ) {
-        this.log.debug('Idempotency: duplicate event — skipping (Postgres)');
-        return;
+      const code = (error.driverError as any)?.code as string | undefined;
+      const constraint = (error as any)?.constraint as string | undefined;
+
+      if (code === PostgresError.UNIQUE_VIOLATION) {
+        if (constraint === 'UQ_outbox_aggregate_version') {
+          // this.log.debug('Idempotency: duplicate outbox row — skipping (Postgres)');
+          return;
+        }
+        if (constraint === 'UQ_aggregate_blockheight') {
+          // this.log.debug('Snapshot conflict — skipping (Postgres)');
+          return;
+        }
+        if (constraint && /UQ_.*_version_requestId/.test(constraint)) {
+          // this.log.debug('Idempotency: duplicate event — skipping (Postgres)');
+          return;
+        }
       }
     }
   }
@@ -387,5 +447,31 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       last = raws[raws.length - 1]!.version;
       if (raws.length < batch) break;
     }
+  }
+
+  private async applySnapshotRetention(aggregateId: string, currentHeight: number, ret?: SnapshotRetention) {
+    const minKeep = ret?.minKeep ?? 2;
+    const win = ret?.keepWindow ?? 0;
+
+    const repo = this.getRepository<SnapshotInterface>('snapshots');
+
+    const keepRows: Array<{ id: string; blockHeight: number }> = await repo
+      .createQueryBuilder('s')
+      .select(['s.id AS id', 's.blockHeight AS blockHeight'])
+      .where('s.aggregateId = :aggregateId', { aggregateId })
+      .orderBy('s.blockHeight', 'DESC')
+      .limit(minKeep)
+      .getRawMany();
+
+    const keepIds = new Set(keepRows.map((r) => r.id));
+    const minHeight = win > 0 ? currentHeight - win : -Infinity;
+
+    await repo
+      .createQueryBuilder()
+      .delete()
+      .where('aggregateId = :aggregateId', { aggregateId })
+      .andWhere('blockHeight < :bh', { bh: Math.max(0, minHeight) })
+      .andWhere(keepIds.size ? `id NOT IN (${[...keepIds].map(() => '?').join(',')})` : '1=1', [...keepIds])
+      .execute();
   }
 }

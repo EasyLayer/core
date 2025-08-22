@@ -28,6 +28,8 @@ export const createOutboxEntity = (dbDriver: 'sqlite' | 'postgres' = 'postgres')
   // TypeORM column type for binary
   const binaryType = isSqlite ? 'blob' : 'bytea';
 
+  const bytesType = isSqlite ? 'integer' : 'bigint';
+
   return new EntitySchema<OutboxRowInternal>({
     name: 'outbox',
     tableName: 'outbox',
@@ -57,6 +59,7 @@ export const createOutboxEntity = (dbDriver: 'sqlite' | 'postgres' = 'postgres')
         default: false,
         nullable: true,
       },
+      payload_uncompressed_bytes: { type: bytesType },
     },
     uniques: [
       {
@@ -64,6 +67,9 @@ export const createOutboxEntity = (dbDriver: 'sqlite' | 'postgres' = 'postgres')
         columns: ['aggregateId', 'eventVersion'],
       },
     ],
-    indices: [{ name: 'IDX_outbox_ts', columns: ['timestamp'] }],
+    indices: [
+      { name: 'IDX_outbox_ts_id', columns: ['timestamp', 'id'] },
+      // { name: 'IDX_outbox_agg_block', columns: ['aggregateId', 'blockHeight'] },
+    ],
   });
 };

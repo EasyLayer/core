@@ -2,12 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { DataSource, QueryFailedError, Repository, MoreThan, LessThanOrEqual, ObjectLiteral } from 'typeorm';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
-import { BaseAdapter } from './base-adapter';
+import { BaseAdapter, SnapshotRetention } from './base-adapter';
 import { OutboxRowInternal } from '../outbox.model';
 import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
 import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import { CompressionUtils } from '../compression.utils';
+import { CompressionUtils } from '../compression';
 
 const FIXED_OVERHEAD = 160;
 
@@ -15,6 +15,8 @@ const FIXED_OVERHEAD = 160;
 export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
   public readonly driver = 'sqlite' as const;
   private sqliteBatchSize = 999;
+
+  private lastSeenTsUs = 0;
   private lastSeenId = 0;
 
   constructor(
@@ -27,14 +29,22 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     }
   }
 
-  // ======== Persist (single tx; PRAGMA optional) ========
+  // ======== Persist (single tx; short PRAGMA) ========
 
+  /**
+   * Persist aggregates + outbox in a single transaction.
+   * We create ONE Buffer per event (optionally compressed) and use it for BOTH:
+   *  - aggregate tables (payload: BLOB)
+   *  - outbox table  (payload: BLOB)
+   * No base64, no duplicate buffers.
+   */
   async persistAggregatesAndOutbox(aggregates: T[]): Promise<void> {
     if (!aggregates.length) return;
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
 
+    // Optional PRAGMAs to speed up bulk writes
     await qr.query('PRAGMA foreign_keys = OFF;');
     await qr.query('PRAGMA journal_mode = WAL;');
     await qr.query('PRAGMA synchronous = NORMAL;');
@@ -48,31 +58,54 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     await qr.startTransaction(); // BEGIN (DEFERRED)
 
     try {
-      const perAgg = new Map<string, EventDataParameters[]>();
-      const flat: Array<{ aggId: string; row: EventDataParameters; ts: number }> = [];
+      const perAgg = new Map<string, EventDataParameters[]>(); // rows for aggregate tables
+      const outRows: Omit<OutboxRowInternal, 'id'>[] = []; // rows for outbox
 
+      // Build both sets in one pass
       for (const agg of aggregates) {
         const unsaved = agg.getUnsavedEvents();
         if (!unsaved.length) continue;
 
         const base = agg.version - unsaved.length;
         const rows: EventDataParameters[] = [];
+
         for (let i = 0; i < unsaved.length; i++) {
           const ev = unsaved[i]!;
-          const ser = await serializeEventRow(ev, base + i + 1, 'sqlite');
-          rows.push(ser);
-          flat.push({ aggId: agg.aggregateId, row: ser, ts: ev.timestamp ?? Date.now() });
+          const ser = await serializeEventRow(ev, base + i + 1, 'sqlite'); // ONE buffer created inside
+
+          // aggregate row (binary payload)
+          rows.push({
+            type: ser.type,
+            payload: ser.payloadAggregate, // same Buffer
+            version: ser.version,
+            requestId: ser.requestId,
+            blockHeight: ser.blockHeight,
+            isCompressed: ser.isCompressed,
+          });
+
+          // outbox row (binary payload, plus uncompressed length)
+          outRows.push({
+            aggregateId: agg.aggregateId,
+            eventType: ser.type,
+            eventVersion: ser.version,
+            requestId: ser.requestId,
+            blockHeight: ser.blockHeight,
+            payload: ser.payloadOutbox, // same Buffer
+            timestamp: ev.timestamp ?? Date.now(),
+            isCompressed: ser.isCompressed ?? false,
+            payload_uncompressed_bytes: ser.payloadUncompressedBytes,
+          });
         }
+
         perAgg.set(agg.aggregateId, rows);
       }
 
-      if (!flat.length) {
+      if (!outRows.length) {
         await qr.commitTransaction();
         return;
       }
-      flat.sort((a, b) => a.ts - b.ts);
 
-      // insert aggregates in batches
+      // Insert aggregate rows in batches
       for (const [aggId, rows] of perAgg.entries()) {
         const repo = qr.manager.getRepository<EventDataParameters>(aggId);
         for (let i = 0; i < rows.length; i += this.sqliteBatchSize) {
@@ -81,26 +114,18 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
         }
       }
 
-      // insert outbox (binary blob + uncompressed bytes)
+      // Insert outbox rows
       const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
-      const outRows = flat.map(({ aggId, row, ts }) => ({
-        aggregateId: aggId,
-        eventType: row.type,
-        eventVersion: row.version,
-        requestId: row.requestId,
-        blockHeight: row.blockHeight,
-        payload: (row as any).payloadForOutboxBuffer as Buffer,
-        timestamp: ts,
-        isCompressed: row.isCompressed ?? false,
-        payload_uncompressed_bytes: (row as any).payloadUncompressedBytes as number,
-      }));
       await outboxRepo.createQueryBuilder().insert().values(outRows).updateEntity(false).execute();
 
+      // Mark events saved on aggregates (entire batch is one tx)
       for (const agg of aggregates) agg.markEventsAsSaved();
+
       await qr.commitTransaction();
     } catch (err) {
       await qr.rollbackTransaction();
-      this.handleDatabaseError(err as any);
+      // Swallow idempotent unique conflicts if any; rethrow others
+      if (!(err instanceof QueryFailedError)) throw err;
       throw err;
     } finally {
       await qr.query('PRAGMA foreign_keys = ON;');
@@ -108,8 +133,7 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     }
   }
 
-  // ======== Streaming (no long read tx; IMMEDIATE on delete) ========
-
+  // ======== Outbox streaming: read in ORDER BY (timestamp,id) -> ACK -> IMMEDIATE delete ========
   async fetchDeliverAckChunk(
     wireBudgetBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
@@ -118,16 +142,16 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     const events: WireEventRecord[] = [];
     let budget = wireBudgetBytes;
 
-    // read 1-by-1 without read tx
     while (true) {
+      // Important: the condition on the tuple is via OR, so that it works the same in both SQLite and PG
       const rows = (await this.dataSource.query(
         `SELECT id, aggregateId, eventType, eventVersion, requestId, blockHeight,
-                payload, isCompressed, payload_uncompressed_bytes AS ulen, timestamp
-         FROM outbox
-         WHERE id > ?
-         ORDER BY id
-         LIMIT 1`,
-        [this.lastSeenId]
+                payload, isCompressed, payload_uncompressed_bytes AS ulen, "timestamp"
+        FROM outbox
+        WHERE ("timestamp" > ? OR ("timestamp" = ? AND id > ?))
+        ORDER BY "timestamp" ASC, id ASC
+        LIMIT 1`,
+        [this.lastSeenTsUs, this.lastSeenTsUs, this.lastSeenId]
       )) as Array<{
         id: number;
         aggregateId: string;
@@ -144,14 +168,12 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
       if (rows.length === 0) break;
 
       const r = rows[0]!;
-      this.lastSeenId = Number(r.id); // watermark moves forward regardless
+      // Shift the watermark to the selected line (strict progress by (ts,id))
+      this.lastSeenTsUs = Number(r.timestamp);
+      this.lastSeenId = Number(r.id);
 
-      const compressedFlag = !!r.isCompressed;
-      const jsonStr = compressedFlag
-        ? await CompressionUtils.decompressAny(r.payload)
-        : Buffer.isBuffer(r.payload)
-          ? r.payload.toString('utf8')
-          : String(r.payload);
+      const compressed = !!r.isCompressed;
+      const jsonStr = compressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
 
       const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
       if (events.length > 0 && rowBytes > budget) break;
@@ -171,9 +193,10 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
 
     if (events.length === 0) return 0;
 
+    // We send one batch and wait for a single ACK
     await deliver(events);
 
-    // short write tx to delete exactly acked ids
+    // Remove ACK'ed ids
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN IMMEDIATE');
@@ -190,19 +213,72 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     return events.length;
   }
 
-  // ======== Optional fallback ========
-  async toWireEvents(rows: OutboxRowInternal[]): Promise<WireEventRecord[]> {
-    return Promise.all(
-      rows.map(async (r) => ({
-        modelName: r.aggregateId,
-        eventType: r.eventType,
-        eventVersion: Number(r.eventVersion),
-        requestId: r.requestId,
-        blockHeight: Number(r.blockHeight),
-        payload: r.isCompressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8'),
-        timestamp: Number(r.timestamp),
-      }))
-    );
+  // ======== Rollback ========
+
+  async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    // Short IMMEDIATE deletes per table to minimize writer blocking
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+
+    try {
+      // Delete events and snapshots above height per aggregate
+      for (const id of aggregateIds) {
+        await qr.query('BEGIN IMMEDIATE');
+        try {
+          await qr.manager.query(`DELETE FROM "${id}" WHERE blockHeight > ?`, [blockHeight]);
+          await qr.commitTransaction();
+        } catch {
+          await qr.rollbackTransaction().catch(() => undefined);
+          throw new Error(`Failed to delete events for ${id}`);
+        }
+
+        await qr.query('BEGIN IMMEDIATE');
+        try {
+          await qr.manager.query(`DELETE FROM snapshots WHERE "aggregateId" = ? AND "blockHeight" > ?`, [
+            id,
+            blockHeight,
+          ]);
+          await qr.commitTransaction();
+        } catch {
+          await qr.rollbackTransaction().catch(() => undefined);
+          throw new Error(`Failed to delete snapshots for ${id}`);
+        }
+      }
+
+      // Outbox cleanup for affected aggregates
+      await qr.query('BEGIN IMMEDIATE');
+      try {
+        await qr.manager.query(
+          `DELETE FROM outbox WHERE "aggregateId" IN (${aggregateIds.map(() => '?').join(',')}) AND "blockHeight" > ?`,
+          [...aggregateIds, blockHeight]
+        );
+        await qr.commitTransaction();
+      } catch {
+        await qr.rollbackTransaction().catch(() => undefined);
+        throw new Error(`Failed to delete outbox rows`);
+      }
+    } finally {
+      await qr.release();
+    }
+  }
+
+  async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
+    const { aggregateId } = model;
+    if (!aggregateId) throw new Error('Model does not have aggregateId');
+
+    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
+    if (!snap) {
+      await this.applyEventsToAggregateAtHeight(model, blockHeight);
+      return;
+    }
+    if (snap.blockHeight < blockHeight) {
+      const decomp = await deserializeSnapshot(snap, 'sqlite');
+      model.fromSnapshot(decomp);
+      await this.applyEventsToAggregateAtHeight(model, blockHeight);
+    } else {
+      const decomp = await deserializeSnapshot(snap, 'sqlite');
+      model.fromSnapshot(decomp);
+    }
   }
 
   // ======== Read / Snapshots ========
@@ -241,15 +317,17 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     }
   }
 
-  async createSnapshot(aggregate: T): Promise<void> {
+  async createSnapshot(aggregate: T, ret?: SnapshotRetention): Promise<void> {
     if (!aggregate.canMakeSnapshot()) return;
     try {
       const snapshot = await serializeSnapshot(aggregate as any, 'sqlite');
       const repo = this.getRepository('snapshots');
       await repo.createQueryBuilder().insert().values(snapshot).updateEntity(false).execute();
       aggregate.resetSnapshotCounter();
+
+      // Retention (keep window / min keep)
       if (aggregate.allowPruning) {
-        await this.pruneOldSnapshots(aggregate.aggregateId, snapshot.blockHeight);
+        await this.applySnapshotRetention(aggregate.aggregateId, snapshot.blockHeight, ret);
       }
     } catch (error) {
       if (error instanceof QueryFailedError) {
@@ -270,23 +348,13 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
         .createQueryBuilder()
         .delete()
         .where('aggregateId = :aggregateId', { aggregateId })
-        .andWhere('blockHeight >= :blockHeight', { blockHeight })
+        .andWhere('blockHeight > :blockHeight', { blockHeight })
         .execute();
     }
   }
 
-  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number): Promise<void> {
-    try {
-      const repo = this.getRepository('snapshots');
-      await repo
-        .createQueryBuilder()
-        .delete()
-        .where('aggregateId = :aggregateId', { aggregateId })
-        .andWhere('blockHeight < :blockHeight', { blockHeight: currentBlockHeight })
-        .execute();
-    } catch (error) {
-      this.log.debug('Error pruning old snapshots', { args: { aggregateId, currentBlockHeight, error } });
-    }
+  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number, ret?: SnapshotRetention): Promise<void> {
+    await this.applySnapshotRetention(aggregateId, currentBlockHeight, ret);
   }
 
   async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
@@ -341,7 +409,8 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     return results.flat();
   }
 
-  // internals
+  // ======== internals ========
+
   private getRepository<T extends ObjectLiteral = any>(entityName: string): Repository<T> {
     const meta = this.dataSource.entityMetadatasMap.get(entityName);
     if (!meta) throw new Error(`Entity with name "${entityName}" not found.`);
@@ -380,5 +449,34 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
       last = raws[raws.length - 1]!.version;
       if (raws.length < batch) break;
     }
+  }
+
+  private async applySnapshotRetention(aggregateId: string, currentHeight: number, ret?: SnapshotRetention) {
+    const minKeep = ret?.minKeep ?? 2;
+    const win = ret?.keepWindow ?? 0;
+
+    // Keep last `minKeep` snapshots always; optionally keep height window
+    const repo = this.getRepository<SnapshotInterface>('snapshots');
+
+    // Find ids to keep by minKeep
+    const keepRows: Array<{ id: string; blockHeight: number }> = await repo
+      .createQueryBuilder('s')
+      .select(['s.id AS id', 's.blockHeight AS blockHeight'])
+      .where('s.aggregateId = :aggregateId', { aggregateId })
+      .orderBy('s.blockHeight', 'DESC')
+      .limit(minKeep)
+      .getRawMany();
+
+    const keepIds = new Set(keepRows.map((r) => r.id));
+    const minHeight = win > 0 ? currentHeight - win : -Infinity;
+
+    // Delete everything below minHeight except keepIds
+    await repo
+      .createQueryBuilder()
+      .delete()
+      .where('aggregateId = :aggregateId', { aggregateId })
+      .andWhere('blockHeight < :bh', { bh: Math.max(0, minHeight) })
+      .andWhere(keepIds.size ? `id NOT IN (${[...keepIds].map(() => '?').join(',')})` : '1=1', [...keepIds])
+      .execute();
   }
 }

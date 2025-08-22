@@ -1,19 +1,15 @@
 import { Module, DynamicModule } from '@nestjs/common';
 import { TypeOrmModule, getDataSourceToken, TypeOrmModuleOptions } from '@nestjs/typeorm';
-import { addTransactionalDataSource, initializeTransactionalContext } from 'typeorm-transactional';
 import { DataSource } from 'typeorm';
 import type { DataSourceOptions } from 'typeorm';
 import { RdbmsSchemaBuilder } from 'typeorm/schema-builder/RdbmsSchemaBuilder.js';
-
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import { Publisher } from '@easylayer/common/cqrs-transport';
 import { ContextModule } from '@easylayer/common/context';
-
 import { createSnapshotsEntity } from './snapshots.model';
 import { createEventDataEntity } from './event-data.model';
 import { createOutboxEntity } from './outbox.model';
-
 import { EventStoreService } from './eventstore.service';
 import { BaseAdapter } from './adapters/base-adapter';
 import { PostgresAdapter } from './adapters/postgres.adapter';
@@ -128,6 +124,89 @@ async function ensureSchema(ds: DataSource, allTableNames: string[], log: AppLog
   log.info('Partial schema sync completed.');
 }
 
+async function ensureNonNegativeGuards(
+  ds: DataSource,
+  driver: 'postgres' | 'sqlite',
+  outboxTable: string,
+  aggregateTables: string[],
+  log: AppLogger
+) {
+  if (driver === 'postgres') {
+    await ensurePgCheck(ds, outboxTable, 'chk_outbox_blockheight_nonneg', `"blockHeight" >= 0`);
+    await ensurePgCheck(ds, outboxTable, 'chk_outbox_eventversion_nonneg', `"eventVersion" >= 0`);
+    for (const t of aggregateTables) {
+      await ensurePgCheck(ds, t, `chk_${t}_version_nonneg`, `"version" >= 0`);
+    }
+    log.info('PG CHECK constraints ensured (non-negative guards).');
+  } else {
+    // SQLite: add BEFORE INSERT/UPDATE triggers that abort on negative values (safe for existing tables)
+    await ensureSqliteNonNegTrigger(ds, outboxTable, 'blockHeight');
+    await ensureSqliteNonNegTrigger(ds, outboxTable, 'eventVersion');
+    for (const t of aggregateTables) {
+      await ensureSqliteNonNegTrigger(ds, t, 'version');
+    }
+    log.info('SQLite triggers ensured (non-negative guards).');
+  }
+}
+
+async function ensurePgCheck(ds: DataSource, table: string, constraint: string, expr: string) {
+  const existsSql = `
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON c.conrelid = t.oid
+    JOIN pg_namespace n ON t.relnamespace = n.oid
+    WHERE t.relname = $1 AND c.conname = $2
+    LIMIT 1
+  `;
+  const [{ exists } = { exists: 0 }] = (await ds.query(`SELECT EXISTS(${existsSql}) AS exists`, [
+    table,
+    constraint,
+  ])) as any[];
+
+  if (!exists) {
+    await ds.query(`ALTER TABLE "${table}" ADD CONSTRAINT "${constraint}" CHECK (${expr})`);
+  }
+}
+
+async function ensureSqliteNonNegTrigger(ds: DataSource, table: string, column: string) {
+  const trigName = `trg_${table}_${column}_nonneg`;
+  const row = (await ds.query(`SELECT name FROM sqlite_master WHERE type='trigger' AND name=? LIMIT 1`, [
+    trigName,
+  ])) as Array<{ name: string }>;
+  if (row.length > 0) return;
+
+  // Two triggers: BEFORE INSERT и BEFORE UPDATE
+  const ddlInsert = `
+    CREATE TRIGGER "${trigName}_ins"
+    BEFORE INSERT ON "${table}"
+    WHEN NEW."${column}" < 0
+    BEGIN
+      SELECT RAISE(ABORT, 'Constraint ${trigName}: ${column} must be >= 0');
+    END;
+  `;
+  const ddlUpdate = `
+    CREATE TRIGGER "${trigName}_upd"
+    BEFORE UPDATE ON "${table}"
+    WHEN NEW."${column}" < 0
+    BEGIN
+      SELECT RAISE(ABORT, 'Constraint ${trigName}: ${column} must be >= 0');
+    END;
+  `;
+  const qr = ds.createQueryRunner();
+  await qr.connect();
+  await qr.startTransaction();
+  try {
+    await qr.query(ddlInsert);
+    await qr.query(ddlUpdate);
+    await qr.commitTransaction();
+  } catch (e) {
+    await qr.rollbackTransaction().catch(() => undefined);
+    throw e;
+  } finally {
+    await qr.release();
+  }
+}
+
 /**
  * EventStoreModule
  * - Builds TypeORM DataSource with all entities (outbox, per-aggregate tables, snapshots).
@@ -138,9 +217,6 @@ async function ensureSchema(ds: DataSource, allTableNames: string[], log: AppLog
 export class EventStoreModule {
   static async forRootAsync(config: EventStoreConfig): Promise<DynamicModule> {
     const { name, database, aggregates, ...restOptions } = config;
-
-    // Initialize transactional context for typeorm-transactional
-    initializeTransactionalContext();
 
     // Compose entity list: outbox + aggregate tables + snapshots
     const snapshotsEntity = createSnapshotsEntity(config.type);
@@ -160,6 +236,8 @@ export class EventStoreModule {
 
     // Precompute target table names (for partial sync and diagnostics)
     const allTableNames = entities.map(getTableName);
+    const outboxTable = getTableName(outboxEntity);
+    const aggregateTables = aggregateEntities.map(getTableName);
 
     return {
       module: EventStoreModule,
@@ -184,8 +262,7 @@ export class EventStoreModule {
             // Ensure schema: create only missing tables/indexes/constraints
             await ensureSchema(ds, allTableNames, options.log!);
 
-            // Register transactional DataSource with the given unique name
-            addTransactionalDataSource({ name, dataSource: ds });
+            await ensureNonNegativeGuards(ds, config.type, outboxTable, aggregateTables, options.log!);
 
             options.log?.info('Connected and schema ensured.');
             return ds;

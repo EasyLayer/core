@@ -11,20 +11,20 @@ export class NotSupportedError extends Error {
   }
 }
 
+export interface SnapshotRetention {
+  minKeep?: number; // keep at least N snapshots
+  keepWindow?: number; // keep snapshots with blockHeight >= (currentHeight - keepWindow)
+}
+
 export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
   abstract readonly driver: DriverType;
 
-  // Write path
+  // ===== persist
   async persistAggregatesAndOutbox(_aggregates: T[]): Promise<void> {
     throw new NotSupportedError('persistAggregatesAndOutbox', this.driver);
   }
 
-  // Wire conversion (fallback use)
-  async toWireEvents(_rows: OutboxRowInternal[]): Promise<WireEventRecord[]> {
-    throw new NotSupportedError('toWireEvents', this.driver);
-  }
-
-  // New: one-chunk streaming with precise byte budget + ACK
+  // ===== outbox delivery
   async fetchDeliverAckChunk(
     _wireBudgetBytes: number,
     _deliver: (events: WireEventRecord[]) => Promise<void>
@@ -32,37 +32,55 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
     throw new NotSupportedError('fetchDeliverAckChunk', this.driver);
   }
 
-  // Read / snapshots
+  // ===== rollback
+  async rollbackAggregates(_aggregateIds: string[], _blockHeight: number): Promise<void> {
+    throw new NotSupportedError('rollbackAggregates', this.driver);
+  }
+
+  async rehydrateAtHeight<K extends T>(_model: K, _blockHeight: number): Promise<void> {
+    throw new NotSupportedError('rehydrateAtHeight', this.driver);
+  }
+
+  // ===== snapshots / reads
   async findLatestSnapshot(_aggregateId: string): Promise<SnapshotInterface | null> {
     throw new NotSupportedError('findLatestSnapshot', this.driver);
   }
+
   async findSnapshotBeforeHeight(_aggregateId: string, _blockHeight: number): Promise<SnapshotInterface | null> {
     throw new NotSupportedError('findSnapshotBeforeHeight', this.driver);
   }
+
   async applyEventsToAggregate<K extends T>(_model: K, _fromVersion?: number): Promise<void> {
     throw new NotSupportedError('applyEventsToAggregate', this.driver);
   }
-  async createSnapshot(_aggregate: T): Promise<void> {
+
+  async createSnapshot(_aggregate: T, _ret?: SnapshotRetention): Promise<void> {
     throw new NotSupportedError('createSnapshot', this.driver);
   }
+
   async deleteSnapshotsByBlockHeight(_aggregateIds: string[], _blockHeight: number): Promise<void> {
     throw new NotSupportedError('deleteSnapshotsByBlockHeight', this.driver);
   }
-  async pruneOldSnapshots(_aggregateId: string, _currentBlockHeight: number): Promise<void> {
+
+  async pruneOldSnapshots(_aggregateId: string, _currentBlockHeight: number, _ret?: SnapshotRetention): Promise<void> {
     throw new NotSupportedError('pruneOldSnapshots', this.driver);
   }
+
   async pruneEvents(_aggregateId: string, _pruneToBlockHeight: number): Promise<void> {
     throw new NotSupportedError('pruneEvents', this.driver);
   }
+
   async createSnapshotAtHeight<K extends T>(_model: K, _blockHeight: number): Promise<SnapshotParameters> {
     throw new NotSupportedError('createSnapshotAtHeight', this.driver);
   }
+
   async fetchEventsForAggregate(
     _aggregateId: string,
     _options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
   ): Promise<DomainEvent[]> {
     throw new NotSupportedError('fetchEventsForAggregate', this.driver);
   }
+
   async fetchEventsForAggregates(
     _aggregateIds: string[],
     _options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
