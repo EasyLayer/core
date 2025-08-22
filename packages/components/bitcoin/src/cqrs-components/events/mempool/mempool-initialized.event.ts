@@ -1,4 +1,4 @@
-import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
+import { BasicEvent } from '@easylayer/common/cqrs';
 
 export interface BitcoinMempoolInitializedEventPayload {
   allTxidsFromNode: string[];
@@ -9,5 +9,4 @@ export interface BitcoinMempoolInitializedEventPayload {
   aggregatedMetadata: any;
 }
 
-@SystemEvent()
 export class BitcoinMempoolInitializedEvent extends BasicEvent<BitcoinMempoolInitializedEventPayload> {}

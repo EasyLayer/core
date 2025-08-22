@@ -13,6 +13,14 @@ export interface CQRSModuleParameters {
 
 @Module({})
 export class CustomCqrsModule<E extends DomainEvent = DomainEvent> implements OnModuleInit {
+  static forFeature(): DynamicModule {
+    return {
+      module: CustomCqrsModule,
+      providers: [],
+      exports: [CommandBus, QueryBus, EventBus, EventPublisher, EventBus, UnhandledExceptionBus],
+    };
+  }
+
   static forRoot(parameters: CQRSModuleParameters): DynamicModule {
     return {
       module: CustomCqrsModule,

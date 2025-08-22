@@ -1,21 +1,39 @@
 import { Module, OnModuleInit, Inject, DynamicModule } from '@nestjs/common';
 import { EventBus, CustomEventBus } from '@easylayer/common/cqrs';
-import { LoggerModule, AppLogger } from '@easylayer/common/logger';
+import { LoggerModule } from '@easylayer/common/logger';
 import { Publisher } from './publisher';
 import { Subscriber } from './subscriber';
 
-interface CqrsTransportModuleOptons {
+interface CqrsTransportModuleOptions {
   isGlobal?: boolean;
+  systemAggregates?: string[];
 }
 
 @Module({})
 export class CqrsTransportModule implements OnModuleInit {
-  static forRoot(options?: CqrsTransportModuleOptons): DynamicModule {
+  static forFeature(): DynamicModule {
+    return {
+      module: CqrsTransportModule,
+      providers: [],
+      exports: [Publisher],
+    };
+  }
+
+  static forRoot(options?: CqrsTransportModuleOptions): DynamicModule {
+    const systemModelNames = options?.systemAggregates || [];
+
     return {
       module: CqrsTransportModule,
       global: options?.isGlobal || false,
       imports: [LoggerModule.forRoot({ componentName: CqrsTransportModule.name })],
-      providers: [Publisher, Subscriber],
+      providers: [
+        {
+          provide: 'SYSTEM_MODEL_NAMES',
+          useValue: systemModelNames,
+        },
+        Publisher,
+        Subscriber,
+      ],
       exports: [],
     };
   }
@@ -23,13 +41,10 @@ export class CqrsTransportModule implements OnModuleInit {
   constructor(
     @Inject(EventBus)
     private readonly eventBus: CustomEventBus,
-    private readonly publisher: Publisher,
-    private readonly log: AppLogger
+    private readonly publisher: Publisher
   ) {}
 
   async onModuleInit(): Promise<void> {
-    this.log.debug('Linking publisher to EventBus');
     this.eventBus.publisher = this.publisher;
-    this.log.debug('Publisher linked');
   }
 }

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CustomEventBus } from './custom-event-bus';
 import type { CustomAggregateRoot } from './custom-aggregate-root';
-import type { SystemFields, DomainEvent } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 export interface Constructor<T> {
   new (...args: any[]): T;

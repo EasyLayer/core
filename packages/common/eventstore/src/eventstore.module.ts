@@ -3,15 +3,23 @@ import { TypeOrmModule, getDataSourceToken, TypeOrmModuleOptions } from '@nestjs
 import { addTransactionalDataSource, initializeTransactionalContext } from 'typeorm-transactional';
 import { DataSource } from 'typeorm';
 import type { DataSourceOptions } from 'typeorm';
+import { RdbmsSchemaBuilder } from 'typeorm/schema-builder/RdbmsSchemaBuilder.js';
+
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import { ContextModule, ContextService } from '@easylayer/common/context';
+import { Publisher } from '@easylayer/common/cqrs-transport';
+import { ContextModule } from '@easylayer/common/context';
+
 import { createSnapshotsEntity } from './snapshots.model';
 import { createEventDataEntity } from './event-data.model';
-import { EventStoreWriteRepository } from './eventstore-write.repository';
-import { EventStoreReadRepository } from './eventstore-read.repository';
-import { EventStoreService } from './eventstore.service';
+import { createOutboxEntity } from './outbox.model';
 
+import { EventStoreService } from './eventstore.service';
+import { BaseAdapter } from './adapters/base-adapter';
+import { PostgresAdapter } from './adapters/postgres.adapter';
+import { SqliteEventStoreAdapter } from './adapters/sqlite.adapter';
+
+/** Runtime config for EventStoreModule */
 type EventStoreConfig = TypeOrmModuleOptions & {
   type: 'sqlite' | 'postgres';
   name: string;
@@ -21,136 +29,188 @@ type EventStoreConfig = TypeOrmModuleOptions & {
   sqliteBatchSize?: number;
 };
 
+/** Internal helper: resolve table name for a TypeORM EntitySchema */
+function getTableName(entity: any): string {
+  // Prefer explicit tableName, otherwise fallback to name
+  return entity?.options?.tableName || entity?.options?.name || entity?.constructor?.name || String(entity);
+}
+
+/**
+ * Ensures schema exists without blindly enabling global synchronize().
+ *
+ * Strategy:
+ * - If none of the required tables exist → run full synchronize() (cold start).
+ * - If some tables exist and some are missing → use RdbmsSchemaBuilder.log()
+ *   to get upQueries and execute only those touching missing tables (CREATE TABLE/INDEX/ALTER ...).
+ * - If queries cannot be matched (driver hides names), fallback to synchronize() as a last resort.
+ */
+async function ensureSchema(ds: DataSource, allTableNames: string[], log: AppLogger) {
+  // Probe which tables are present
+  const qr = ds.createQueryRunner();
+  await qr.connect();
+  const existing: string[] = [];
+  const missing: string[] = [];
+
+  for (const t of allTableNames) {
+    const has = await qr.hasTable(t);
+    (has ? existing : missing).push(t);
+  }
+  await qr.release();
+
+  // Nothing to do
+  if (missing.length === 0) {
+    log.info('Schema is complete. No sync required.');
+    return;
+  }
+
+  // Cold start: nothing exists → safe to run full synchronize()
+  if (existing.length === 0) {
+    log.info('Cold start detected. Running full synchronize().');
+    await ds.synchronize();
+    return;
+  }
+
+  // Partial: some tables missing
+  log.info(`Partial schema sync. Missing: ${missing.join(', ')}`);
+
+  // Use internal RdbmsSchemaBuilder to get SQL for synchronize() and filter only relevant queries
+  const builder = new RdbmsSchemaBuilder(ds);
+  const sql = await builder.log(); // SqlInMemory
+
+  const wanted = new Set(missing.map((x) => x.toLowerCase()));
+  const upStatements = sql.upQueries.map((q: any) => (typeof q === 'string' ? q : q.query));
+
+  // Filter only statements that mention missing table names
+  const filtered = upStatements.filter((q: any) => {
+    const ql = q.toLowerCase();
+    // Accept explicit DDL touching the missing tables
+    for (const tbl of wanted) {
+      // Strict but pragmatic heuristics
+      if (
+        (ql.includes(` create table `) && ql.includes(` ${tbl} `)) ||
+        (ql.includes(` create index `) && ql.includes(` ${tbl}`)) ||
+        (ql.includes(` alter table `) && ql.includes(` ${tbl} `))
+      ) {
+        return true;
+      }
+      // Also allow quoted or schema-qualified mentions: "schema"."table", "table"
+      if (ql.includes(`"${tbl}"`) || ql.includes(` ${tbl}(`) || ql.includes(` ${tbl}"`)) {
+        // Keep it, most likely related
+        return true;
+      }
+    }
+    return false;
+  });
+
+  // If nothing matched, fallback to synchronize() (best effort)
+  if (filtered.length === 0) {
+    log.warn('No CREATE/ALTER statements detected for missing tables. Fallback to synchronize().');
+    await ds.synchronize();
+    return;
+  }
+
+  // Execute only relevant DDL in a single transaction
+  const runner = ds.createQueryRunner();
+  await runner.connect();
+  await runner.startTransaction();
+  try {
+    for (const stmt of filtered) {
+      await runner.query(stmt);
+    }
+    await runner.commitTransaction();
+  } catch (err) {
+    await runner.rollbackTransaction().catch(() => undefined);
+    throw err;
+  } finally {
+    await runner.release();
+  }
+
+  log.info('Partial schema sync completed.');
+}
+
+/**
+ * EventStoreModule
+ * - Builds TypeORM DataSource with all entities (outbox, per-aggregate tables, snapshots).
+ * - Ensures schema with partial sync if needed (safe for existing data).
+ * - Registers adapter (Postgres/SQLite) and EventStoreService.
+ */
 @Module({})
 export class EventStoreModule {
   static async forRootAsync(config: EventStoreConfig): Promise<DynamicModule> {
-    const { name, database, aggregates, snapshotInterval, ...restOptions } = config;
+    const { name, database, aggregates, ...restOptions } = config;
 
-    // Initialize transactional context before setting up the database connections
+    // Initialize transactional context for typeorm-transactional
     initializeTransactionalContext();
 
-    const snapshotEntity = createSnapshotsEntity(config.type);
+    // Compose entity list: outbox + aggregate tables + snapshots
+    const snapshotsEntity = createSnapshotsEntity(config.type);
+    const outboxEntity = createOutboxEntity(config.type);
+    const aggregateEntities = aggregates.map((agg) => createEventDataEntity(agg.aggregateId, config.type));
+    const entities = [outboxEntity, ...aggregateEntities, snapshotsEntity];
 
-    // Dynamically creating schemas from aggregates
-    const dynamicEntities = aggregates.map((agg) => createEventDataEntity(agg.aggregateId, config.type));
-
-    const entities = [...dynamicEntities, snapshotEntity];
-
-    const dataSourceOptions = {
-      ...(config.type === 'postgres'
-        ? {
-            extra: {
-              min: 5,
-              max: 20,
-            },
-          }
-        : {}),
+    // We always pass synchronize:false; schema will be ensured manually
+    const dataSourceOptions: DataSourceOptions & { log?: AppLogger } = {
+      ...(config.type === 'postgres' ? { extra: { min: 5, max: 20 } } : {}),
       ...restOptions,
       name,
       entities,
-      synchronize: false, // Disable synchronization by default
-      database: database, //config.type === 'sqlite' ? `${database}.db` : database,
-    };
+      synchronize: false,
+      database,
+    } as any;
 
-    const tempDataSource = new DataSource(dataSourceOptions);
-
-    try {
-      await tempDataSource.initialize();
-
-      // Checking for the presence of tables
-      const queryRunner = tempDataSource.createQueryRunner();
-      for (const entity of entities) {
-        const tableName = entity.options?.tableName || entity.constructor.name;
-        const hasTable = await queryRunner.hasTable(tableName);
-
-        if (!hasTable) {
-          // If there are no tables, enable synchronization
-          dataSourceOptions.synchronize = true;
-        }
-      }
-      await queryRunner.release();
-      await tempDataSource.destroy();
-    } catch (error) {
-      dataSourceOptions.synchronize = true;
-    }
+    // Precompute target table names (for partial sync and diagnostics)
+    const allTableNames = entities.map(getTableName);
 
     return {
       module: EventStoreModule,
       imports: [
         ContextModule,
         LoggerModule.forRoot({ componentName: EventStoreModule.name }),
-        // IMPORTANT: 'name' - is required everywhere and for convenience we indicate it the same
-        // so as not to get confused. It must be unique to the one module connection.
+
+        // Build the dedicated DataSource for Event Store
         TypeOrmModule.forRootAsync({
           imports: [LoggerModule.forRoot({ componentName: EventStoreModule.name })],
           name,
-          useFactory: (log: AppLogger) => ({
-            ...dataSourceOptions,
-            log,
-          }),
+          useFactory: (log: AppLogger) => ({ ...dataSourceOptions, log }),
           inject: [AppLogger],
+
           dataSourceFactory: async (options?: DataSourceOptions & { log?: AppLogger }) => {
-            if (!options) {
-              throw new Error('Invalid options passed');
-            }
+            if (!options) throw new Error('Invalid DataSource options');
 
-            options.log?.info(`Connecting to eventstore...`);
+            options.log?.info('Connecting to database...');
+            const ds = new DataSource(options);
+            await ds.initialize();
 
-            const dataSource = new DataSource(options);
-            await dataSource.initialize();
+            // Ensure schema: create only missing tables/indexes/constraints
+            await ensureSchema(ds, allTableNames, options.log!);
 
-            // TODO: move its somewhere
-            // Apply PRAGMA settings (for improve writing) for SQLite
-            if (restOptions.type === 'sqlite') {
-              await dataSource.query('PRAGMA cache_size = -64000;'); // 64MB МБ
-              await dataSource.query('PRAGMA temp_store = MEMORY;'); // DEFAULT
-              await dataSource.query('PRAGMA locking_mode = EXCLUSIVE;');
-              await dataSource.query('PRAGMA mmap_size = 67108864;'); // 64 МБ
+            // Register transactional DataSource with the given unique name
+            addTransactionalDataSource({ name, dataSource: ds });
 
-              await dataSource.query('PRAGMA synchronous = OFF;');
-              await dataSource.query('PRAGMA journal_mode = WAL;');
-              await dataSource.query('PRAGMA journal_size_limit = 67108864;'); // 64 МБ // 6144000 - 6 МБ
-
-              // await dataSource.query('PRAGMA wal_checkpoint(TRUNCATE);');
-            }
-
-            // Add a DataSource with a unique name
-            // IMPORTANT: name use in @Transactional() decorator
-            addTransactionalDataSource({
-              name,
-              dataSource,
-            });
-
-            options.log?.info(`Successfully connected to eventstore.`);
-
-            return dataSource;
+            options.log?.info('Connected and schema ensured.');
+            return ds;
           },
         }),
       ],
       providers: [
         {
-          provide: EventStoreReadRepository,
-          useFactory: async (logger, dataSource) => {
-            return new EventStoreReadRepository(logger, dataSource);
+          provide: 'EVENTSTORE_ADAPTER',
+          useFactory: (log: AppLogger, dataSource: DataSource) => {
+            return config.type === 'postgres'
+              ? new PostgresAdapter(log, dataSource)
+              : new SqliteEventStoreAdapter(log, dataSource);
           },
           inject: [AppLogger, getDataSourceToken(name)],
-        },
-        {
-          provide: EventStoreWriteRepository,
-          useFactory: async (logger, context, dataSource, readRepository) => {
-            return new EventStoreWriteRepository(logger, context, dataSource, name, readRepository, restOptions);
-          },
-          inject: [AppLogger, ContextService, getDataSourceToken(name), EventStoreReadRepository],
         },
         {
           provide: EventStoreService,
-          useFactory: async (logger: AppLogger, dataSource: DataSource) => {
-            return new EventStoreService(logger, dataSource);
+          useFactory: (log: AppLogger, adapter: BaseAdapter, publisher: Publisher) => {
+            return new EventStoreService(log, adapter, publisher);
           },
-          inject: [AppLogger, getDataSourceToken(name)],
+          inject: [AppLogger, 'EVENTSTORE_ADAPTER', Publisher],
         },
       ],
-      exports: [EventStoreWriteRepository, EventStoreReadRepository, EventStoreService],
+      exports: [EventStoreService, 'EVENTSTORE_ADAPTER'],
     };
   }
 }

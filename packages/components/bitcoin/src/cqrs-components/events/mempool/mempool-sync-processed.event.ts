@@ -1,4 +1,4 @@
-import { SystemEvent, BasicEvent } from '@easylayer/common/cqrs';
+import { BasicEvent } from '@easylayer/common/cqrs';
 import type { Transaction } from '../../../blockchain-provider';
 export interface BitcoinMempoolSyncProcessedEventPayload {
   loadedTransactions: Array<{
@@ -12,5 +12,4 @@ export interface BitcoinMempoolSyncProcessedEventPayload {
   hasMoreToProcess: boolean; // true if there are still pending txids to load
 }
 
-@SystemEvent()
 export class BitcoinMempoolSyncProcessedEvent extends BasicEvent<BitcoinMempoolSyncProcessedEventPayload> {}

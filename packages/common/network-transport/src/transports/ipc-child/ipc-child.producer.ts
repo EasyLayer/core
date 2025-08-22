@@ -1,20 +1,30 @@
 import { Injectable, OnModuleDestroy, Inject } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import { AppLogger } from '@easylayer/common/logger';
-import { BaseProducer } from '../../core/base-producer';
+import { BaseProducer, BatchAckResult } from '../../core';
 import {
   OutgoingMessage,
-  ClientNotFoundError,
   MESSAGE_SIZE_LIMITS,
-  ConnectionError,
   validateMessageSize,
+  ConnectionError,
+  OutboxStreamBatchPayload,
 } from '../../shared';
 import type { IpcServerOptions } from './ipc-child.module';
+import type { WireEventRecord } from '../../shared';
+import { SecureChannel } from '../../shared';
 
-interface IpcOutgoingMessage extends OutgoingMessage {
-  correlationId: string;
-}
-
+/**
+ * IPC Producer responsibilities:
+ * - Start periodic PING (server → client) to let clients detect us on the bus.
+ * - Consider itself "connected" **only after** first PONG (set by Consumer via markPong()).
+ * - Send RPC responses via `sendMessage()`.
+ * - Send outbox batches via `sendOutboxStreamBatchWithAck()` and wait for ACK that Consumer resolves.
+ * - Apply secure channel wrapping for all outgoing frames (DH handshake state is driven by Consumer).
+ *
+ * NOTE:
+ * - Producer does **NOT** subscribe to process.on('message'). Only Consumer listens inbound.
+ * - Consumer calls Producer hooks: markPong(), resolveOutboxAck(), handleSecureHello(), finalizeSecure().
+ */
 @Injectable()
 export class IpcChildProducer extends BaseProducer<OutgoingMessage> implements OnModuleDestroy {
   private lastPongTime = 0;
@@ -22,229 +32,149 @@ export class IpcChildProducer extends BaseProducer<OutgoingMessage> implements O
   private readonly maxMessageSize: number;
   private readonly heartbeatTimeout: number;
 
+  private pendingAcks = new Map<string, (ok: BatchAckResult) => void>();
+  private ackTimeoutMs = 5000;
+
+  private secure = new SecureChannel();
+
   constructor(
     private readonly log: AppLogger,
-    @Inject('IPC_OPTIONS')
-    private readonly options: IpcServerOptions
+    @Inject('IPC_OPTIONS') private readonly options: IpcServerOptions
   ) {
     super();
 
-    if (!process.send) {
-      throw new Error('IpcProducer must run in a child process with IPC');
-    }
+    if (!process.send) throw new Error('IpcProducer must run in a child process with IPC');
 
     this.maxMessageSize = options.maxMessageSize ?? MESSAGE_SIZE_LIMITS.IPC;
     this.heartbeatTimeout = options.heartbeatTimeout ?? 10000;
 
-    this.log.info('IPC producer initialized', {
-      args: {
-        pid: process.pid,
-        ppid: process.ppid,
-        connected: process.connected,
-        maxMessageSize: this.maxMessageSize,
-        heartbeatTimeout: this.heartbeatTimeout,
-      },
-    });
-
-    // Start ping timer
-    this.log.debug('Starting ping to parent process via IPC');
+    // Start periodic ping immediately on app boot.
     this._timer = exponentialIntervalAsync(
-      async (resetInterval) => {
+      async (reset) => {
         try {
           await this.sendPing();
-        } catch (error) {
-          this.log.debug('Error sending IPC ping, resetting interval', {
-            args: { error: (error as Error).message },
-          });
-          resetInterval();
+        } catch {
+          reset();
         }
       },
-      {
-        interval: 500,
-        maxInterval: 3000,
-        multiplier: 2,
-      }
+      { interval: 500, maxInterval: 3000, multiplier: 2 }
     );
   }
 
   onModuleDestroy(): void {
-    this.log.debug('Stopping IPC ping interval on module destroy');
     this._timer?.destroy();
     this._timer = null;
   }
 
-  /**
-   * Sends a ping message to parent process
-   */
-  public async sendPing(): Promise<void> {
-    if (!process.send) {
-      throw new ClientNotFoundError('process.send is not available');
-    }
-
-    if (!process.connected) {
-      throw new ClientNotFoundError('Process is not connected to parent');
-    }
-
-    const msg: OutgoingMessage = {
-      action: 'ping',
-      payload: {},
-      timestamp: Date.now(),
-    };
-
-    const ipcMsg = this.createIpcMessage(msg);
-    validateMessageSize(ipcMsg, this.maxMessageSize, 'ipc');
-
-    await new Promise<void>((resolve, reject) => {
-      process.send!(ipcMsg, (err: Error | null) => {
-        if (err) {
-          this.log.debug('Failed to send IPC ping', {
-            args: {
-              error: err.message,
-              pid: process.pid,
-              connected: process.connected,
-            },
-          });
-          return reject(
-            new ConnectionError('Failed to send IPC ping', {
-              transportType: 'ipc',
-              cause: err,
-            })
-          );
-        }
-        resolve();
-      });
-    });
-
-    this.log.debug('IPC ping sent to parent process', {
-      args: { pid: process.pid, connected: process.connected },
-    });
-  }
-
-  /**
-   * Validates IPC connection is alive.
-   * @param timeoutMs Maximum time in ms since last pong
-   */
-  public isConnected(timeoutMs?: number): boolean {
-    const timeout = timeoutMs ?? this.heartbeatTimeout;
-    const connected = process.connected && Date.now() - this.lastPongTime < timeout;
-
-    if (!connected && process.connected) {
-      this.log.debug('IPC connection appears stale', {
-        args: {
-          timeSinceLastPong: Date.now() - this.lastPongTime,
-          timeoutMs: timeout,
-          pid: process.pid,
-          connected: process.connected,
-        },
-      });
-    }
-
-    return connected;
-  }
-
-  /**
-   * Marks reception of pong from parent.
-   */
+  /** Called by Consumer when receiving 'pong'. */
   public markPong(): void {
     this.lastPongTime = Date.now();
-    this.log.debug('IPC pong received from parent process', {
-      args: { pid: process.pid, connected: process.connected },
+  }
+
+  /** Connection becomes "alive" after first PONG and stays alive within heartbeat timeout. */
+  public isConnected(timeoutMs?: number): boolean {
+    const timeout = timeoutMs ?? this.heartbeatTimeout;
+    return process.connected && Date.now() - this.lastPongTime < timeout;
+  }
+
+  /** Consumer calls on 'secureHello' and expects us to return reply frame to send. */
+  public buildSecureReplyForHello(clientHelloPayload: any): OutgoingMessage<'secureKey', any> {
+    const reply = this.secure.handleClientHello(clientHelloPayload);
+    return { action: reply.action, payload: reply.payload, timestamp: Date.now() };
+  }
+
+  /** Consumer calls on 'secureAck' to finalize DH. */
+  public finalizeSecure(payload: any): void {
+    this.secure.finalize(payload);
+  }
+
+  /** Periodic ping (server → client). If process disconnected, throws to reset timer backoff. */
+  public async sendPing(): Promise<void> {
+    if (!process.send || !process.connected) {
+      throw new ConnectionError('IPC not connected', { transportType: 'ipc' });
+    }
+    const msg: OutgoingMessage = { action: 'ping', payload: {}, timestamp: Date.now() };
+    const wrapped = this.secure.wrap(msg);
+    validateMessageSize(wrapped, this.maxMessageSize, 'ipc');
+
+    await new Promise<void>((resolve, reject) => {
+      process.send!(wrapped, (err: any) =>
+        err ? reject(new ConnectionError('Failed to send IPC ping', { transportType: 'ipc', cause: err })) : resolve()
+      );
+    });
+  }
+
+  /** Generic RPC response/message. */
+  public async sendMessage(message: OutgoingMessage): Promise<void> {
+    if (!process.send || !process.connected)
+      throw new ConnectionError('Process not connected', { transportType: 'ipc' });
+    if (!this.isConnected()) throw new ConnectionError('IPC connection lost', { transportType: 'ipc' });
+
+    const wrapped = this.secure.wrap(message);
+    validateMessageSize(wrapped, this.maxMessageSize, 'ipc');
+
+    await new Promise<void>((resolve, reject) => {
+      process.send!(wrapped, (err: any) =>
+        err
+          ? reject(new ConnectionError('Failed to send IPC message', { transportType: 'ipc', cause: err }))
+          : resolve()
+      );
     });
   }
 
   /**
-   * Sends a message to the parent process, throwing if disconnected.
+   * Send outbox wire batch and await ACK.
+   * Consumer will receive 'outboxStreamAck' and call `resolveOutboxAck(batchId, ackResult)`.
+   * Timeout → reject to force upper layer to retry later.
    */
-  async sendMessage(message: OutgoingMessage, options?: { correlationId?: string }): Promise<void> {
-    if (!process.send) {
-      throw new ClientNotFoundError('process.send is not available');
+  public async sendOutboxStreamBatchWithAck(
+    events: WireEventRecord[],
+    opts?: { timeoutMs?: number }
+  ): Promise<BatchAckResult> {
+    if (!process.send || !process.connected) {
+      throw new ConnectionError('Process not connected', { transportType: 'ipc' });
     }
+    if (!this.isConnected()) throw new ConnectionError('IPC connection lost', { transportType: 'ipc' });
 
-    if (!process.connected) {
-      throw new ClientNotFoundError('Process is not connected to parent');
-    }
+    const batchId = `${process.pid}:${Date.now()}:${Math.random()}`;
+    const payload: OutboxStreamBatchPayload = { batchId, events };
+    const message: OutgoingMessage<'outboxStreamBatch', OutboxStreamBatchPayload> = {
+      action: 'outboxStreamBatch',
+      payload,
+      timestamp: Date.now(),
+    };
+    const wrapped = this.secure.wrap(message);
+    validateMessageSize(wrapped, this.maxMessageSize, 'ipc');
 
-    const ipcMsg = this.createIpcMessage(message, options?.correlationId);
-    validateMessageSize(ipcMsg, this.maxMessageSize, 'ipc');
-
-    // For broadcast events, immediately check connection status
-    if (message.action === 'eventsBatch' || message.action === 'event') {
-      if (!this.isConnected()) {
-        throw new ClientNotFoundError('IPC connection lost - cannot broadcast events');
-      }
-
-      this.log.debug('Broadcasting IPC message', {
-        args: {
-          action: message.action,
-          correlationId: ipcMsg.correlationId,
-          pid: process.pid,
-        },
-      });
-
-      return new Promise<void>((resolve, reject) => {
-        process.send!(ipcMsg, (err: any) => {
-          if (err) {
-            this.log.debug('Failed to broadcast IPC message', {
-              args: {
-                error: err.message,
-                pid: process.pid,
-                connected: process.connected,
-              },
-            });
-            reject(
-              new ConnectionError('Failed to broadcast IPC message', {
-                transportType: 'ipc',
-                cause: err,
-              })
-            );
-          } else {
-            resolve();
-          }
-        });
-      });
-    }
-
-    // For responses, check connection status
-    if (!this.isConnected()) {
-      throw new ClientNotFoundError('IPC connection lost');
-    }
-
-    this.log.debug('Sending IPC message', {
-      args: {
-        action: message.action,
-        correlationId: ipcMsg.correlationId,
-        requestId: message.requestId,
-        pid: process.pid,
-      },
-    });
-
-    return new Promise<void>((resolve, reject) => {
-      process.send!(ipcMsg, (err: any) => {
-        if (err) {
-          this.log.error('Failed to send IPC message', {
-            args: {
-              error: err.message,
-              pid: process.pid,
-              connected: process.connected,
-            },
-          });
-          reject(
-            new ConnectionError('Failed to send IPC message', {
-              transportType: 'ipc',
-              cause: err,
-            })
-          );
-        } else {
-          resolve();
-        }
+    const timeoutMs = opts?.timeoutMs ?? this.ackTimeoutMs;
+    const ackPromise = new Promise<BatchAckResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAcks.delete(batchId);
+        reject(new ConnectionError('IPC outbox stream ACK timeout', { transportType: 'ipc' }));
+      }, timeoutMs);
+      this.pendingAcks.set(batchId, (ok) => {
+        clearTimeout(timer);
+        resolve(ok.allOk ? { allOk: true } : ok);
       });
     });
+
+    await new Promise<void>((resolve, reject) => {
+      process.send!(wrapped, (err: any) =>
+        err
+          ? reject(new ConnectionError('Failed to send IPC outbox stream', { transportType: 'ipc', cause: err }))
+          : resolve()
+      );
+    });
+
+    return await ackPromise;
   }
 
-  private createIpcMessage(message: OutgoingMessage, correlationId?: string): IpcOutgoingMessage {
-    return {
-      ...message,
-      correlationId: correlationId || `${process.pid}:${Date.now()}:${Math.random()}`,
-    };
+  /** Called by Consumer when 'outboxStreamAck' arrives. */
+  public resolveOutboxAck(batchId: string, res: BatchAckResult) {
+    const done = this.pendingAcks.get(batchId);
+    if (done) {
+      this.pendingAcks.delete(batchId);
+      done(res);
+    }
   }
 }

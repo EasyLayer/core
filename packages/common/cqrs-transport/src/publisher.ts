@@ -1,59 +1,105 @@
+import { Subject } from 'rxjs';
 import { Injectable, Inject } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import { DomainEvent, IEventPublisher, isSystemEvent } from '@easylayer/common/cqrs';
+import { DomainEvent, IEventPublisher } from '@easylayer/common/cqrs';
 import { ProducersManager } from '@easylayer/common/network-transport';
-import { Subject } from 'rxjs';
+import { WireEventRecord } from './event-record.interface';
 
 @Injectable()
 export class Publisher implements IEventPublisher<DomainEvent> {
+  /** Local subscribers receive only parsed SYSTEM events. */
   private subject$ = new Subject<DomainEvent>();
+  private systemModelNamesSet: Set<string>;
 
   constructor(
     @Inject(ProducersManager)
     private readonly producersManager: ProducersManager,
-    private readonly log: AppLogger
-  ) {}
+    private readonly log: AppLogger,
+    @Inject('SYSTEM_MODEL_NAMES')
+    systemModelNames: string[]
+  ) {
+    this.systemModelNamesSet = new Set(systemModelNames);
+  }
 
   get events$() {
     return this.subject$.asObservable();
   }
 
-  async publish<T extends DomainEvent>(event: T): Promise<void> {
-    this.log.debug('Publishing single event', { args: { event } });
-    // IMPORTANT: don't need catch here,
-    // if some event makes a mistake, the commit method will roll back
-    await this.producersManager.broadcast([event]);
-
-    this.log.debug('Broadcast to external transport succeeded');
-
-    // IMPORTANT: publish to local transport AFTER success publishing ti external transport
-    // IMPORTANT: We publish to local handlers and custom events - this is for cases when users extend the functionality with their own handlers
-    // if (isSystemEvent(event)) {
-    await this.publishToLocalTransport([event]);
-    // }
+  /** Legacy CQRS interface compatibility (not used in the new path). */
+  async publish<T extends DomainEvent>(_event: T): Promise<void> {
+    throw new Error('Use publishWire for outbox-driven events.');
   }
 
-  async publishAll<T extends DomainEvent>(events: T[]): Promise<void> {
-    this.log.debug('Publishing batch of events', { args: { count: events.length } });
-    // const systemEvents: T[] = events.filter(isSystemEvent);
-
-    // IMPORTANT: don't need catch here,
-    // if some event makes a mistake, the commit method will roll back
-    await this.producersManager.broadcast(events);
-    this.log.debug('Broadcast to external transport succeeded for batch', { args: { count: events.length } });
-
-    // IMPORTANT: publish to local transport AFTER success publishing ti external transport
-    // IMPORTANT: We publish to local handlers users events as well - this is for cases when users extend the functionality with their own handlers
-    await this.publishToLocalTransport(events);
+  async publishAll<T extends DomainEvent>(_events: T[]): Promise<void> {
+    throw new Error('Use publishWireStreamBatchWithAck for outbox-driven events.');
   }
 
-  private async publishToLocalTransport<T extends DomainEvent>(events: T[]): Promise<void> {
-    // IMPORTANT: We use setTimeout(0) once for entire events batch
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  async publishWire<T extends WireEventRecord>(event: T): Promise<void> {
+    await this.publishWireStreamBatchWithAck([event]);
+  }
 
-    for (const event of events) {
-      // Sending an event to subscribers
-      this.subject$.next(event);
+  async publishWireStreamBatchWithAck<T extends WireEventRecord>(events: T[]): Promise<void> {
+    if (!events.length) return;
+
+    // Stream with ACK to external transport
+    await this.producersManager.streamWireWithAck(events);
+
+    // Emit system events locally after ACK
+    this.emitSystemEventsLocally(events);
+  }
+
+  /**
+   * Parse and emit only system events to local subscribers
+   */
+  private emitSystemEventsLocally(events: WireEventRecord[]): void {
+    for (const wireEvent of events) {
+      if (!this.isSystemEvent(wireEvent)) {
+        continue;
+      }
+
+      try {
+        const body = JSON.parse(wireEvent.payload);
+
+        // Create domain event from wire event
+        const domainEvent: DomainEvent = this.createDomainEventFromWire(wireEvent, body);
+
+        this.subject$.next(domainEvent);
+      } catch (error) {
+        this.log.debug('Failed to parse system event payload', {
+          args: {
+            modelName: wireEvent.modelName,
+            eventType: wireEvent.eventType,
+            error: (error as any)?.message,
+          },
+        });
+      }
     }
+  }
+
+  /**
+   * Check if wireEvent is from a system model
+   */
+  private isSystemEvent(wireEvent: WireEventRecord): boolean {
+    return this.systemModelNamesSet.has(wireEvent.modelName);
+  }
+
+  /**
+   * Create domain event object from wire event
+   */
+  private createDomainEventFromWire(wireEvent: WireEventRecord, body: any): DomainEvent {
+    // Create prototype with constructor name
+    const proto: any = { payload: body };
+    proto.constructor = { name: wireEvent.eventType } as any;
+
+    // Create domain event with all properties
+    const domainEvent: DomainEvent = Object.assign(Object.create(proto), {
+      aggregateId: wireEvent.modelName,
+      requestId: wireEvent.requestId,
+      blockHeight: wireEvent.blockHeight,
+      version: wireEvent.eventVersion,
+      timestamp: wireEvent.timestamp,
+    });
+
+    return domainEvent;
   }
 }

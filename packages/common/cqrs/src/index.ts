@@ -1,5 +1,4 @@
 export * from './operators';
-export * from './decorators';
 
 export { CommandBus, QueryBus, EventBus, UnhandledExceptionBus } from '@nestjs/cqrs';
 export * from '@nestjs/cqrs/dist/decorators';

@@ -136,7 +136,6 @@ export class WsTransportModule {
       providers: [
         { provide: 'WS_OPTIONS', useValue: options },
         WsGateway,
-        WsProducer,
         { provide: 'WS_PRODUCER', useExisting: WsProducer },
         WsServerManager,
       ],

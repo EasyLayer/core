@@ -1,13 +1,21 @@
-import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AppLogger } from '@easylayer/common/logger';
 import type { BaseProducer } from './base-producer';
-import type { OutgoingMessage } from '../shared';
-import { ClientNotFoundError } from '../shared';
+import type { OutgoingMessage, WireEventRecord } from '../shared';
+import type { BatchAckResult } from './base-producer';
 
 /**
- * Manages multiple producers to broadcast events across transports.
+ * ProducersManager manages many producers (HTTP/WS/IPC) for RPC traffic,
+ * but outbox streaming MUST go through exactly ONE chosen producer.
+ *
+ * Flow:
+ * - App boots: multiple producers may start ping loops (WS/IPС). HTTP producer is stateless.
+ * - Consumers receive pongs and mark corresponding producer as connected.
+ * - When EventStore wants to push a batch, it calls `streamWireWithAck()` which uses ONLY the selected streaming producer.
+ * - Manager exposes helpers to inspect connected producers and which one is the streaming target.
  */
 export class ProducersManager {
+  private streamingProducer: BaseProducer<OutgoingMessage> | null = null;
+
   constructor(
     private readonly log: AppLogger,
     private _producers: BaseProducer<OutgoingMessage>[]
@@ -17,175 +25,67 @@ export class ProducersManager {
     return this._producers;
   }
 
-  /**
-   * Add a producer to the manager
-   */
   public addProducer(producer: BaseProducer<OutgoingMessage>): void {
     this._producers.push(producer);
     this.log.debug(`Added producer: ${producer.transportType}`);
   }
 
-  /**
-   * Remove a producer from the manager
-   */
   public removeProducer(producer: BaseProducer<OutgoingMessage>): void {
     const index = this._producers.indexOf(producer);
     if (index !== -1) {
       this._producers.splice(index, 1);
+      if (this.streamingProducer === producer) this.streamingProducer = null;
       this.log.debug(`Removed producer: ${producer.transportType}`);
     }
   }
 
-  /**
-   * Broadcasts an array of CQRS events to all configured producers in parallel.
-   */
-  public async broadcast<T extends DomainEvent>(events: T[]) {
-    if (this._producers.length === 0) {
-      this.log.debug('No producers to broadcast');
-      return;
+  /** Select the single producer used for outbox streaming with ACK. */
+  public setStreamingProducer(producer: BaseProducer<OutgoingMessage>): void {
+    if (!this._producers.includes(producer)) {
+      throw new Error('Streaming producer must be registered in manager');
     }
-
-    if (events.length === 0) {
-      this.log.debug('No events to broadcast');
-      return;
-    }
-
-    this.log.debug('Starting broadcast of events', {
-      args: { count: events.length, producers: this._producers.length },
-    });
-
-    const message: OutgoingMessage<'eventsBatch', { constructorName: string; dto: any }[]> = {
-      action: 'eventsBatch',
-      payload: events.map((event) => ({
-        constructorName: Object.getPrototypeOf(event).constructor.name,
-        dto: event,
-      })),
-      timestamp: Date.now(),
-    };
-
-    const connectedProducers = this._producers.filter((p) => p.isConnected());
-
-    if (connectedProducers.length === 0) {
-      this.log.warn('No connected producers available for broadcast');
-      return;
-    }
-
-    const results = await Promise.allSettled(
-      connectedProducers.map((producer) =>
-        producer.sendMessage(message).catch((error) => {
-          this.log.error(`Producer ${producer.transportType} failed to send batch`, { args: { error } });
-          throw error;
-        })
-      )
-    );
-
-    const successful = results.filter((r) => r.status === 'fulfilled').length;
-    const failed = results.filter((r) => r.status === 'rejected').length;
-
-    this.log.debug('Broadcast completed', {
-      args: {
-        eventCount: events.length,
-        totalProducers: this._producers.length,
-        connectedProducers: connectedProducers.length,
-        successful,
-        failed,
-      },
-    });
-
-    if (failed > 0) {
-      this.log.warn(`${failed} producers failed during broadcast`);
-    }
+    this.streamingProducer = producer;
+    this.log.debug(`Selected streaming producer: ${producer.transportType}`);
   }
 
-  /**
-   * Send a single event to all transports
-   */
-  public async sendEvent<T extends DomainEvent>(event: T) {
-    this.log.debug('Sending single event', {
-      args: { eventType: Object.getPrototypeOf(event).constructor.name },
-    });
-
-    const message: OutgoingMessage<'event', { constructorName: string; dto: any }> = {
-      action: 'event',
-      payload: {
-        constructorName: Object.getPrototypeOf(event).constructor.name,
-        dto: event,
-      },
-      timestamp: Date.now(),
-    };
-
-    const connectedProducers = this._producers.filter((p) => p.isConnected());
-
-    if (connectedProducers.length === 0) {
-      throw new ClientNotFoundError('No connected producers available');
-    }
-
-    const results = await Promise.allSettled(
-      connectedProducers.map((producer) =>
-        producer.sendMessage(message).catch((error) => {
-          this.log.error(`Producer ${producer.transportType} failed to send event`, { args: { error } });
-          throw error;
-        })
-      )
-    );
-
-    const failed = results.filter((r) => r.status === 'rejected').length;
-    if (failed > 0) {
-      this.log.warn(`${failed} producers failed to send event`);
-    }
+  public clearStreamingProducer(): void {
+    this.streamingProducer = null;
+    this.log.debug('Cleared streaming producer');
   }
 
-  /**
-   * Send ping to all connected producers
-   */
-  public async sendPingToAll(): Promise<void> {
-    const connectedProducers = this._producers.filter((p) => p.isConnected());
-
-    if (connectedProducers.length === 0) {
-      throw new ClientNotFoundError('No connected producers available for ping');
-    }
-
-    const results = await Promise.allSettled(
-      connectedProducers.map(async (producer) => {
-        if (producer.sendPing) {
-          await producer.sendPing();
-        }
-      })
-    );
-
-    const failed = results.filter((r) => r.status === 'rejected').length;
-    if (failed > 0) {
-      this.log.warn(`${failed} producers failed to send ping`);
-    }
+  public getStreamingProducer(): BaseProducer<OutgoingMessage> | null {
+    return this.streamingProducer;
   }
 
-  /**
-   * Get status of all producers
-   */
-  public getProducersStatus(): Array<{ name: string; connected: boolean }> {
+  /** Stream with ACK using the selected producer. Throws if none selected or not connected. */
+  public async streamWireWithAck(events: WireEventRecord[], opts?: { timeoutMs?: number }): Promise<BatchAckResult> {
+    const p = this.streamingProducer;
+    if (!p) throw new Error('No streaming producer selected');
+    if (!p.isConnected()) throw new Error('Selected streaming producer is not connected');
+    return await (p as any).sendOutboxStreamBatchWithAck(events, opts);
+  }
+
+  /** Fire-and-forget broadcast to all connected producers (for RPC responses etc.). */
+  public async broadcast(message: OutgoingMessage): Promise<void> {
+    const connected = this._producers.filter((p) => p.isConnected());
+    if (!connected.length) return;
+    await Promise.allSettled(connected.map((p) => p.sendMessage(message)));
+  }
+
+  public getProducersStatus(): Array<{ name: string; connected: boolean; isStreaming?: boolean }> {
     return this._producers.map((producer) => ({
       name: producer.transportType,
       connected: producer.isConnected(),
+      isStreaming: producer === this.streamingProducer,
     }));
   }
 
-  /**
-   * Get count of connected producers
-   */
   public getConnectedCount(): number {
     return this._producers.filter((p) => p.isConnected()).length;
   }
-
-  /**
-   * Get count of total producers
-   */
   public getTotalCount(): number {
     return this._producers.length;
   }
-
-  /**
-   * Check if any producers are connected
-   */
   public hasConnectedProducers(): boolean {
     return this.getConnectedCount() > 0;
   }

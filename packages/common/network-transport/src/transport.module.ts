@@ -30,6 +30,7 @@ export class TransportModule {
     for (const transportConfig of transports) {
       if (transportConfig.type === 'http') {
         imports.push(HttpTransportModule.forRoot(transportConfig));
+        producerTokens.push('HTTP_PRODUCER');
       }
 
       if (transportConfig.type === 'ws') {

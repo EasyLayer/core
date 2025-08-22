@@ -1,7 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { ProducersManager } from '@easylayer/common/network-transport';
 import { LoggerModule } from '@easylayer/common/logger';
-import { SystemEvent } from '@easylayer/common/cqrs';
 import type { DomainEvent, SystemFields } from '@easylayer/common/cqrs';
 import { Publisher } from '../publisher';
 
@@ -20,7 +19,6 @@ class TestEvent implements DomainEvent {
   }
 }
 
-@SystemEvent()
 class TestSystemEvent implements DomainEvent {
   aggregateId: string;
   requestId: string;

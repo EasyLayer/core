@@ -1,8 +1,7 @@
 import type { Type } from '@nestjs/common';
 import type { IEventHandler } from '@nestjs/cqrs';
 import { EVENT_METADATA } from '@nestjs/cqrs/dist/decorators/constants';
-import type { SystemFields, DomainEvent } from './basic-event';
-import { EventStatus } from './basic-event';
+import type { DomainEvent } from './basic-event';
 
 const INTERNAL_EVENTS = Symbol();
 
@@ -34,6 +33,7 @@ function snapshotReplacer(adapters?: Record<string, SnapshotFieldAdapter>) {
     return value;
   };
 }
+
 function snapshotReviver(adapters?: Record<string, SnapshotFieldAdapter>) {
   return function (key: string, value: any) {
     if (adapters && key && adapters[key]) return adapters[key]!.fromJSON(value);
@@ -51,20 +51,6 @@ function snapshotReviver(adapters?: Record<string, SnapshotFieldAdapter>) {
     }
     return value;
   };
-}
-
-// ===== Dynamic event class factory =====
-// const eventClassCache = new Map<string, any>();
-function makeEventClass(eventName: string) {
-  // if (eventClassCache.has(eventName)) return eventClassCache.get(eventName);
-  // Create a class with constructor.name === eventName
-  const EventClass = new Function(`
-    return class ${eventName} { constructor(payload){ this.payload = payload; } }
-  `)();
-  // Attach Nest CQRS metadata so EventBus knows the id
-  Reflect.defineMetadata(EVENT_METADATA, { id: eventName }, EventClass);
-  // eventClassCache.set(eventName, EventClass);
-  return EventClass;
 }
 
 export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
@@ -155,68 +141,62 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
 
   public async publishAll<T extends E>(events: T[]): Promise<void> {}
 
-  /**
-   * Publishes an event.
-   * This method sets the event metadata before publishing it.
-   *
-   * @param event The event to be published.
-   */
   public async republish<T extends E>(event: T): Promise<void> {
     this.setEventMetadata(event);
     await this.publish(event);
   }
 
   /**
-   * Publish all uncommitted events and then clear them
-   * This is the main commit method called from repository
+   * Get events that need to be saved to database but haven't been saved yet.
+   * These are events added via apply() but not yet persisted.
    */
-  public async commit(): Promise<void> {
-    const events = this.getUncommittedEvents();
-    if (events.length > 0) {
-      await this.publishAll(events);
-    }
-    this.uncommit(); // Clear all events after successful publish
+  public getUnsavedEvents(): E[] {
+    // All events in INTERNAL_EVENTS are unsaved until markEventsAsSaved() is called
+    return this[INTERNAL_EVENTS];
   }
 
   /**
-   * Get events that are saved but not yet published (uncommitted)
-   * These are all saved events since uncommit() clears published ones
+   * Get events that have been saved to database but not yet published.
+   * With outbox pattern, we don't track this state in aggregate anymore.
+   * The outbox table becomes the source of truth for unpublished events.
    */
   public getUncommittedEvents(): E[] {
-    return this[INTERNAL_EVENTS].filter((e) => e.status === EventStatus.UNPUBLISHED);
+    // With outbox pattern, we don't need to track uncommitted events in aggregate
+    // The outbox table handles this state
+    return [];
   }
 
   /**
-   * Clear all stored events
-   * Called after successful publish or for rollback scenarios
+   * Mark events as saved to database.
+   * Called after successful save to aggregate's event store.
+   * Clears the unsaved events array since they're now persisted.
    */
-  public uncommit(): void {
+  public markEventsAsSaved(): void {
     this[INTERNAL_EVENTS].length = 0;
   }
 
   /**
-   * Get events that need to be saved to database
-   * Does NOT change state - just returns unsaved events
+   * Clear all uncommitted events without publishing them.
+   * Used in error scenarios or after successful batch publish.
    */
-  public getUnsavedEvents(): E[] {
-    return this[INTERNAL_EVENTS].filter((e) => e.status === EventStatus.UNSAVED);
+  public uncommit(): void {
+    // With outbox pattern, this is handled by outbox cleanup
+    // Keep method for compatibility but it's essentially a no-op
   }
 
   /**
-   * Mark events as saved to database
-   * Call this ONLY after successful database save
+   * Aggregate-level commit is no longer responsible for publishing.
+   * Publishing is handled centrally via outbox pattern.
+   * This method is kept for interface compatibility but becomes a no-op.
    */
-  public markEventsAsSaved(): void {
-    for (const e of this[INTERNAL_EVENTS]) {
-      if (e.status === EventStatus.UNSAVED) e.status = EventStatus.UNPUBLISHED;
-    }
+  public async commit(): Promise<void> {
+    // No-op: Publishing is handled centrally via outbox
+    // Events are published by EventStoreWriteRepository after saving
   }
 
   /**
    * Checks if the aggregate is ready for snapshot creation.
    * Snapshot cannot be created if there are unsaved or uncommitted events.
-   *
-   * @returns true if snapshot can be safely created
    */
   public canMakeSnapshot(): boolean {
     // Check if snapshots are enabled for this aggregate
@@ -244,25 +224,14 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     }
   }
 
-  /**
-   * Apply new event (not from history)
-   * Events start as unsaved
-   */
   public async apply<T extends E>(event: T, options?: { fromHistory?: boolean; skipHandler?: boolean }): Promise<void> {
     const fromHistory = !!options?.fromHistory;
     const skipHandler = !!options?.skipHandler;
 
     if (!fromHistory) {
-      // New event: not saved
-      if (event.status !== EventStatus.UNSAVED) event.status = EventStatus.UNSAVED;
-      this[INTERNAL_EVENTS].push(event);
-    } else if (fromHistory && event.status === EventStatus.UNPUBLISHED) {
-      // From history: saved but not published - add to array for future publishing
+      // New event
       this[INTERNAL_EVENTS].push(event);
     }
-
-    // IMPORTANT: If status is PUBLISHED or RECEIVED, we don't add to array
-    // These events are already published, we only need them for state reconstruction
 
     if (!skipHandler) {
       const handler = this.getEventHandler(event);
@@ -402,20 +371,14 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     return constructor.name as string;
   }
 
-  /**
-   * Sets metadata for an event.
-   * This method assigns the event's metadata 'id' as the event name.
-   *
-   * @param event The event for which metadata should be set.
-   */
-  protected setEventMetadata<T extends E>(event: T): void {
+  private setEventMetadata<T extends E>(event: T): void {
     const eventName = this.getEventName(event);
     if (!Reflect.hasOwnMetadata(EVENT_METADATA, event.constructor)) {
       Reflect.defineMetadata(EVENT_METADATA, { id: eventName }, event.constructor);
     }
   }
 
-  protected getCircularReplacer() {
+  private getCircularReplacer() {
     const seen = new WeakSet();
     return function (key: any, value: any) {
       // Check is used to ensure that the current value is an object but not null (since typeof null === 'object).
@@ -434,37 +397,5 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
       }
       return value;
     };
-  }
-
-  /**
-   * Internal helper for compilers:
-   * Create a concrete event class (constructor.name === type), attach system fields on top-level.
-   *
-   * Back-compat: if userPayload contains blockHeight/requestId/timestamp —
-   * we lift them to top-level system fields and remove from payload.
-   */
-  protected createEvent<P = any>(
-    type: string,
-    userPayload: P & Partial<Pick<SystemFields, 'blockHeight' | 'requestId' | 'timestamp'>>,
-    overrides?: Partial<Pick<SystemFields, 'blockHeight' | 'requestId' | 'timestamp' | 'status'>>
-  ): E {
-    const EventClass = makeEventClass(type);
-
-    // extract meta from payload (back-compat with existing user code)
-    const {
-      blockHeight: bhFromPayload,
-      requestId: ridFromPayload,
-      timestamp: tsFromPayload,
-      ...clean
-    } = (userPayload ?? {}) as any;
-
-    const instance: any = new EventClass(clean);
-    instance.aggregateId = this._aggregateId;
-    instance.requestId = overrides?.requestId ?? ridFromPayload;
-    instance.blockHeight = overrides?.blockHeight ?? bhFromPayload ?? this._lastBlockHeight;
-    instance.timestamp = overrides?.timestamp ?? tsFromPayload ?? Date.now();
-    instance.status = overrides?.status ?? EventStatus.UNSAVED;
-
-    return instance as E;
   }
 }

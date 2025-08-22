@@ -94,7 +94,6 @@ export class IpcChildTransportModule {
           useValue: options,
         },
         IpcChildConsumer,
-        IpcChildProducer,
         {
           provide: 'IPC_PRODUCER',
           useExisting: IpcChildProducer,

@@ -1,6 +1,24 @@
-/**
- * Base transport error class with additional context.
- */
+export interface ErrorPayload {
+  message?: string;
+  error?: string;
+  code?: string;
+  errorCode?: string;
+  statusCode?: number;
+  [key: string]: any;
+}
+
+export const ErrorUtils = {
+  toErrorPayload(e: any): ErrorPayload {
+    return {
+      message: e?.message ?? 'Unknown error',
+      error: e?.name,
+      code: e?.code,
+      errorCode: e?.errorCode,
+      statusCode: e?.statusCode,
+    };
+  },
+};
+
 export class TransportError extends Error {
   public readonly code: string;
   public readonly timestamp: Date;

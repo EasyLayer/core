@@ -5,7 +5,7 @@ const deflateAsync = promisify(deflate);
 const inflateAsync = promisify(inflate);
 
 export interface CompressionResult {
-  data: string;
+  data: string; // base64 string (for string-storage columns)
   originalSize: number;
   compressedSize: number;
   compressionRatio: number;
@@ -13,12 +13,11 @@ export interface CompressionResult {
 
 export class CompressionUtils {
   /**
-   * Compresses data using deflate algorithm and returns base64 encoded string
+   * Compress UTF-8 JSON string with DEFLATE, return base64 for storage in TEXT columns.
    */
   static async compress(data: string): Promise<CompressionResult> {
     const originalBuffer = Buffer.from(data, 'utf8');
     const compressedBuffer = await deflateAsync(originalBuffer);
-
     return {
       data: compressedBuffer.toString('base64'),
       originalSize: originalBuffer.length,
@@ -28,71 +27,48 @@ export class CompressionUtils {
   }
 
   /**
-   * Decompresses base64 encoded deflated data back to original string
+   * Decompress from base64-encoded DEFLATE (legacy path for TEXT storage).
    */
-  static async decompress(compressedData: string): Promise<string> {
-    const compressedBuffer = Buffer.from(compressedData, 'base64');
+  static async decompress(compressedDataBase64: string): Promise<string> {
+    const compressedBuffer = Buffer.from(compressedDataBase64, 'base64');
     const decompressedBuffer = await inflateAsync(compressedBuffer);
     return decompressedBuffer.toString('utf8');
   }
 
   /**
-   * Decompresses and parses JSON in one step - MAIN METHOD TO USE
-   * Use this for both events and snapshots when you need objects
+   * Decompress when input can be Buffer (binary `bytea`/`blob`) OR base64 string.
+   * This is the MAIN method to use on the outbox read path.
    */
-  static async decompressAndParse<T = any>(compressedData: string): Promise<T> {
-    const decompressedString = await this.decompress(compressedData);
+  static async decompressAny(input: Buffer | string): Promise<string> {
+    const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, 'base64');
+    const decompressed = await inflateAsync(buf);
+    return decompressed.toString('utf8');
+  }
+
+  /**
+   * Decompress+parse JSON in one step (base64 string input, legacy).
+   */
+  static async decompressAndParse<T = any>(compressedDataBase64: string): Promise<T> {
+    const decompressedString = await this.decompress(compressedDataBase64);
     return JSON.parse(decompressedString);
   }
 
-  /**
-   * Checks if compression would be beneficial (saves at least 20% space)
-   */
-  static shouldCompress(data: string, minCompressionRatio: number = 1.2): boolean {
-    // For small payloads, compression overhead might not be worth it
-    if (data.length < 1000) {
-      return false;
-    }
-
-    // For very large payloads, always compress
-    if (data.length > 100000) {
-      return true;
-    }
-
-    // For medium payloads, use heuristics
-    // JSON with repetitive structure compresses well
-    const hasRepetitiveStructure = data.includes('{"') && data.includes('"}');
-    const hasArrays = data.includes('[') && data.includes(']');
-
-    return hasRepetitiveStructure || hasArrays;
+  static shouldCompress(data: string): boolean {
+    if (data.length < 1000) return false;
+    if (data.length > 100000) return true;
+    // simple heuristic
+    return true;
   }
 
-  /**
-   * Safely attempts to decompress data, returns original if decompression fails
-   */
-  static async safeDecompress(data: string, fallback: string = data): Promise<string> {
+  static async safeDecompressAny(input: Buffer | string, fallbackUtf8?: string): Promise<string> {
     try {
-      return await this.decompress(data);
-    } catch (error) {
-      return fallback;
-    }
-  }
-
-  /**
-   * Safely decompresses and parses, returns fallback object if fails
-   */
-  static async safeDecompressAndParse<T = any>(data: string, fallback: T): Promise<T> {
-    try {
-      return await this.decompressAndParse<T>(data);
-    } catch (error) {
-      return fallback;
+      return await this.decompressAny(input);
+    } catch {
+      return fallbackUtf8 ?? (Buffer.isBuffer(input) ? input.toString('utf8') : input);
     }
   }
 }
 
-/**
- * Metrics collector for compression performance monitoring
- */
 export class CompressionMetrics {
   private static metrics = {
     totalCompressions: 0,

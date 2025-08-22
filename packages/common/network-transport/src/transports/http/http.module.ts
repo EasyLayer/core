@@ -6,6 +6,7 @@ import { createServer as createHttpServer, Server as HttpServer } from 'node:htt
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { RpcController } from './rpc.controller';
 import { StreamController } from './stream.controller';
+import { HttpWebhookProducer } from './http.producer';
 
 export interface HttpServerOptions {
   type: 'http';
@@ -89,9 +90,13 @@ export class HttpTransportModule {
           provide: 'HTTP_OPTIONS',
           useValue: options,
         },
+        {
+          provide: 'HTTP_PRODUCER',
+          useExisting: HttpWebhookProducer,
+        },
         HttpServerManager,
       ],
-      exports: ['HTTP_OPTIONS'],
+      exports: ['HTTP_OPTIONS', 'HTTP_PRODUCER'],
     };
   }
 }
