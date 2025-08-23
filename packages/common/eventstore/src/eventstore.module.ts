@@ -1,6 +1,6 @@
 import { Module, DynamicModule } from '@nestjs/common';
 import { TypeOrmModule, getDataSourceToken, TypeOrmModuleOptions } from '@nestjs/typeorm';
-import { DataSource, QueryRunner } from 'typeorm';
+import { DataSource } from 'typeorm';
 import type { DataSourceOptions } from 'typeorm';
 import { RdbmsSchemaBuilder } from 'typeorm/schema-builder/RdbmsSchemaBuilder.js';
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
@@ -217,48 +217,6 @@ export async function ensurePersistentStorage() {
 }
 /* eslint-enable no-empty */
 
-async function flushSqljsToIndexedDB(ds: DataSource, key: string, log?: AppLogger) {
-  if (typeof window === 'undefined') return;
-  const opts: any = ds.options;
-  if (opts.type !== 'sqljs') return;
-  try {
-    const { default: localforage } = await import('localforage');
-    // sql.js Database exports full snapshot
-    const driver: any = ds.driver as any;
-    const sqljsDb = driver?.databaseConnection;
-    if (!sqljsDb?.export) return;
-    const bytes: Uint8Array = sqljsDb.export();
-    await localforage.setItem(key, bytes);
-  } catch (e) {
-    log?.debug('sqljs flush failed', { args: { error: (e as any)?.message } });
-  }
-}
-
-function installSqljsStrongDurability(ds: DataSource, key: string, log?: AppLogger) {
-  const anyDs: any = ds;
-  const origCreateQR = anyDs.createQueryRunner.bind(ds);
-
-  anyDs.createQueryRunner = (...args: any[]): QueryRunner => {
-    const qr: QueryRunner = origCreateQR(...args);
-    const origCommit = qr.commitTransaction.bind(qr);
-    qr.commitTransaction = async () => {
-      await origCommit();
-      await flushSqljsToIndexedDB(ds, key, log);
-    };
-    return qr;
-  };
-}
-
-function setupSqljsDurability(ds: DataSource, key: string, log?: AppLogger) {
-  installSqljsStrongDurability(ds, key, log);
-
-  // When closing a tab - final flash (fire-and-forget)
-  if (typeof window !== 'undefined') {
-    const onBeforeUnload = () => void flushSqljsToIndexedDB(ds, key, log);
-    window.addEventListener('beforeunload', onBeforeUnload);
-  }
-}
-
 /**
  * EventStoreModule
  * - Builds TypeORM DataSource with all entities (outbox, per-aggregate tables, snapshots).
@@ -329,20 +287,9 @@ export class EventStoreModule {
             const ds = new DataSource(options);
             await ds.initialize();
 
-            // SQLJS: Globally enable "strong durability": flush after EVERY COMMIT
-            if (config.type === 'sqljs') {
-              const key = config.database;
-              setupSqljsDurability(ds, key, options.log);
-            }
-
             // Ensure schema: create only missing tables/indexes/constraints
             await ensureSchema(ds, allTableNames, options.log!);
             await ensureNonNegativeGuards(ds, config.type, outboxTable, aggregateTables, options.log!);
-
-            // SQLJS: Just in case - a single flush after DDL (although the COMMIT hook will cover this)
-            if (config.type === 'sqljs') {
-              await flushSqljsToIndexedDB(ds, config.database, options.log);
-            }
 
             options.log?.info('Connected and schema ensured.');
             return ds;

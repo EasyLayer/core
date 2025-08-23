@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { DataSource, QueryFailedError, Repository, MoreThan, LessThanOrEqual, ObjectLiteral } from 'typeorm';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
@@ -12,7 +12,10 @@ import { CompressionUtils } from '../compression';
 const FIXED_OVERHEAD = 160;
 
 @Injectable()
-export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
+export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot>
+  extends BaseAdapter<T>
+  implements OnModuleInit
+{
   public readonly driver = 'sqlite' as const;
   private sqliteBatchSize = 999;
 
@@ -27,6 +30,22 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     if (this.dataSource.options.type !== 'sqlite') {
       throw new Error('SqliteEventStoreAdapter must be used with SQLite DataSource');
     }
+  }
+
+  async onModuleInit() {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+
+    await qr.query('PRAGMA foreign_keys = ON;');
+    await qr.query('PRAGMA journal_mode = WAL;');
+    await qr.query('PRAGMA synchronous = NORMAL;');
+    await qr.query('PRAGMA temp_store = MEMORY;');
+    await qr.query('PRAGMA mmap_size = 67108864;');
+    await qr.query('PRAGMA cache_size = -64000;');
+    await qr.query('PRAGMA busy_timeout = 3000;');
+    await qr.query('PRAGMA journal_size_limit = 67108864;');
+    await qr.query('PRAGMA wal_autocheckpoint = 10000;'); //~40MB
+    await qr.release();
   }
 
   // ======== Persist (single tx; short PRAGMA) ========
@@ -44,16 +63,7 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
 
-    // Optional PRAGMAs to speed up bulk writes
     await qr.query('PRAGMA foreign_keys = OFF;');
-    await qr.query('PRAGMA journal_mode = WAL;');
-    await qr.query('PRAGMA synchronous = NORMAL;');
-    await qr.query('PRAGMA temp_store = MEMORY;');
-    await qr.query('PRAGMA mmap_size = 67108864;');
-    await qr.query('PRAGMA cache_size = -64000;');
-    await qr.query('PRAGMA locking_mode = EXCLUSIVE;');
-    await qr.query('PRAGMA busy_timeout = 3000;');
-    await qr.query('PRAGMA journal_size_limit = 67108864;');
 
     await qr.startTransaction(); // BEGIN (DEFERRED)
 
@@ -91,7 +101,7 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
             payload: ser.payloadOutbox, // same Buffer
-            timestamp: ev.timestamp ?? Date.now(),
+            timestamp: ev.timestamp!,
             isCompressed: ser.isCompressed ?? false,
             payload_uncompressed_bytes: ser.payloadUncompressedBytes,
           });
@@ -200,8 +210,13 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN IMMEDIATE');
+
     try {
-      await qr.manager.query(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+      const step = this.sqliteBatchSize;
+      for (let i = 0; i < ids.length; i += step) {
+        const chunk = ids.slice(i, i + step);
+        await qr.manager.query(`DELETE FROM outbox WHERE id IN (${chunk.map(() => '?').join(',')})`, chunk);
+      }
       await qr.commitTransaction();
     } catch (e) {
       await qr.rollbackTransaction().catch(() => undefined);
@@ -213,52 +228,72 @@ export class SqliteEventStoreAdapter<T extends AggregateRoot = AggregateRoot> ex
     return events.length;
   }
 
-  // ======== Rollback ========
-
+  /**
+   * Roll back events/snapshots for given aggregates above a block height,
+   * and purge corresponding outbox rows. SQLite-optimized:
+   * - Short IMMEDIATE transactions per table to minimize writer blocking
+   * - Chunked IN(...) deletes to avoid the 999-parameter limit
+   * - Safe early return on empty input
+   *
+   * Note: this version assumes aggregateIds are valid table names that are already trusted.
+   */
   async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
-    // Short IMMEDIATE deletes per table to minimize writer blocking
+    if (!aggregateIds.length) return;
+
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
 
     try {
-      // Delete events and snapshots above height per aggregate
-      for (const id of aggregateIds) {
+      // 1) Per-aggregate cleanup (events table + snapshots rows)
+      //    Short IMMEDIATE transactions reduce writer lock time under concurrency.
+      for (const tableName of aggregateIds) {
+        // Delete from the aggregate's events table
         await qr.query('BEGIN IMMEDIATE');
         try {
-          await qr.manager.query(`DELETE FROM "${id}" WHERE blockHeight > ?`, [blockHeight]);
+          // Using direct table interpolation; assumes tableName is trusted/validated elsewhere.
+          await qr.manager.query(`DELETE FROM "${tableName}" WHERE blockHeight > ?`, [blockHeight]);
           await qr.commitTransaction();
-        } catch {
+        } catch (e) {
           await qr.rollbackTransaction().catch(() => undefined);
-          throw new Error(`Failed to delete events for ${id}`);
+          throw new Error(`Failed to delete events for ${tableName}: ${(e as Error).message}`);
         }
 
+        // Delete corresponding snapshots
         await qr.query('BEGIN IMMEDIATE');
         try {
           await qr.manager.query(`DELETE FROM snapshots WHERE "aggregateId" = ? AND "blockHeight" > ?`, [
-            id,
+            tableName,
             blockHeight,
           ]);
           await qr.commitTransaction();
-        } catch {
+        } catch (e) {
           await qr.rollbackTransaction().catch(() => undefined);
-          throw new Error(`Failed to delete snapshots for ${id}`);
+          throw new Error(`Failed to delete snapshots for ${tableName}: ${(e as Error).message}`);
         }
       }
 
-      // Outbox cleanup for affected aggregates
+      // 2) Outbox cleanup for affected aggregates (chunked to respect SQLite's 999-parameter limit)
       await qr.query('BEGIN IMMEDIATE');
       try {
-        await qr.manager.query(
-          `DELETE FROM outbox WHERE "aggregateId" IN (${aggregateIds.map(() => '?').join(',')}) AND "blockHeight" > ?`,
-          [...aggregateIds, blockHeight]
-        );
+        const step = 900; // keep comfortably below 999 to allow the trailing blockHeight param
+        for (let i = 0; i < aggregateIds.length; i += step) {
+          const chunk = aggregateIds.slice(i, i + step);
+          const placeholders = chunk.map(() => '?').join(',');
+
+          await qr.manager.query(
+            `DELETE FROM outbox
+           WHERE "aggregateId" IN (${placeholders})
+             AND "blockHeight" > ?`,
+            [...chunk, blockHeight]
+          );
+        }
         await qr.commitTransaction();
-      } catch {
+      } catch (e) {
         await qr.rollbackTransaction().catch(() => undefined);
-        throw new Error(`Failed to delete outbox rows`);
+        throw new Error(`Failed to delete outbox rows: ${(e as Error).message}`);
       }
     } finally {
-      await qr.release();
+      await qr.release().catch(() => undefined);
     }
   }
 

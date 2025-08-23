@@ -80,7 +80,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
             payload: ser.payloadOutbox, // same Buffer
-            timestamp: ev.timestamp ?? Date.now(),
+            timestamp: ev.timestamp!,
             isCompressed: ser.isCompressed ?? false,
             payload_uncompressed_bytes: ser.payloadUncompressedBytes,
           });
@@ -147,51 +147,85 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     await qr.startTransaction('READ COMMITTED');
 
     try {
-      const ids: number[] = [];
+      const idRows = (await qr.manager.query(
+        `
+        WITH ordered AS (
+          SELECT id,
+                "payload_uncompressed_bytes" AS ulen
+          FROM outbox
+          ORDER BY "timestamp", id
+        ),
+        accum AS (
+          SELECT id,
+                SUM(ulen + $2) OVER (ORDER BY id) AS run
+          FROM ordered
+        )
+        SELECT id
+        FROM accum
+        WHERE run <= $1
+      `,
+        [wireBudgetBytes, FIXED_OVERHEAD]
+      )) as Array<{ id: number }>;
+
+      if (idRows.length === 0) {
+        await qr.commitTransaction();
+        await qr.release();
+        return 0;
+      }
+
+      const ids = idRows.map((r) => r.id);
+
+      const rows = (await qr.manager.query(
+        `
+        SELECT id, "aggregateId", "eventType", "eventVersion", "requestId",
+              "blockHeight", payload, "isCompressed", "timestamp",
+              "payload_uncompressed_bytes" AS ulen
+        FROM outbox
+        WHERE id = ANY($1)
+        FOR UPDATE SKIP LOCKED
+        ORDER BY "timestamp", id
+      `,
+        [ids]
+      )) as Array<{
+        id: number;
+        aggregateId: string;
+        eventType: string;
+        eventVersion: number;
+        requestId: string;
+        blockHeight: number | null;
+        payload: Buffer;
+        isCompressed: boolean;
+        timestamp: number;
+        ulen: number;
+      }>;
+
+      if (rows.length === 0) {
+        await qr.commitTransaction();
+        await qr.release();
+        return 0;
+      }
+
       const events: WireEventRecord[] = [];
       let budget = wireBudgetBytes;
 
-      // We type one by one under the blocking, in a strict order (timestamp,id)
-      while (true) {
-        const rows = (await qr.manager.query(`
-          SELECT id, "aggregateId", "eventType", "eventVersion", "requestId",
-                "blockHeight", payload, "isCompressed",
-                "payload_uncompressed_bytes" AS "ulen", "timestamp"
-          FROM outbox
-          ORDER BY "timestamp" ASC, id ASC
-          FOR UPDATE SKIP LOCKED
-          LIMIT 1
-        `)) as Array<{
-          id: number;
-          aggregateId: string;
-          eventType: string;
-          eventVersion: number;
-          requestId: string;
-          blockHeight: number;
-          payload: Buffer;
-          isCompressed: boolean;
-          ulen: number;
-          timestamp: number;
-        }>;
-
-        if (rows.length === 0) break;
-
-        const r = rows[0]!;
-        const jsonStr = r.isCompressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
-
+      for (const r of rows) {
         const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
         if (events.length > 0 && rowBytes > budget) break;
 
-        ids.push(r.id);
+        const compressed = !!r.isCompressed;
+        const jsonStr = compressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
+
         events.push({
           modelName: r.aggregateId,
           eventType: r.eventType,
           eventVersion: Number(r.eventVersion),
           requestId: r.requestId,
-          blockHeight: Number(r.blockHeight),
+          blockHeight: r.blockHeight == null ? null : Number(r.blockHeight),
           payload: jsonStr,
           timestamp: Number(r.timestamp),
-        });
+          contentEncoding: r.isCompressed ? 'deflate' : 'json',
+        } as any);
+
         budget -= Math.max(0, rowBytes);
       }
 
