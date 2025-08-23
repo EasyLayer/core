@@ -1,5 +1,4 @@
-import * as http from 'node:http';
-import * as https from 'node:https';
+import { Agent as UndiciAgent, fetch } from 'undici';
 import * as zmq from 'zeromq';
 import { v4 as uuidv4 } from 'uuid';
 import type { BaseTransportOptions } from './base.transport';
@@ -10,6 +9,11 @@ export interface RPCTransportOptions extends BaseTransportOptions {
   responseTimeout?: number;
   zmqEndpoint?: string;
 }
+
+type BlockSubscriber = {
+  onData: (blockData: Buffer) => void;
+  onError?: (err: Error) => void;
+};
 
 /**
  * RPC Transport with guaranteed request-response order via UUID matching
@@ -40,13 +44,19 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   private username?: string;
   private password?: string;
   private responseTimeout: number;
-  private _httpClient: any;
 
-  // ZMQ for subscriptions
+  // Undici HTTP client dispatcher
+  private _dispatcher?: UndiciAgent;
+
+  // ZMQ for subscriptions with reconnect
   private zmqEndpoint?: string;
   private zmqSocket?: zmq.Subscriber;
   private zmqRunning = false;
-  private blockSubscriptions = new Set<(blockData: Buffer) => void>();
+  private blockSubscriptions = new Set<BlockSubscriber>();
+
+  // Reconnect backoff
+  private zmqReconnectAttempts = 0;
+  private zmqReconnectTimer?: NodeJS.Timeout;
 
   constructor(options: RPCTransportOptions) {
     super(options);
@@ -62,23 +72,12 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     this.responseTimeout = options.responseTimeout ?? 5000;
     this.zmqEndpoint = options.zmqEndpoint;
 
-    // Create HTTP agent with connection pooling
-    const isHttps = this.baseUrl.startsWith('https://');
-    this._httpClient = isHttps
-      ? new https.Agent({
-          keepAlive: true,
-          keepAliveMsecs: 1000,
-          maxSockets: 5,
-          maxFreeSockets: 2,
-          timeout: this.responseTimeout,
-        })
-      : new http.Agent({
-          keepAlive: true,
-          keepAliveMsecs: 1000,
-          maxSockets: 5,
-          maxFreeSockets: 2,
-          timeout: this.responseTimeout,
-        });
+    // Undici agent for keep-alive connection pooling
+    this._dispatcher = new UndiciAgent({
+      keepAliveTimeout: 10_000,
+      keepAliveMaxTimeout: 15_000,
+      connections: 8,
+    });
   }
 
   get connectionOptions(): RPCTransportOptions {
@@ -162,12 +161,16 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       // RateLimiter + batchCall maintain order via UUID matching
       const hexResults = await this.rateLimiter.execute(requests, (calls) => this.batchCall(calls));
 
-      return hexResults.map((hex: string | null) => {
+      const out: Buffer[] = new Array(hashes.length);
+      for (let i = 0; i < hexResults.length; i++) {
+        const hex = hexResults[i];
         if (!hex) {
-          throw new Error('Block not found');
+          // keep a hole for the caller to map to null later or throw here if strict is needed
+          throw new Error(`Block not found for hash ${hashes[i]} at position ${i}`);
         }
-        return Buffer.from(hex, 'hex');
-      });
+        out[i] = Buffer.from(hex, 'hex');
+      }
+      return out;
     }, 'requestHexBlocks');
   }
 
@@ -205,60 +208,58 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         id: call.id,
       }));
 
-      const requestOptions: RequestInit = {
+      // Proper timeout via AbortController; use Undici dispatcher
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), this.responseTimeout);
+
+      const response = await fetch(this.baseUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
-        ...(this._httpClient && { agent: this._httpClient }),
-      };
-
-      const response = await fetch(this.baseUrl, requestOptions);
+        dispatcher: this._dispatcher, // <— Undici agent
+        signal: ac.signal, // <— real timeout
+      }).finally(() => clearTimeout(timer));
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = await response.text().catch(() => '');
         throw new Error(`HTTP error! Status: ${response.status}, ${errorText}`);
       }
 
       const rawResults = (await response.json()) as Array<{ id: string; result?: any; error?: any }>;
+      if (!Array.isArray(rawResults)) throw new Error('Invalid response structure: response data is not an array');
 
-      if (!Array.isArray(rawResults)) {
-        throw new Error('Invalid response structure: response data is not an array');
-      }
-
-      // STEP 3: Create UUID -> response mapping (ignore server order)
       const responseMap = new Map<string, { result?: any; error?: any }>();
-      rawResults.forEach((response) => {
-        if (response.id !== undefined) {
-          responseMap.set(response.id, response);
-        }
+      rawResults.forEach((r) => {
+        if (r.id !== undefined) responseMap.set(r.id, r);
       });
 
-      // STEP 4: Build results in original request order using UUID matching
       return callsWithIds.map((call) => {
-        const response = responseMap.get(call.id);
-        if (!response) {
-          return null; // Missing response -> null
-        }
-        if (response.error) {
-          return null; // Error response -> null
-        }
-        return response.result ?? null; // undefined result -> null
+        const r = responseMap.get(call.id);
+        if (!r) return null;
+        if (r.error) return null;
+        return (r.result ?? null) as TResult | null;
       });
     }, 'batchCall');
   }
 
-  subscribeToNewBlocks(callback: (blockData: Buffer) => void): { unsubscribe: () => void } {
-    this.blockSubscriptions.add(callback);
+  // Multiple-subscriber API with error propagation
+  subscribeToNewBlocks(
+    callback: (blockData: Buffer) => void,
+    onError?: (err: Error) => void
+  ): { unsubscribe: () => void } {
+    const sub: BlockSubscriber = { onData: callback, onError };
+    this.blockSubscriptions.add(sub);
 
     if (this.blockSubscriptions.size === 1 && this.zmqEndpoint && !this.zmqRunning) {
-      this.initializeZMQ().catch(() => {
-        // ZMQ initialization failed, silently continue
+      this.initializeZMQ().catch((err) => {
+        // notify subscribers about init error
+        for (const s of this.blockSubscriptions) s.onError?.(err instanceof Error ? err : new Error(String(err)));
       });
     }
 
     return {
       unsubscribe: () => {
-        this.blockSubscriptions.delete(callback);
+        this.blockSubscriptions.delete(sub);
         if (this.blockSubscriptions.size === 0) {
           this.cleanupZMQ();
         }
@@ -270,33 +271,14 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     await this.rateLimiter.stop();
     this.cleanupZMQ();
 
-    // Force close HTTP connections
-    if (this._httpClient && this.baseUrl.startsWith('https://')) {
-      const agent = this._httpClient as any;
-      if (agent.sockets) {
-        Object.values(agent.sockets).forEach((sockets: any) => {
-          if (Array.isArray(sockets)) {
-            sockets.forEach((socket: any) => socket?.destroy?.());
-          }
-        });
-      }
-      if (agent.freeSockets) {
-        Object.values(agent.freeSockets).forEach((sockets: any) => {
-          if (Array.isArray(sockets)) {
-            sockets.forEach((socket: any) => socket?.destroy?.());
-          }
-        });
-      }
-    }
-
-    if (this._httpClient) {
-      this._httpClient.destroy();
-      this._httpClient = null;
-    }
+    // Close Undici dispatcher
+    await this._dispatcher?.close();
+    this._dispatcher = undefined;
 
     this.isConnected = false;
   }
 
+  // ===== ZMQ with reconnect/backoff =====
   private async initializeZMQ(): Promise<void> {
     if (!this.zmqEndpoint || this.zmqRunning) return;
 
@@ -305,10 +287,12 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       this.zmqSocket.connect(this.zmqEndpoint);
       this.zmqSocket.subscribe('rawblock');
       this.zmqRunning = true;
+      this.zmqReconnectAttempts = 0;
       this.processZMQMessages();
     } catch (error) {
       this.zmqSocket = undefined;
       this.zmqRunning = false;
+      this.scheduleZMQReconnect(error);
     }
   }
 
@@ -322,25 +306,54 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         const topicStr = topic?.toString();
         if (topicStr === 'rawblock' && this.blockSubscriptions.size > 0) {
           const blockBuffer = message as Buffer;
-          this.blockSubscriptions.forEach((callback) => {
+          for (const s of this.blockSubscriptions) {
             try {
-              callback(blockBuffer);
-            } catch (error) {
-              // Ignore callback errors
+              s.onData(blockBuffer);
+            } catch (err) {
+              // propagate subscriber error
+              s.onError?.(err instanceof Error ? err : new Error(String(err)));
             }
-          });
+          }
         }
       }
+      // loop ended unexpectedly -> reconnect
+      if (this.zmqRunning) this.scheduleZMQReconnect(new Error('ZMQ loop ended'));
     } catch (error) {
-      // ZMQ connection error
+      // connection error -> notify and reconnect
+      for (const s of this.blockSubscriptions) s.onError?.(error instanceof Error ? error : new Error(String(error)));
+      if (this.zmqRunning) this.scheduleZMQReconnect(error);
     }
   }
 
+  private scheduleZMQReconnect(cause: unknown): void {
+    this.cleanupZMQ();
+
+    if (!this.zmqEndpoint || this.blockSubscriptions.size === 0) return;
+
+    const attempt = ++this.zmqReconnectAttempts;
+    const delay = Math.min(30_000, 500 * Math.pow(2, attempt)); // exponential backoff up to 30s
+
+    this.zmqReconnectTimer && clearTimeout(this.zmqReconnectTimer);
+    this.zmqReconnectTimer = setTimeout(() => {
+      this.initializeZMQ().catch((err) => {
+        for (const s of this.blockSubscriptions) s.onError?.(err instanceof Error ? err : new Error(String(err)));
+      });
+    }, delay);
+  }
+
+  /* eslint-disable no-empty */
   private cleanupZMQ(): void {
-    if (this.zmqSocket && this.zmqRunning) {
-      this.zmqRunning = false;
-      this.zmqSocket.close();
+    this.zmqRunning = false;
+    if (this.zmqSocket) {
+      try {
+        this.zmqSocket.close();
+      } catch {}
       this.zmqSocket = undefined;
     }
+    if (this.zmqReconnectTimer) {
+      clearTimeout(this.zmqReconnectTimer);
+      this.zmqReconnectTimer = undefined;
+    }
   }
+  /* eslint-enable no-empty */
 }

@@ -47,7 +47,10 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
   abstract getBlockHeight(): Promise<number>;
 
   // Optional subscription support - implement or throw error
-  abstract subscribeToNewBlocks?(callback: (blockData: Buffer) => void): { unsubscribe: () => void };
+  abstract subscribeToNewBlocks?(
+    callback: (blockData: Buffer) => void,
+    onError?: (err: Error) => void
+  ): { unsubscribe: () => void };
 
   /**
    * Handle transport errors with proper error classification

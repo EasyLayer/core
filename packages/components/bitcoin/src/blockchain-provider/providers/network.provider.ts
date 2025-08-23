@@ -24,21 +24,23 @@ export class NetworkProvider extends BaseProvider {
    * @param callback Function to call when new block arrives
    * @returns Subscription object with unsubscribe method
    */
-  subscribeToNewBlocks(callback: (block: UniversalBlock) => void): { unsubscribe: () => void } {
+  subscribeToNewBlocks(
+    callback: (block: UniversalBlock) => void,
+    onError?: (err: Error) => void
+  ): { unsubscribe: () => void } {
     if (typeof this.transport.subscribeToNewBlocks !== 'function') {
       throw new Error('Transport does not support block subscriptions');
     }
-
     return this.transport.subscribeToNewBlocks((blockData: Buffer) => {
       try {
         const hexData = blockData.toString('hex');
         const parsedBlock = HexTransformer.parseBlockHex(hexData, this.network);
-        parsedBlock.hex = hexData;
+        (parsedBlock as any).hex = hexData;
         callback(parsedBlock as UniversalBlock);
-      } catch (error) {
-        // Skip invalid blocks silently
+      } catch (err) {
+        onError?.(err instanceof Error ? err : new Error(String(err)));
       }
-    });
+    }, onError);
   }
 
   // ===== BASIC BLOCKCHAIN METHODS =====
@@ -345,6 +347,28 @@ export class NetworkProvider extends BaseProvider {
 
       return blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
     }
+  }
+
+  /**
+   * Get only block heights by hashes for the *current* transport.
+   * - P2P: read from local ChainTracker via transport.getHeightsByHashes()
+   * - RPC: batch getblockheader <hash> true
+   * Any failure propagates up.
+   */
+  async getHeightsByHashes(hashes: string[]): Promise<(number | null)[]> {
+    if (this.transport.type === 'p2p') {
+      return (this.transport as any).getHeightsByHashes(hashes);
+    }
+
+    // RPC path: ask headers only to extract .height
+    const requests = hashes.map((hash) => ({ method: 'getblockheader', params: [hash, true] }));
+    const results = await this.transport.batchCall(requests);
+    return results.map((hdr: any) => (hdr && typeof hdr.height === 'number' ? hdr.height : null));
+
+    // Optional strict all-or-nothing:
+    // const heights = ...;
+    // if (heights.some(h => h === null)) throw new Error('Not all heights are available');
+    // return heights;
   }
 
   // ===== TRANSACTION METHODS =====

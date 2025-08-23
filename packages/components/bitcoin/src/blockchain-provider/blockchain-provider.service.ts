@@ -140,9 +140,9 @@ export class BlockchainProviderService {
    * @param callback Function to call when new block arrives
    * @returns Subscription promise with unsubscribe method
    */
-  public subscribeToNewBlocks(callback: (block: Block) => void): Subscription {
+  // BlockchainProviderService — optional error handler
+  public subscribeToNewBlocks(callback: (block: Block) => void, onError?: (err: Error) => void): Subscription {
     this.ensureNetworkProviders();
-
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
@@ -155,38 +155,43 @@ export class BlockchainProviderService {
       .getActiveProvider()
       .then((provider) => {
         const networkProvider = provider as NetworkProvider;
-
         if (typeof networkProvider.subscribeToNewBlocks !== 'function') {
           rejectSubscription(new Error('Active provider does not support block subscriptions'));
           return;
         }
 
-        try {
-          const subscription = networkProvider.subscribeToNewBlocks((universalBlock: UniversalBlock) => {
+        const sub = networkProvider.subscribeToNewBlocks(
+          (uBlock) => {
             try {
-              // Verify Merkle root for incoming blocks
-              const isValid = this.verifyBlockMerkleRoot(universalBlock);
+              // Merkle verify as before
+              const isValid =
+                uBlock.height === 0
+                  ? BitcoinMerkleVerifier.verifyGenesisMerkleRoot(uBlock)
+                  : BitcoinMerkleVerifier.verifyBlockMerkleRoot(uBlock, this.networkConfig.hasSegWit);
               if (!isValid) {
                 this.log.warn('Merkle root verification failed for subscribed block', {
-                  args: { blockHash: universalBlock.hash, height: universalBlock.height },
+                  args: { blockHash: uBlock.hash, height: uBlock.height },
                 });
                 return;
               }
-
-              const normalizedBlock = this.normalizer.normalizeBlock(universalBlock);
-              callback(normalizedBlock);
-            } catch (error) {
-              this.log.warn('Failed to process block in subscription', { args: { error } });
+              const normalized = this.normalizer.normalizeBlock(uBlock);
+              callback(normalized);
+            } catch (err) {
+              this.log.warn('Failed to process block in subscription', { args: { error: err } });
+              onError?.(err as Error);
             }
-          });
+          },
+          (err) => {
+            // bubble transport errors
+            this.log.warn('Subscription transport error', { args: { error: err } });
+            onError?.(err);
+          }
+        );
 
-          subscriptionPromise.unsubscribe = () => {
-            subscription.unsubscribe();
-            resolveSubscription();
-          };
-        } catch (error) {
-          rejectSubscription(error as Error);
-        }
+        subscriptionPromise.unsubscribe = () => {
+          sub.unsubscribe();
+          resolveSubscription();
+        };
       })
       .catch((error) => {
         this.log.error('Failed to get provider for subscription', {
@@ -371,18 +376,19 @@ export class BlockchainProviderService {
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
         if (validHashes.length === 0) return [];
 
-        const heightInfos = await provider.getManyBlocksByHashes(validHashes, 1);
+        const heights = await provider.getHeightsByHashes(validHashes);
 
         const completeBlocks: UniversalBlock[] = [];
         let heightIndex = 0;
 
-        universalBlocks.forEach((block: any, index: any) => {
+        universalBlocks.forEach((block: any) => {
           if (block !== null) {
-            const heightInfo = heightInfos[heightIndex++];
-            if (heightInfo && heightInfo.height !== undefined) {
-              block.height = heightInfo.height;
-              completeBlocks.push(block);
+            const h = heights[heightIndex++];
+            if (typeof h === 'number') {
+              block.height = h;
             }
+            // TODO: think about thi case when block without height
+            completeBlocks.push(block);
           }
         });
 

@@ -89,12 +89,33 @@ export const MESSAGE_SIZE_LIMITS = {
   HTTP: 100 * 1024 * 1024, // 100MB for HTTP
 };
 
+export const TRANSPORT_OVERHEAD = {
+  IPC: 512, // IPC channel overhead
+  WS: 1024, // WebSocket frame headers
+  HTTP: 2048, // HTTP headers + chunked encoding
+  WIRE: 256, // Base wire protocol overhead
+};
+
 export const validateMessageSize = (data: any, maxSize: number, transportType: string): void => {
   const serialized = JSON.stringify(data);
-  const size = Buffer.byteLength(serialized, 'utf8');
-  if (size > maxSize) {
-    throw new MessageSizeError(`Message size ${size} bytes exceeds limit of ${maxSize} bytes`, size, maxSize, {
-      transportType,
-    });
+  const baseSize = Buffer.byteLength(serialized, 'utf8');
+  const overhead = TRANSPORT_OVERHEAD[transportType.toUpperCase() as keyof typeof TRANSPORT_OVERHEAD] || 0;
+  const totalSize = baseSize + overhead;
+
+  if (totalSize > maxSize) {
+    const error = new MessageSizeError(
+      `Message size ${baseSize} bytes + ${overhead} overhead = ${totalSize} bytes exceeds limit of ${maxSize} bytes for ${transportType}`,
+      totalSize,
+      maxSize,
+      {
+        transportType,
+        payloadSize: baseSize,
+        overhead,
+        messageType: data?.action || 'unknown',
+        // Add helpful debugging info
+        ...(data?.payload?.events && { eventCount: data.payload.events.length }),
+      }
+    );
+    throw error;
   }
 };
