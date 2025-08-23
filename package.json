@@ -21,17 +21,17 @@
     ]
   },
   "scripts": {
-    "clear": "lerna run clear:dist && lerna run clear:node_modules && rimraf node_modules && yarn cache clean --all",
-    "clear:node_modules": "lerna run  clear:node_modules && rimraf node_modules",
-    "clear:dist": "lerna run clear:dist",
-    "build": "yarn prepare && lerna run build --stream",
-    "test:unit": "lerna run test:unit --stream --",
-    "test": "lerna run test:unit --stream --",
-    "lint": "lerna run lint --stream",
-    "lint:fix": "lerna run lint:fix --stream",
+    "clear": "yarn workspaces foreach -A run clear:dist && yarn workspaces foreach -A run clear:node_modules && rimraf node_modules && yarn cache clean --all",
+    "clear:node_modules": "yarn workspaces foreach -A run clear:node_modules && rimraf node_modules",
+    "clear:dist": "yarn workspaces foreach -A run clear:dist",
+    "build": "yarn prepare && yarn workspaces foreach -A run build",
+    "test:unit": "yarn workspaces foreach -A run test:unit --",
+    "test": "yarn workspaces foreach -A run test:unit --",
+    "lint": "yarn workspaces foreach -A run lint",
+    "lint:fix": "yarn workspaces foreach -A run lint:fix",
     "prepare": "ts-patch install -s && husky install",
-    "pre-commit": "lerna run lint",
-    "pre-push": "lerna run test:unit",
+    "pre-commit": "yarn workspaces foreach -A run lint",
+    "pre-push": "yarn workspaces foreach -A run test:unit",
     "commit": "cz",
     "docs:development:generate": "typedoc",
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s -r 1 -k lerna.json"
@@ -41,6 +41,9 @@
     "@commitlint/config-conventional": "18.4.3",
     "@eslint/eslintrc": "3.3.1",
     "@eslint/js": "9.26.0",
+    "@lerna-lite/cli": "4.7.2",
+    "@lerna-lite/publish": "4.7.2",
+    "@lerna-lite/version": "4.7.2",
     "@typescript-eslint/eslint-plugin": "8.32.0",
     "@typescript-eslint/parser": "8.32.0",
     "commitizen": "4.3.0",
@@ -50,7 +53,6 @@
     "eslint-config-prettier": "10.1.5",
     "eslint-plugin-prettier": "5.4.0",
     "husky": "8.0.3",
-    "lerna": "8.0.0",
     "prettier": "3.3.0",
     "rimraf": "5.0.5",
     "ts-patch": "3.2.1",
@@ -58,9 +60,5 @@
     "typescript": "5.3.3",
     "typescript-eslint": "8.32.1",
     "typescript-transform-paths": "3.4.7"
-  },
-  "devEngines": {
-    "node": ">=16.0.0 <=22.x.x",
-    "npm": ">=8.0.0"
   }
 }
