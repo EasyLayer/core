@@ -5,9 +5,10 @@ import { IpcChildProducer } from './ipc-child.producer';
 
 export interface IpcServerOptions {
   type: 'ipc';
-  maxMessageSize?: number;
-  heartbeatTimeout?: number;
-  connectionTimeout?: number;
+  maxMessageSize?: number; // hard cap for serialized envelopes
+  heartbeatTimeout?: number; // e.g. 8000
+  connectionTimeout?: number; // used as ackTimeoutMs, e.g. 5000
+  token?: string; // optional, if вы захотите auth поверх IPC
 }
 
 class IpcServerManager implements OnModuleInit, OnModuleDestroy {
@@ -22,12 +23,10 @@ class IpcServerManager implements OnModuleInit, OnModuleDestroy {
     if (!process.send) {
       throw new Error('IPC transport requires running in a child process with IPC channel');
     }
-
     if (!process.connected) {
       throw new Error('IPC transport requires active connection to parent process');
     }
 
-    // Set up process event handlers
     this.setupProcessHandlers();
 
     this.logger.info('IPC transport initialized in child process', {
@@ -40,32 +39,19 @@ class IpcServerManager implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    // Clean up process event handlers
     this.cleanupProcessHandlers();
-
     this.logger.info('IPC transport destroyed');
   }
 
   private setupProcessHandlers() {
-    // Handle parent process disconnect
     process.on('disconnect', () => {
       this.logger.warn('Parent process disconnected, shutting down');
       process.exit(0);
     });
-
-    // Handle process errors
-    process.on('error', (error) => {
-      this.logger.error('IPC process error:', { args: { error } });
-    });
-
-    // Handle unhandled rejections
-    process.on('unhandledRejection', (reason, promise) => {
-      this.logger.error('Unhandled rejection in IPC process:', {
-        args: { reason, promise: promise.toString() },
-      });
-    });
-
-    // Handle uncaught exceptions
+    process.on('error', (error) => this.logger.error('IPC process error:', { args: { error } }));
+    process.on('unhandledRejection', (reason, promise) =>
+      this.logger.error('Unhandled rejection in IPC process:', { args: { reason, promise: String(promise) } })
+    );
     process.on('uncaughtException', (error) => {
       this.logger.error('Uncaught exception in IPC process:', { args: { error } });
       process.exit(1);
@@ -73,7 +59,6 @@ class IpcServerManager implements OnModuleInit, OnModuleDestroy {
   }
 
   private cleanupProcessHandlers() {
-    // Remove event listeners to prevent memory leaks
     process.removeAllListeners('disconnect');
     process.removeAllListeners('error');
     process.removeAllListeners('unhandledRejection');
@@ -81,25 +66,43 @@ class IpcServerManager implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-// This IPC Service is for CHILD PROCESS only
-@Module({})
+// CHILD-PROCESS-ONLY IPC module
+@Module({
+  imports: [LoggerModule.forRoot({ componentName: 'IpcTransportModule' })],
+  providers: [
+    { provide: 'IPC_OPTIONS', useValue: {} },
+
+    // Producer factory: map IpcServerOptions -> ProducerConfig
+    {
+      provide: IpcChildProducer,
+      useFactory: (logger: AppLogger, opts: IpcServerOptions) => {
+        const heartbeatTimeoutMs = opts.heartbeatTimeout ?? 8000;
+        return new IpcChildProducer(logger, {
+          name: 'ipc',
+          maxMessageBytes: opts.maxMessageSize ?? 1024 * 1024,
+          ackTimeoutMs: opts.connectionTimeout ?? 5000,
+          heartbeatMs: Math.max(500, Math.floor(heartbeatTimeoutMs / 2)),
+          heartbeatTimeoutMs,
+          token: opts.token,
+        });
+      },
+      inject: [AppLogger, 'IPC_OPTIONS'],
+    },
+    { provide: 'IPC_PRODUCER', useExisting: IpcChildProducer },
+
+    // Consumer (listens on process.on('message'))
+    IpcChildConsumer,
+
+    // Manager (lifecycle & process handlers)
+    IpcServerManager,
+  ],
+  exports: ['IPC_PRODUCER', 'IPC_OPTIONS'],
+})
 export class IpcChildTransportModule {
   static forRoot(options: IpcServerOptions): DynamicModule {
     return {
       module: IpcChildTransportModule,
-      imports: [LoggerModule.forRoot({ componentName: 'IpcTransportModule' })],
-      providers: [
-        {
-          provide: 'IPC_OPTIONS',
-          useValue: options,
-        },
-        IpcChildConsumer,
-        {
-          provide: 'IPC_PRODUCER',
-          useExisting: IpcChildProducer,
-        },
-        IpcServerManager,
-      ],
+      providers: [{ provide: 'IPC_OPTIONS', useValue: options }],
       exports: ['IPC_PRODUCER', 'IPC_OPTIONS'],
     };
   }

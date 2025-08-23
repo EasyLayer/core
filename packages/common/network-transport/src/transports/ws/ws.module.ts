@@ -17,8 +17,9 @@ export interface WsServerOptions {
     origin: string | string[];
     credentials?: boolean;
   };
-  heartbeatTimeout?: number;
-  connectionTimeout?: number;
+  heartbeatTimeout?: number; // e.g. 10000 (ms)
+  connectionTimeout?: number; // used as ackTimeout for producer, e.g. 5000
+  token?: string; // optional auth token for registerStreamConsumer
   ssl?: {
     enabled: boolean;
     key?: string;
@@ -49,9 +50,7 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
       transports = ['websocket', 'polling'],
     } = this.options;
 
-    // ---------------------------------------------------------------------
     // 1) Create HTTP or HTTPS server
-    // ---------------------------------------------------------------------
     if (ssl?.enabled && ssl.key && ssl.cert) {
       const httpsOptions = {
         key: readFileSync(ssl.key, 'utf8'),
@@ -65,27 +64,24 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
       this.logger.info(`Creating WS server on ${host}:${port}${path}`);
     }
 
-    // ---------------------------------------------------------------------
     // 2) Single Socket.IO server instance
-    // ---------------------------------------------------------------------
     this.ioServer = new SocketIOServer(this.httpServer, {
       path,
       cors: cors || { origin: '*', credentials: false },
       transports,
+      // ping timers are Socket.IO internal; we still keep our own heartbeat in producer
       pingTimeout: this.options.heartbeatTimeout || 10000,
-      pingInterval: (this.options.heartbeatTimeout || 10000) / 2,
+      pingInterval: Math.max(500, Math.floor((this.options.heartbeatTimeout || 10000) / 2)),
       maxHttpBufferSize: this.options.maxMessageSize || 1024 * 1024,
     });
 
-    // Give references to producer and gateway
+    // Pass references to producer and gateway
     this.producer.setServer(this.ioServer);
     this.gateway.setServer(this.ioServer);
 
     this.setupSocketIOHandlers();
 
-    // ---------------------------------------------------------------------
     // 3) Start listening
-    // ---------------------------------------------------------------------
     this.httpServer.listen(port, host, () => {
       const protocol = ssl?.enabled ? 'wss' : 'ws';
       this.logger.info(`WebSocket server listening on ${protocol}://${host}:${port}${path}`);
@@ -127,18 +123,42 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-@Module({})
+@Module({
+  imports: [LoggerModule.forRoot({ componentName: 'WsTransportModule' })],
+  providers: [
+    // options
+    { provide: 'WS_OPTIONS', useValue: {} },
+
+    // gateway + producer
+    WsGateway,
+    {
+      provide: WsProducer,
+      useFactory: (logger: AppLogger, opts: WsServerOptions) => {
+        // Map WS options into ProducerConfig
+        const heartbeatTimeoutMs = opts.heartbeatTimeout ?? 10000;
+        return new WsProducer(logger, {
+          name: 'ws',
+          maxMessageBytes: opts.maxMessageSize ?? 1024 * 1024,
+          ackTimeoutMs: opts.connectionTimeout ?? 5000,
+          heartbeatMs: Math.max(500, Math.floor(heartbeatTimeoutMs / 2)),
+          heartbeatTimeoutMs,
+          token: opts.token,
+        });
+      },
+      inject: [AppLogger, 'WS_OPTIONS'],
+    },
+    { provide: 'WS_PRODUCER', useExisting: WsProducer },
+
+    // server manager
+    WsServerManager,
+  ],
+  exports: ['WS_PRODUCER', 'WS_OPTIONS'],
+})
 export class WsTransportModule {
   static forRoot(options: WsServerOptions): DynamicModule {
     return {
       module: WsTransportModule,
-      imports: [LoggerModule.forRoot({ componentName: 'WsTransportModule' })],
-      providers: [
-        { provide: 'WS_OPTIONS', useValue: options },
-        WsGateway,
-        { provide: 'WS_PRODUCER', useExisting: WsProducer },
-        WsServerManager,
-      ],
+      providers: [{ provide: 'WS_OPTIONS', useValue: options }],
       exports: ['WS_PRODUCER', 'WS_OPTIONS'],
     };
   }

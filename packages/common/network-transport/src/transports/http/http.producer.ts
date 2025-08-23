@@ -1,117 +1,88 @@
-import { Injectable, Inject } from '@nestjs/common';
-import { AppLogger } from '@easylayer/common/logger';
-import { BaseProducer, BatchAckResult } from '../../core';
-import {
-  OutgoingMessage,
-  MESSAGE_SIZE_LIMITS,
-  validateMessageSize,
-  ConnectionError,
-  OutboxStreamBatchPayload,
-  OutboxStreamAckPayload,
-} from '../../shared';
-import type { WireEventRecord } from '../../shared';
-
-export interface HttpWebhookOptions {
-  url: string;
-  timeoutMs?: number;
-  maxMessageSize?: number;
-  headers?: Record<string, string>;
-}
+import type { AppLogger } from '@easylayer/common/logger';
+import type { ProducerConfig } from '../../core';
+import { BaseProducer, utf8Len } from '../../core';
+import type { Envelope, OutboxStreamAckPayload, OutboxStreamBatchPayload, WireEventRecord } from '../../shared';
+import { Actions, TRANSPORT_OVERHEAD_WIRE } from '../../shared';
 
 /**
- * HTTP Webhook Producer:
- * - No persistent connection or ping/pong (TLS handled by HTTPS).
- * - Outbox streaming uses **server→external webhook** POST with JSON payload {batchId, events}.
- * - ACK is parsed from HTTP response JSON ({allOk|okIndices|okKeys}).
- * - isConnected() returns true if URL configured; failures are signaled per-request via errors.
+ * HTTP producer:
+ * - For RPC or generic sendMessage: posts the serialized envelope and checks status.
+ * - For outbox streaming: returns ACK from response body (no correlationId here).
+ * Memory: one serialized string per request; complexity O(n) over payload size.
  */
-@Injectable()
-export class HttpWebhookProducer extends BaseProducer<OutgoingMessage> {
-  private readonly maxMessageSize: number;
-  private readonly timeoutMs: number;
+/* eslint-disable no-empty */
+async function httpPost(
+  url: string,
+  headers: Record<string, string>,
+  body: string
+): Promise<{ status: number; json: any }> {
+  const res = await fetch(url, { method: 'POST', headers, body });
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {}
+  return { status: res.status, json };
+}
+/* eslint-enable no-empty */
 
-  constructor(
-    private readonly log: AppLogger,
-    @Inject('HTTP_WEBHOOK_OPTIONS') private readonly options: HttpWebhookOptions
-  ) {
-    super();
-    this.maxMessageSize = options.maxMessageSize ?? MESSAGE_SIZE_LIMITS.HTTP;
-    this.timeoutMs = options.timeoutMs ?? 5000;
+export class HttpWebhookProducer extends BaseProducer {
+  constructor(log: AppLogger, cfg: ProducerConfig & { endpoint: string }) {
+    super(log, cfg);
   }
 
-  isConnected(): boolean {
-    return !!this.options.url;
-  }
-  markPong(): void {
-    /* no-op for HTTP */
+  protected _isUnderlyingConnected(): boolean {
+    // Stateles HTTP: assume connectable; failures surface on request.
+    return true;
   }
 
-  async sendMessage(_message: OutgoingMessage): Promise<void> {
-    throw new Error('sendMessage() is not supported by HttpWebhookProducer (use sendOutboxStreamBatchWithAck)');
+  protected async _sendSerialized(serialized: string): Promise<void> {
+    const { status } = await httpPost(
+      (this.cfg as any).endpoint,
+      {
+        'Content-Type': 'application/json',
+        ...(this.cfg.token ? { 'X-Transport-Token': this.cfg.token } : {}),
+      },
+      serialized
+    );
+
+    if (status >= 400) throw new Error(`[http] response status ${status}`);
   }
 
-  /**
-   * Sends outbox batch to external webhook and interprets response as ACK.
-   * Timeout → throws ConnectionError to trigger retry upstream.
-   */
-  async sendOutboxStreamBatchWithAck(
-    events: WireEventRecord[],
-    opts?: { timeoutMs?: number }
-  ): Promise<BatchAckResult> {
-    if (!this.isConnected()) throw new ConnectionError('HTTP webhook url is missing', { transportType: 'http' });
-
-    const batchId = `http:${Date.now()}:${Math.random()}`;
-    const payload: OutboxStreamBatchPayload = { batchId, events };
-    validateMessageSize(payload, this.maxMessageSize, 'http');
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), opts?.timeoutMs ?? this.timeoutMs);
-
-    let resp: Response;
-    try {
-      resp = await fetch(this.options.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(this.options.headers || {}) },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      } as any);
-    } catch (e) {
-      clearTimeout(timer);
-      throw new ConnectionError('HTTP webhook request failed', { transportType: 'http', cause: e as Error });
-    } finally {
-      clearTimeout(timer);
+  /** HTTP path for outbox streaming: ACK comes in response body. */
+  public async sendOutboxBatchAndWaitAckHTTP(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
+    const env: Envelope<OutboxStreamBatchPayload> = {
+      action: Actions.OutboxStreamBatch,
+      payload: { events },
+      timestamp: Date.now(),
+    };
+    const serialized = JSON.stringify(env); // see BaseProducer TODO about payload re-escaping
+    const byteLen = utf8Len(serialized) + TRANSPORT_OVERHEAD_WIRE;
+    if (byteLen > this['cfg'].maxMessageBytes) {
+      throw new Error(`[http] message too large: ${byteLen} > ${this['cfg'].maxMessageBytes}`);
     }
 
-    if (!resp.ok) {
-      throw new ConnectionError(`HTTP webhook responded with status ${resp.status}`, { transportType: 'http' });
-    }
+    const { status, json } = await httpPost(
+      (this['cfg'] as any).endpoint,
+      {
+        'Content-Type': 'application/json',
+        ...(this['cfg'].token ? { 'X-Transport-Token': this['cfg'].token } : {}),
+        ...extractRequestIdsHeader(events),
+      },
+      serialized
+    );
 
-    // Response body MAY contain partial ACK info; if absent, treat as allOk.
-    let ack: Partial<OutboxStreamAckPayload> = {};
-    try {
-      ack = await resp.json();
-    } catch {
-      /* assume allOk */
-    }
+    if (status >= 400) throw new Error(`[http] response status ${status}`);
+    if (!json || typeof json.allOk !== 'boolean') throw new Error('[http] invalid ACK payload');
+    return json as OutboxStreamAckPayload;
+  }
+}
 
-    if (ack.allOk || (!ack.okIndices && !ack.okKeys)) return { allOk: true };
-
-    const okIndices = new Set<number>();
-    if (Array.isArray(ack.okIndices)) ack.okIndices.forEach((i) => typeof i === 'number' && okIndices.add(i));
-    if (Array.isArray(ack.okKeys)) {
-      const map = new Map<string, number[]>();
-      events.forEach((e, idx) => {
-        const key = `${e.modelName}#${e.eventVersion}`;
-        const arr = map.get(key) || [];
-        arr.push(idx);
-        map.set(key, arr);
-      });
-      for (const k of ack.okKeys) {
-        const key = `${k.modelName}#${k.eventVersion}`;
-        (map.get(key) || []).forEach((i) => okIndices.add(i));
-      }
-    }
-
-    return okIndices.size ? { allOk: false, okIndices: Array.from(okIndices).sort((a, b) => a - b) } : { allOk: true };
+function extractRequestIdsHeader(events: WireEventRecord[]): Record<string, string> {
+  try {
+    const ids = events.map((e) => e.requestId).filter(Boolean);
+    if (!ids.length) return {};
+    return { 'X-Event-Request-Ids': ids.join(',') };
+  } catch {
+    return {};
   }
 }

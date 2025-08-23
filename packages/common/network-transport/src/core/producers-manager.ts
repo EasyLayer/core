@@ -1,92 +1,65 @@
 import type { AppLogger } from '@easylayer/common/logger';
 import type { BaseProducer } from './base-producer';
-import type { OutgoingMessage, WireEventRecord } from '../shared';
-import type { BatchAckResult } from './base-producer';
+import type { Envelope, OutboxStreamAckPayload, OutboxStreamBatchPayload, WireEventRecord } from '../shared';
+import { Actions } from '../shared';
 
 /**
- * ProducersManager manages many producers (HTTP/WS/IPC) for RPC traffic,
- * but outbox streaming MUST go through exactly ONE chosen producer.
- *
- * Flow:
- * - App boots: multiple producers may start ping loops (WS/IPС). HTTP producer is stateless.
- * - Consumers receive pongs and mark corresponding producer as connected.
- * - When EventStore wants to push a batch, it calls `streamWireWithAck()` which uses ONLY the selected streaming producer.
- * - Manager exposes helpers to inspect connected producers and which one is the streaming target.
+ * ProducersManager:
+ * - Keeps a named registry of producers and a single "streaming" one.
+ * - streamWireWithAck(): if no producer selected → return without error (allOk:false).
+ * - If producer selected → await async connectivity up to 5s; if still offline → throw.
+ * - For IPC, uses strict correlationId ACK path (producer-specific).
+ * Complexity: O(1) lookups; allocations = envelope serialization only.
  */
 export class ProducersManager {
-  private streamingProducer: BaseProducer<OutgoingMessage> | null = null;
-
   constructor(
     private readonly log: AppLogger,
-    private _producers: BaseProducer<OutgoingMessage>[]
+    private readonly producers = new Map<string, BaseProducer>()
   ) {}
 
-  public get producers(): BaseProducer<OutgoingMessage>[] {
-    return this._producers;
+  private selectedStreamProducer: string | null = null;
+
+  public register(name: string, p: BaseProducer) {
+    this.producers.set(name, p);
+  }
+  public setStreamingProducer(name: string | null) {
+    this.selectedStreamProducer = name;
   }
 
-  public addProducer(producer: BaseProducer<OutgoingMessage>): void {
-    this._producers.push(producer);
-    this.log.debug(`Added producer: ${producer.transportType}`);
+  public getStreamingProducer(): BaseProducer | null {
+    if (!this.selectedStreamProducer) return null;
+    return this.producers.get(this.selectedStreamProducer) ?? null;
   }
 
-  public removeProducer(producer: BaseProducer<OutgoingMessage>): void {
-    const index = this._producers.indexOf(producer);
-    if (index !== -1) {
-      this._producers.splice(index, 1);
-      if (this.streamingProducer === producer) this.streamingProducer = null;
-      this.log.debug(`Removed producer: ${producer.transportType}`);
+  public async streamWireWithAck(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
+    const prod = this.getStreamingProducer();
+
+    // No producer configured → run without error (instance started without a streaming transport)
+    if (!prod) {
+      return { allOk: false, okIndices: [] };
     }
-  }
 
-  /** Select the single producer used for outbox streaming with ACK. */
-  public setStreamingProducer(producer: BaseProducer<OutgoingMessage>): void {
-    if (!this._producers.includes(producer)) {
-      throw new Error('Streaming producer must be registered in manager');
+    // Async connectivity wait (connection-timeout semantics live here)
+    const isUp = await prod.isConnected(5000);
+    if (!isUp) throw new Error('Streaming producer is not connected (timeout)');
+
+    // IPC strict ACK by correlationId, if the producer supports it
+    const anyProd: any = prod;
+    if (typeof anyProd.sendOutboxBatchAndWaitAckIPC === 'function') {
+      return await anyProd.sendOutboxBatchAndWaitAckIPC(events);
     }
-    this.streamingProducer = producer;
-    this.log.debug(`Selected streaming producer: ${producer.transportType}`);
-  }
 
-  public clearStreamingProducer(): void {
-    this.streamingProducer = null;
-    this.log.debug('Cleared streaming producer');
-  }
+    // Generic non-correlated ACK path (WS resolves via gateway; HTTP usually doesn't use this path)
+    const env: Envelope<OutboxStreamBatchPayload> = {
+      action: Actions.OutboxStreamBatch,
+      payload: { events },
+      timestamp: Date.now(),
+    };
 
-  public getStreamingProducer(): BaseProducer<OutgoingMessage> | null {
-    return this.streamingProducer;
-  }
+    const ack = await prod.waitForAck<OutboxStreamAckPayload>(async () => {
+      await prod.sendMessage(env);
+    });
 
-  /** Stream with ACK using the selected producer. Throws if none selected or not connected. */
-  public async streamWireWithAck(events: WireEventRecord[], opts?: { timeoutMs?: number }): Promise<BatchAckResult> {
-    const p = this.streamingProducer;
-    if (!p) throw new Error('No streaming producer selected');
-    if (!p.isConnected()) throw new Error('Selected streaming producer is not connected');
-    return await (p as any).sendOutboxStreamBatchWithAck(events, opts);
-  }
-
-  /** Fire-and-forget broadcast to all connected producers (for RPC responses etc.). */
-  public async broadcast(message: OutgoingMessage): Promise<void> {
-    const connected = this._producers.filter((p) => p.isConnected());
-    if (!connected.length) return;
-    await Promise.allSettled(connected.map((p) => p.sendMessage(message)));
-  }
-
-  public getProducersStatus(): Array<{ name: string; connected: boolean; isStreaming?: boolean }> {
-    return this._producers.map((producer) => ({
-      name: producer.transportType,
-      connected: producer.isConnected(),
-      isStreaming: producer === this.streamingProducer,
-    }));
-  }
-
-  public getConnectedCount(): number {
-    return this._producers.filter((p) => p.isConnected()).length;
-  }
-  public getTotalCount(): number {
-    return this._producers.length;
-  }
-  public hasConnectedProducers(): boolean {
-    return this.getConnectedCount() > 0;
+    return ack;
   }
 }

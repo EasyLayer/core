@@ -4,6 +4,8 @@ import type { SnapshotParameters, SnapshotInterface } from '../snapshots.model';
 
 export type DriverType = 'sqlite' | 'postgres' | 'sqljs';
 
+export const FIXED_OVERHEAD = 256;
+
 export class NotSupportedError extends Error {
   constructor(method: string, driver: DriverType) {
     super(`${method} is not supported by ${driver} adapter`);

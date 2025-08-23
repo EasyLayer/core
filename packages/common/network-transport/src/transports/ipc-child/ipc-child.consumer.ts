@@ -1,146 +1,110 @@
-import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
-import { QueryBus } from '@easylayer/common/cqrs';
-import { AppLogger } from '@easylayer/common/logger';
 import { BaseConsumer } from '../../core';
-import {
-  IncomingMessage,
-  BasePayload,
-  MESSAGE_SIZE_LIMITS,
-  validateMessageSize,
-  BadRequestError,
-  OutgoingMessage,
+import type { AppLogger } from '@easylayer/common/logger';
+import type {
+  Envelope,
   OutboxStreamAckPayload,
+  RegisterStreamConsumerPayload,
+  RpcRequestPayload,
+  RpcResponsePayload,
 } from '../../shared';
-import { IpcChildProducer } from './ipc-child.producer';
-import type { IpcServerOptions } from './ipc-child.module';
+import { Actions } from '../../shared';
 
 /**
- * IPC Consumer responsibilities (all inbound):
- * - Subscribe to `process.on('message')`.
- * - For 'pong': call producer.markPong() → producer becomes "connected".
- * - For 'secureHello': call producer.buildSecureReplyForHello() and immediately send reply.
- * - For 'secureAck': call producer.finalizeSecure().
- * - For 'outboxStreamAck': call producer.resolveOutboxAck(batchId, result) to complete the waiting sender.
- * - For queries: validate, execute via QueryBus, and respond via producer.sendMessage().
- *
- * Producer never listens to inbound frames; Consumer never sends directly (always via producer).
+ * IPC child consumer:
+ * - Handles ping→pong, RPC with correlationId, and can process outbox batch
+ *   (if child acts as the receiver) and reply OutboxStreamAck with same correlationId.
+ * Memory: O(1) per message; allocations = reply envelopes only.
  */
-@Injectable()
-export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
-  private readonly maxMessageSize: number;
+export class IpcChildConsumer extends BaseConsumer {
+  private readonly token?: string;
 
-  constructor(
-    @Inject(QueryBus) private readonly queryBus: QueryBus,
-    @Inject('IPC_PRODUCER')
-    private readonly producer: IpcChildProducer,
-    private readonly log: AppLogger,
-    @Inject('IPC_OPTIONS') private readonly options: IpcServerOptions
-  ) {
-    super();
-
-    if (!process.send) throw new Error('IpcConsumer must run in a child process with IPC');
-
-    this.maxMessageSize = options.maxMessageSize ?? MESSAGE_SIZE_LIMITS.IPC;
-
-    process.on('message', this.handleMessage);
+  constructor(log: AppLogger, opts?: { token?: string }) {
+    super(log);
+    this.token = opts?.token;
+    this.attach();
   }
 
-  public async onModuleDestroy(): Promise<void> {
-    process.removeListener('message', this.handleMessage);
+  private attach() {
+    process.on('message', async (raw: any) => {
+      if (typeof raw !== 'string') return;
+      let msg: Envelope<any>;
+      try {
+        msg = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      await this.onMessage(msg);
+    });
   }
 
-  // Bind to keep same reference for removeListener
-  private handleMessage = async (raw: unknown) => {
-    try {
-      // Guard malformed
-      if (!raw || typeof raw !== 'object') return;
-      validateMessageSize(raw, this.maxMessageSize, 'ipc');
-
-      const msg = raw as IncomingMessage;
-      const { action, requestId } = msg;
-      if (!action) return;
-
-      // 1) Heartbeat
-      if (action === 'pong') {
-        this.producer.markPong();
+  protected async handleBusinessMessage(msg: Envelope, _ctx?: unknown): Promise<void> {
+    switch (msg.action) {
+      case Actions.RegisterStreamConsumer: {
+        // Usually parent initiates for WS; IPC child can ignore or implement handshake if needed.
         return;
       }
 
-      // 2) Secure handshake (server side)
-      if (action === 'secureHello') {
-        const reply = this.producer.buildSecureReplyForHello((msg as any).payload);
-        await this.producer.sendMessage(reply);
-        return;
-      }
-      if (action === 'secureAck') {
-        this.producer.finalizeSecure((msg as any).payload);
+      case Actions.OutboxStreamBatch: {
+        // If child is the actual consumer of outbox -> process and ACK with the same correlationId.
+        // Here we just send a generic allOk=true ack to demonstrate the strict correlationId round-trip.
+        const ack: Envelope<OutboxStreamAckPayload> = {
+          action: Actions.OutboxStreamAck,
+          correlationId: msg.correlationId, // MUST mirror
+          payload: { allOk: true },
+          timestamp: Date.now(),
+        };
+        await this._send(ack);
         return;
       }
 
-      // 3) Outbox ACK
-      if (action === 'outboxStreamAck') {
-        const payload = msg.payload as OutboxStreamAckPayload | undefined;
-        if (payload?.batchId) {
-          this.producer.resolveOutboxAck(payload.batchId, {
-            allOk: !!payload.allOk,
-            okIndices: payload.okIndices,
-          });
+      case Actions.RpcRequest: {
+        const req = (msg.payload || {}) as RpcRequestPayload;
+        try {
+          const data = await this.dispatch(req.route, req.data);
+          const resp: Envelope<RpcResponsePayload> = {
+            action: Actions.RpcResponse,
+            correlationId: msg.correlationId,
+            payload: { route: req.route, data },
+            timestamp: Date.now(),
+            requestId: msg.requestId,
+          };
+          await this._send(resp);
+        } catch (e: any) {
+          const resp: Envelope<RpcResponsePayload> = {
+            action: Actions.RpcResponse,
+            correlationId: msg.correlationId,
+            payload: { route: req.route, err: String(e?.message ?? e) },
+            timestamp: Date.now(),
+            requestId: msg.requestId,
+          };
+          await this._send(resp);
         }
         return;
       }
 
-      // 4) RPC: ignore until we have a pong (producer decides readiness)
-      if (!this.producer.isConnected()) return;
-
-      // 5) Queries
-      if (action === 'query') {
-        await this.handleQuery(msg as IncomingMessage<'query', BasePayload>);
+      default:
         return;
-      }
-      if (action === 'streamQuery') {
-        await this.handleStreamQuery(msg as IncomingMessage<'streamQuery', BasePayload>);
-        return;
-      }
-
-      // Everything else is ignored on purpose to keep hot path minimal.
-    } catch (err: any) {
-      // Best-effort error response (do not crash consumer loop).
-      try {
-        const errorResponse = this.createErrorResponse(err, (raw as any)?.requestId);
-        await this.producer.sendMessage(errorResponse);
-      } catch {
-        /* swallow */
-      }
-    }
-  };
-
-  private async handleQuery(msg: IncomingMessage<'query', BasePayload>): Promise<void> {
-    const { requestId, payload } = msg;
-    try {
-      if (!this.validateQueryPayload(payload)) throw new BadRequestError('Missing or invalid payload for query');
-      const result = await this.executeQuery(this.queryBus, payload);
-      const response = this.createResponse('queryResponse', result, requestId);
-      await this.producer.sendMessage(response);
-    } catch (err: any) {
-      const errorResponse = this.createErrorResponse(err, requestId);
-      await this.producer.sendMessage(errorResponse);
     }
   }
 
-  private async handleStreamQuery(msg: IncomingMessage<'streamQuery', BasePayload>): Promise<void> {
-    const { requestId, payload } = msg;
-    try {
-      if (!this.validateQueryPayload(payload)) throw new BadRequestError('Missing or invalid payload for streamQuery');
-      const stream = this.handleStreamingQuery(this.queryBus, payload);
-      for await (const response of stream) {
-        const withId: OutgoingMessage = { ...response, requestId };
-        await this.producer.sendMessage(withId);
-      }
-      const endMessage = this.createResponse('streamEnd', undefined, requestId);
-      await this.producer.sendMessage(endMessage);
-    } catch (err: any) {
-      const errorResponse = this.createErrorResponse(err, requestId);
-      await this.producer.sendMessage(errorResponse);
+  protected async _send(msg: Envelope): Promise<void> {
+    if (process.send) process.send(JSON.stringify(msg));
+  }
+
+  // Application routes living in the child process (example)
+  private async dispatch(route: string, data: any): Promise<any> {
+    switch (route) {
+      case 'health':
+        return { ok: true };
+      default:
+        return { ok: true, route, echo: data };
     }
+  }
+
+  /** Optional: child can proactively register as stream-consumer (if your protocol needs it). */
+  public registerAsStreamConsumer() {
+    const payload: RegisterStreamConsumerPayload = { token: this.token };
+    const m: Envelope = { action: Actions.RegisterStreamConsumer, payload, timestamp: Date.now() };
+    this._send(m);
   }
 }

@@ -1,7 +1,7 @@
 import { Module, DynamicModule } from '@nestjs/common';
 import { AppLogger, LoggerModule } from '@easylayer/common/logger';
 import { ProducersManager, BaseProducer } from './core';
-import { OutgoingMessage } from './shared';
+
 import {
   HttpTransportModule,
   HttpServerOptions,
@@ -9,9 +9,11 @@ import {
   WsServerOptions,
   IpcChildTransportModule,
   IpcServerOptions,
+  WsProducer,
+  IpcChildProducer,
+  HttpWebhookProducer,
 } from './transports';
 
-// Union type for all transport configurations
 export type ServerTransportConfig = HttpServerOptions | WsServerOptions | IpcServerOptions;
 
 export interface TransportModuleOptions {
@@ -25,36 +27,56 @@ export class TransportModule {
     const imports: any[] = [LoggerModule.forRoot({ componentName: 'TransportModule' })];
     const producerTokens: string[] = [];
 
-    const { transports } = options;
-
-    for (const transportConfig of transports) {
+    for (const transportConfig of options.transports) {
       if (transportConfig.type === 'http') {
-        imports.push(HttpTransportModule.forRoot(transportConfig));
+        imports.push(HttpTransportModule.forRoot(transportConfig as HttpServerOptions));
         producerTokens.push('HTTP_PRODUCER');
       }
-
       if (transportConfig.type === 'ws') {
-        imports.push(WsTransportModule.forRoot(transportConfig));
+        imports.push(WsTransportModule.forRoot(transportConfig as WsServerOptions));
         producerTokens.push('WS_PRODUCER');
       }
-
       if (transportConfig.type === 'ipc') {
-        imports.push(IpcChildTransportModule.forRoot(transportConfig));
+        imports.push(IpcChildTransportModule.forRoot(transportConfig as IpcServerOptions));
         producerTokens.push('IPC_PRODUCER');
       }
     }
 
     return {
       module: TransportModule,
-      global: options.isGlobal || false,
+      global: options.isGlobal ?? false,
       imports,
       providers: [
         {
           provide: ProducersManager,
-          useFactory: (logger: AppLogger, ...producers: BaseProducer<OutgoingMessage>[]) => {
-            const validProducers = producers.filter(Boolean);
-            logger.info(`Initializing Transport ProducersManager with ${validProducers.length} producers`);
-            return new ProducersManager(logger, validProducers);
+          useFactory: (logger: AppLogger, ...producers: BaseProducer[]) => {
+            // Build a Map<string, BaseProducer> keyed by transport kind.
+            // Prefer cfg.name ('ws'|'http'|'ipc'); fallback to instanceof; final fallback = constructor.name.
+            const map = new Map<string, BaseProducer>();
+
+            for (const p of producers) {
+              if (!p) continue;
+
+              // Try to read declared name from config (not public in BaseProducer; may require 'as any')
+              const cfgName = (p as any)?.cfg?.name || (p as any)?.name;
+
+              let key: string | undefined = typeof cfgName === 'string' ? cfgName : undefined;
+
+              if (!key) {
+                if (p instanceof WsProducer) key = 'ws';
+                else if (p instanceof HttpWebhookProducer) key = 'http';
+                else if (p instanceof IpcChildProducer) key = 'ipc';
+                else key = p.constructor?.name || 'unknown';
+              }
+
+              // last writer wins — but в конфиге transports у тебя уникальные типы
+              map.set(key, p);
+            }
+
+            logger.info(`Initializing ProducersManager with [${[...map.keys()].join(', ')}]`);
+
+            // ProducersManager ожидает Map
+            return new ProducersManager(logger, map);
           },
           inject: [AppLogger, ...(producerTokens.length > 0 ? producerTokens : [])],
         },

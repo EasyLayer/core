@@ -1,128 +1,112 @@
-import { Injectable, Inject } from '@nestjs/common';
-import { Socket, Server } from 'socket.io';
-import { QueryBus } from '@easylayer/common/cqrs';
-import { AppLogger } from '@easylayer/common/logger';
-import { BaseConsumer } from '../../core';
-import {
-  BasePayload,
-  BadRequestError,
-  MESSAGE_SIZE_LIMITS,
-  validateMessageSize,
-  IncomingMessage,
-  OutgoingMessage,
+import type { Server as SocketIOServer, Socket } from 'socket.io';
+import type { AppLogger } from '@easylayer/common/logger';
+import type {
+  Envelope,
+  RegisterStreamConsumerPayload,
   OutboxStreamAckPayload,
+  RpcRequestPayload,
+  RpcResponsePayload,
 } from '../../shared';
-import { WsProducer } from './ws.producer';
-import type { WsServerOptions } from './ws.module';
+import { Actions } from '../../shared';
+import type { WsProducer } from './ws.producer';
 
 /**
- * WS Gateway acts as Consumer:
- * - Receives inbound socket messages.
- * - For 'pong': mark producer as alive.
- * - For 'outboxStreamAck': resolve waiting batch in producer.
- * - For 'query'/'streamQuery': execute via QueryBus and respond through producer.
- * - Keeps 'streamQuery' optional (flag in options).
+ * WsGateway (plain class, no Nest decorators here):
+ * - setServer(server) is called by WsServerManager.
+ * - handleMessage(raw, socket) is called by WsServerManager for each incoming "message".
+ * - Stream ACK goes DIRECTLY to WsProducer.resolveAck(...) (no ProducersManager in-between).
+ * - RPC replies go back to the same socket, preserving correlationId.
  */
-@Injectable()
-export class WsGateway extends BaseConsumer {
-  private _server!: Server; // set by a server manager
-  private readonly maxMessageSize: number;
+export class WsGateway {
+  private server: SocketIOServer | null = null;
 
   constructor(
-    @Inject(QueryBus) private readonly queryBus: QueryBus,
-    @Inject('WS_PRODUCER')
-    private readonly producer: WsProducer,
-    private readonly log: AppLogger,
-    @Inject('WS_OPTIONS') private readonly wsOptions: WsServerOptions
-  ) {
-    super();
-    this.maxMessageSize = wsOptions.maxMessageSize ?? MESSAGE_SIZE_LIMITS.WS;
+    private readonly logger: AppLogger,
+    private readonly producer: WsProducer
+  ) {}
+
+  public setServer(server: SocketIOServer) {
+    this.server = server;
   }
 
-  get server(): Server {
-    return this._server;
-  }
-  setServer(server: Server) {
-    this._server = server;
-  }
-
-  async handleMessage(raw: unknown, client: Socket): Promise<void> {
+  public async handleMessage(raw: any, client: Socket): Promise<void> {
+    let msg: Envelope<any>;
     try {
-      validateMessageSize(raw, this.maxMessageSize, 'ws');
-      if (!this.validateMessage(raw)) {
-        await this.sendErrorToClient(client, new BadRequestError('Invalid message format'), undefined);
-        return;
-      }
-
-      const msg = raw as IncomingMessage;
-      const { action, requestId } = msg;
-
-      // Heartbeat: mark alive
-      if (action === 'pong') {
-        this.producer.markPong();
-        return;
-      }
-
-      // ACK for outbox stream
-      if (action === 'outboxStreamAck') {
-        const payload = msg.payload as OutboxStreamAckPayload;
-        if (payload?.batchId)
-          this.producer.resolveOutboxAck(payload.batchId, {
-            allOk: !!payload.allOk,
-            okIndices: payload.okIndices,
-          });
-        return;
-      }
-
-      // Before serving RPC, ensure producer is considered connected
-      if (!this.producer.isConnected()) return;
-
-      if (action === 'query') {
-        await this.handleQuery(client, msg as IncomingMessage<'query', BasePayload>);
-      } else if (action === 'streamQuery') {
-        await this.handleStreamQuery(client, msg as IncomingMessage<'streamQuery', BasePayload>);
-      } else {
-        await this.sendErrorToClient(client, new BadRequestError(`Unsupported action: ${action}`), requestId);
-      }
-    } catch (err: any) {
-      await this.sendErrorToClient(client, err, undefined);
-    }
-  }
-
-  private async handleQuery(client: Socket, msg: IncomingMessage<'query', BasePayload>): Promise<void> {
-    const { requestId, payload } = msg;
-    try {
-      if (!this.validateQueryPayload(payload)) throw new BadRequestError('Missing or invalid payload for query');
-      const result = await this.executeQuery(this.queryBus, payload);
-      const response = this.createResponse('queryResponse', result, requestId);
-      await this.producer.sendMessage(response, this.server);
-    } catch (err: any) {
-      await this.sendErrorToClient(client, err, requestId);
-    }
-  }
-
-  private async handleStreamQuery(client: Socket, msg: IncomingMessage<'streamQuery', BasePayload>): Promise<void> {
-    const { requestId, payload } = msg;
-    try {
-      if (!this.validateQueryPayload(payload)) throw new BadRequestError('Missing or invalid payload for streamQuery');
-      const gen = this.handleStreamingQuery(this.queryBus, payload);
-      for await (const response of gen) {
-        const withId: OutgoingMessage = { ...response, requestId };
-        await this.producer.sendMessage(withId, this.server);
-      }
-      const endMessage = this.createResponse('streamEnd', undefined, requestId);
-      await this.producer.sendMessage(endMessage, this.server);
-    } catch (err: any) {
-      await this.sendErrorToClient(client, err, requestId);
-    }
-  }
-
-  private async sendErrorToClient(client: Socket, error: any, requestId?: string): Promise<void> {
-    try {
-      const errorResponse = this.createErrorResponse(error, requestId);
-      await this.producer.sendMessage(errorResponse, this.server);
+      msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {
-      /* ignore */
+      return;
+    }
+
+    switch (msg.action) {
+      case Actions.Pong: {
+        // consider Pong only from the selected streaming client
+        if (client.id === (this.producer as any).streamingClientId) {
+          this.producer.onClientPong();
+        }
+        return;
+      }
+
+      case Actions.RegisterStreamConsumer: {
+        // simple token check: keep it optional
+        const p = (msg.payload || {}) as RegisterStreamConsumerPayload;
+        const expected = (this.producer as any)['cfg']?.token;
+        if (expected && p.token !== expected) {
+          client.emit('message', JSON.stringify({ action: Actions.Error, payload: { err: 'unauthorized' } }));
+          client.disconnect(true);
+          return;
+        }
+        this.producer.setStreamingClient(client.id);
+        return;
+      }
+
+      case Actions.OutboxStreamAck: {
+        // Accept ACK only from the registered streaming client
+        if (client.id !== (this.producer as any).streamingClientId) return;
+        const payload = (msg.payload || {}) as OutboxStreamAckPayload;
+        if (typeof payload.allOk === 'boolean') {
+          // resolve BaseProducer.waitForAck(...) directly
+          this.producer.resolveAck(payload);
+        }
+        return;
+      }
+
+      case Actions.RpcRequest: {
+        const q = (msg.payload || {}) as RpcRequestPayload;
+        try {
+          const data = await this.dispatch(q.route, q.data, client);
+          const resp: Envelope<RpcResponsePayload> = {
+            action: Actions.RpcResponse,
+            payload: { route: q.route, data },
+            correlationId: msg.correlationId,
+            timestamp: Date.now(),
+            requestId: msg.requestId,
+          };
+          client.emit('message', JSON.stringify(resp));
+        } catch (e: any) {
+          const resp: Envelope<RpcResponsePayload> = {
+            action: Actions.RpcResponse,
+            payload: { route: q.route, err: String(e?.message ?? e) },
+            correlationId: msg.correlationId,
+            timestamp: Date.now(),
+            requestId: msg.requestId,
+          };
+          client.emit('message', JSON.stringify(resp));
+        }
+        return;
+      }
+
+      default:
+        return;
+    }
+  }
+
+  // App-specific RPC routing lives here; keep minimal stub.
+  private async dispatch(route: string, data: any, _client: Socket): Promise<any> {
+    switch (route) {
+      case 'health':
+        return { ok: true };
+      default:
+        return { ok: true, route, echo: data };
     }
   }
 }

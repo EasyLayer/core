@@ -10,14 +10,12 @@ import {
 } from 'typeorm';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
-import { BaseAdapter, SnapshotRetention } from './base-adapter';
+import { BaseAdapter, SnapshotRetention, FIXED_OVERHEAD } from './base-adapter';
 import { OutboxRowInternal } from '../outbox.model';
 import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
 import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
 import { CompressionUtils } from '../compression';
-
-const FIXED_OVERHEAD = 160;
 
 /**
  * sql.js + IndexedDB manual flush:
