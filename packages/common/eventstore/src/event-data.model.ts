@@ -1,8 +1,7 @@
 import { EntitySchema } from 'typeorm';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import { CompressionUtils } from './compression';
-
-export type DriverType = 'sqlite' | 'postgres';
+import type { DriverType } from './adapters';
 
 /** Event row as stored in aggregate tables – payload is binary buffer now. */
 export interface EventDataParameters {
@@ -23,13 +22,17 @@ export const createEventDataEntity = (
   aggregateId: string,
   dbDriver: DriverType = 'sqlite'
 ): EntitySchema<EventDataParameters> => {
-  const isSqlite = dbDriver === 'sqlite';
+  const isPostgres = dbDriver === 'postgres';
 
   // Auto-incrementing sequence for guaranteed order
   const id: any = {
-    type: isSqlite ? 'integer' : 'bigserial',
+    type: isPostgres ? 'bigserial' : 'integer',
     primary: true,
-    generated: isSqlite ? 'increment' : true,
+    generated: isPostgres ? true : 'increment',
+  };
+
+  const payload: any = {
+    type: isPostgres ? 'bytea' : 'blob',
   };
 
   return new EntitySchema<EventDataParameters>({
@@ -41,7 +44,7 @@ export const createEventDataEntity = (
       requestId: { type: 'varchar', default: null },
       type: { type: 'varchar' },
       // Store binary payload; exact same bytes as we put to outbox:
-      payload: { type: isSqlite ? 'blob' : 'bytea' },
+      payload,
       blockHeight: { type: 'int', default: 0 },
       isCompressed: { type: 'boolean', default: false, nullable: true },
     },

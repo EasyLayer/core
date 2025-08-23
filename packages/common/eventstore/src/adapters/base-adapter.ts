@@ -1,9 +1,8 @@
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import type { OutboxRowInternal } from '../outbox.model';
 import type { SnapshotParameters, SnapshotInterface } from '../snapshots.model';
 
-export type DriverType = 'sqlite' | 'postgres';
+export type DriverType = 'sqlite' | 'postgres' | 'sqljs';
 
 export class NotSupportedError extends Error {
   constructor(method: string, driver: DriverType) {

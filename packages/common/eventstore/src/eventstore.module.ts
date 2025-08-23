@@ -1,6 +1,6 @@
 import { Module, DynamicModule } from '@nestjs/common';
 import { TypeOrmModule, getDataSourceToken, TypeOrmModuleOptions } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, QueryRunner } from 'typeorm';
 import type { DataSourceOptions } from 'typeorm';
 import { RdbmsSchemaBuilder } from 'typeorm/schema-builder/RdbmsSchemaBuilder.js';
 import { LoggerModule, AppLogger } from '@easylayer/common/logger';
@@ -11,13 +11,11 @@ import { createSnapshotsEntity } from './snapshots.model';
 import { createEventDataEntity } from './event-data.model';
 import { createOutboxEntity } from './outbox.model';
 import { EventStoreService } from './eventstore.service';
-import { BaseAdapter } from './adapters/base-adapter';
-import { PostgresAdapter } from './adapters/postgres.adapter';
-import { SqliteEventStoreAdapter } from './adapters/sqlite.adapter';
+import { DriverType, BaseAdapter, PostgresAdapter, SqliteEventStoreAdapter, BrowserSqljsAdapter } from './adapters';
 
 /** Runtime config for EventStoreModule */
 type EventStoreConfig = TypeOrmModuleOptions & {
-  type: 'sqlite' | 'postgres';
+  type: DriverType;
   name: string;
   database: string;
   aggregates: AggregateRoot[];
@@ -126,7 +124,7 @@ async function ensureSchema(ds: DataSource, allTableNames: string[], log: AppLog
 
 async function ensureNonNegativeGuards(
   ds: DataSource,
-  driver: 'postgres' | 'sqlite',
+  driver: DriverType,
   outboxTable: string,
   aggregateTables: string[],
   log: AppLogger
@@ -207,6 +205,60 @@ async function ensureSqliteNonNegTrigger(ds: DataSource, table: string, column: 
   }
 }
 
+/* eslint-disable no-empty */
+export async function ensurePersistentStorage() {
+  if (typeof window === 'undefined') return;
+  const anyNav: any = navigator as any;
+  if (!anyNav.storage || typeof anyNav.storage.persist !== 'function') return;
+  try {
+    const already = await anyNav.storage.persisted?.();
+    if (!already) await anyNav.storage.persist();
+  } catch {}
+}
+/* eslint-enable no-empty */
+
+async function flushSqljsToIndexedDB(ds: DataSource, key: string, log?: AppLogger) {
+  if (typeof window === 'undefined') return;
+  const opts: any = ds.options;
+  if (opts.type !== 'sqljs') return;
+  try {
+    const { default: localforage } = await import('localforage');
+    // sql.js Database exports full snapshot
+    const driver: any = ds.driver as any;
+    const sqljsDb = driver?.databaseConnection;
+    if (!sqljsDb?.export) return;
+    const bytes: Uint8Array = sqljsDb.export();
+    await localforage.setItem(key, bytes);
+  } catch (e) {
+    log?.debug('sqljs flush failed', { args: { error: (e as any)?.message } });
+  }
+}
+
+function installSqljsStrongDurability(ds: DataSource, key: string, log?: AppLogger) {
+  const anyDs: any = ds;
+  const origCreateQR = anyDs.createQueryRunner.bind(ds);
+
+  anyDs.createQueryRunner = (...args: any[]): QueryRunner => {
+    const qr: QueryRunner = origCreateQR(...args);
+    const origCommit = qr.commitTransaction.bind(qr);
+    qr.commitTransaction = async () => {
+      await origCommit();
+      await flushSqljsToIndexedDB(ds, key, log);
+    };
+    return qr;
+  };
+}
+
+function setupSqljsDurability(ds: DataSource, key: string, log?: AppLogger) {
+  installSqljsStrongDurability(ds, key, log);
+
+  // When closing a tab - final flash (fire-and-forget)
+  if (typeof window !== 'undefined') {
+    const onBeforeUnload = () => void flushSqljsToIndexedDB(ds, key, log);
+    window.addEventListener('beforeunload', onBeforeUnload);
+  }
+}
+
 /**
  * EventStoreModule
  * - Builds TypeORM DataSource with all entities (outbox, per-aggregate tables, snapshots).
@@ -219,19 +271,33 @@ export class EventStoreModule {
     const { name, database, aggregates, ...restOptions } = config;
 
     // Compose entity list: outbox + aggregate tables + snapshots
-    const snapshotsEntity = createSnapshotsEntity(config.type);
-    const outboxEntity = createOutboxEntity(config.type);
-    const aggregateEntities = aggregates.map((agg) => createEventDataEntity(agg.aggregateId, config.type));
+    const ddlDriverForEntities = config.type === 'postgres' ? 'postgres' : 'sqlite';
+    const snapshotsEntity = createSnapshotsEntity(ddlDriverForEntities);
+    const outboxEntity = createOutboxEntity(ddlDriverForEntities);
+    const aggregateEntities = aggregates.map((a) => createEventDataEntity(a.aggregateId, ddlDriverForEntities));
     const entities = [outboxEntity, ...aggregateEntities, snapshotsEntity];
 
     // We always pass synchronize:false; schema will be ensured manually
     const dataSourceOptions: DataSourceOptions & { log?: AppLogger } = {
-      ...(config.type === 'postgres' ? { extra: { min: 5, max: 20 } } : {}),
       ...restOptions,
       name,
       entities,
       synchronize: false,
       database,
+      ...(config.type === 'postgres'
+        ? { type: 'postgres', extra: { min: 5, max: 20 } }
+        : config.type === 'sqlite'
+          ? { type: 'sqlite' as const }
+          : {
+              type: 'sqljs' as const,
+              // Load/read via localforage, BUT turn off autosave — flash yourself after each COMMIT
+              useLocalForage: true,
+              autoSave: false,
+              // autoSaveInterval: 3000,
+              // TypeORM will automatically insert the prefix when loading,
+              // but for our entry we use the same key
+              location: database,
+            }),
     } as any;
 
     // Precompute target table names (for partial sync and diagnostics)
@@ -244,7 +310,6 @@ export class EventStoreModule {
       imports: [
         ContextModule,
         LoggerModule.forRoot({ componentName: EventStoreModule.name }),
-
         // Build the dedicated DataSource for Event Store
         TypeOrmModule.forRootAsync({
           imports: [LoggerModule.forRoot({ componentName: EventStoreModule.name })],
@@ -255,14 +320,29 @@ export class EventStoreModule {
           dataSourceFactory: async (options?: DataSourceOptions & { log?: AppLogger }) => {
             if (!options) throw new Error('Invalid DataSource options');
 
+            // SQLJS: Browser only + sqljs: request persistent storage BEFORE initialization
+            if (typeof window !== 'undefined' && config.type === 'sqljs') {
+              await ensurePersistentStorage();
+            }
+
             options.log?.info('Connecting to database...');
             const ds = new DataSource(options);
             await ds.initialize();
 
+            // SQLJS: Globally enable "strong durability": flush after EVERY COMMIT
+            if (config.type === 'sqljs') {
+              const key = config.database;
+              setupSqljsDurability(ds, key, options.log);
+            }
+
             // Ensure schema: create only missing tables/indexes/constraints
             await ensureSchema(ds, allTableNames, options.log!);
-
             await ensureNonNegativeGuards(ds, config.type, outboxTable, aggregateTables, options.log!);
+
+            // SQLJS: Just in case - a single flush after DDL (although the COMMIT hook will cover this)
+            if (config.type === 'sqljs') {
+              await flushSqljsToIndexedDB(ds, config.database, options.log);
+            }
 
             options.log?.info('Connected and schema ensured.');
             return ds;
@@ -273,9 +353,10 @@ export class EventStoreModule {
         {
           provide: 'EVENTSTORE_ADAPTER',
           useFactory: (log: AppLogger, dataSource: DataSource) => {
-            return config.type === 'postgres'
-              ? new PostgresAdapter(log, dataSource)
-              : new SqliteEventStoreAdapter(log, dataSource);
+            if (config.type === 'postgres') return new PostgresAdapter(log, dataSource);
+            if (config.type === 'sqlite') return new SqliteEventStoreAdapter(log, dataSource);
+            if (config.type === 'sqljs') return new BrowserSqljsAdapter(log, dataSource);
+            throw new Error('Unknown eventstore adapter');
           },
           inject: [AppLogger, getDataSourceToken(name)],
         },

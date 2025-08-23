@@ -1,6 +1,5 @@
 import { EntitySchema } from 'typeorm';
-
-export type DriverType = 'sqlite' | 'postgres';
+import type { DriverType } from './adapters';
 
 export interface OutboxRowInternal {
   id: number; // bigserial/integer autoincrement
@@ -15,20 +14,19 @@ export interface OutboxRowInternal {
   payload_uncompressed_bytes: number;
 }
 
-export const createOutboxEntity = (dbDriver: 'sqlite' | 'postgres' = 'postgres'): EntitySchema<OutboxRowInternal> => {
-  const isSqlite = dbDriver === 'sqlite';
+export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<OutboxRowInternal> => {
+  const isPostgres = dbDriver === 'postgres';
 
   // Auto-incrementing sequence for guaranteed order
   const id: any = {
-    type: isSqlite ? 'integer' : 'bigserial',
+    type: isPostgres ? 'bigserial' : 'integer',
     primary: true,
-    generated: isSqlite ? 'increment' : true,
+    generated: isPostgres ? true : 'increment',
   };
 
   // TypeORM column type for binary
-  const binaryType = isSqlite ? 'blob' : 'bytea';
-
-  const bytesType = isSqlite ? 'integer' : 'bigint';
+  const binaryType = isPostgres ? 'bytea' : 'blob';
+  const bytesType = isPostgres ? 'bigint' : 'integer';
 
   return new EntitySchema<OutboxRowInternal>({
     name: 'outbox',

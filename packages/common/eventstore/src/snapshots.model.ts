@@ -1,8 +1,7 @@
 import { EntitySchema } from 'typeorm';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
-import { CompressionUtils } from './compression'; // must provide: shouldCompress(string), compressToBuffer(string), decompressBufferToString(Buffer)
-
-export type DriverType = 'sqlite' | 'postgres';
+import { CompressionUtils } from './compression';
+import type { DriverType } from './adapters';
 
 /**
  * DB row shape: what is actually stored in the table.
@@ -32,13 +31,22 @@ export interface SnapshotParameters {
 
 /** Create TypeORM entity for "snapshots" table (BLOB/bytea payload). */
 export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<SnapshotInterface> => {
-  const isSqlite = dbDriver === 'sqlite';
+  const isPostgres = dbDriver === 'postgres';
 
   // Auto-incrementing sequence for guaranteed order
   const id: any = {
-    type: isSqlite ? 'integer' : 'bigserial',
+    type: isPostgres ? 'bigserial' : 'integer',
     primary: true,
-    generated: isSqlite ? 'increment' : true,
+    generated: isPostgres ? true : 'increment',
+  };
+
+  const payload: any = {
+    type: isPostgres ? 'bytea' : 'blob',
+  };
+
+  const createdAt: any = {
+    type: isPostgres ? 'timestamp' : 'datetime',
+    default: () => 'CURRENT_TIMESTAMP',
   };
 
   return new EntitySchema<SnapshotInterface>({
@@ -49,10 +57,9 @@ export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): Entity
       aggregateId: { type: 'varchar' },
       blockHeight: { type: 'int', default: 0 },
       version: { type: 'int', default: 0 },
-      // Binary payload for both drivers (no TEXT/base64 anymore)
-      payload: { type: isSqlite ? 'blob' : ('bytea' as any) },
+      payload,
       isCompressed: { type: 'boolean', default: false, nullable: true },
-      createdAt: { type: isSqlite ? 'datetime' : 'timestamp', default: () => 'CURRENT_TIMESTAMP' },
+      createdAt,
     },
     indices: [
       { name: 'IDX_aggregate_blockheight', columns: ['aggregateId', 'blockHeight'] },
