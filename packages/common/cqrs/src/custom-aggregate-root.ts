@@ -3,6 +3,17 @@ import type { IEventHandler } from '@nestjs/cqrs';
 import { EVENT_METADATA } from '@nestjs/cqrs/dist/decorators/constants';
 import type { DomainEvent } from './basic-event';
 
+export interface AggregateOptions {
+  /** Enable or disable snapshot creation */
+  snapshotsEnabled?: boolean;
+
+  /** Allow pruning of old events/snapshots */
+  allowPruning?: boolean;
+
+  /** Interval between snapshots (default: 1000 versions) */
+  snapshotInterval?: number;
+}
+
 const INTERNAL_EVENTS = Symbol();
 
 /**
@@ -70,15 +81,7 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
   // OPTIONAL: per-field snapshot adapters on child classes
   // static snapshotFieldAdapters?: Record<string, SnapshotFieldAdapter>;
 
-  constructor(
-    aggregateId: string,
-    lastBlockHeight: number,
-    options?: {
-      snapshotsEnabled?: boolean;
-      allowPruning?: boolean;
-      snapshotInterval?: number;
-    }
-  ) {
+  constructor(aggregateId: string, lastBlockHeight: number, options?: AggregateOptions) {
     if (!aggregateId) throw new Error('aggregateId is required');
     this._aggregateId = aggregateId;
     this._lastBlockHeight = lastBlockHeight;

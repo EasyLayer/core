@@ -11,6 +11,7 @@ export interface EventDataParameters {
   version: number;
   requestId: string;
   blockHeight: number;
+  timestamp: number;
   isCompressed?: boolean;
 }
 
@@ -45,8 +46,11 @@ export const createEventDataEntity = (
       type: { type: 'varchar' },
       // Store binary payload; exact same bytes as we put to outbox:
       payload,
-      blockHeight: { type: 'int', default: 0 },
+      blockHeight: { type: 'int', nullable: true, default: true },
       isCompressed: { type: 'boolean', default: false, nullable: true },
+      timestamp: {
+        type: 'bigint',
+      },
     },
     uniques: [{ name: `UQ_${aggregateId}_v_reqid`, columns: ['version', 'requestId'] }],
     indices: [{ name: `IDX_${aggregateId}_blockh`, columns: ['blockHeight'] }],
@@ -66,15 +70,16 @@ export async function serializeEventRow(
 ): Promise<
   EventDataParameters & {
     payloadUncompressedBytes: number;
-    payloadAggregate: Buffer; // binary buffer for aggregate table
-    payloadOutbox: Buffer; // same reference as above for outbox
   }
 > {
-  const { aggregateId, requestId, blockHeight, ...payload } = event;
+  const { aggregateId, requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
   if (version == null) throw new Error('Version is missing');
   if (blockHeight == null) throw new Error('blockHeight is missing in the event');
+
+  // -1 => null
+  const normalizedHeight = blockHeight < 0 ? null : blockHeight;
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
@@ -97,38 +102,41 @@ export async function serializeEventRow(
     buf = Buffer.from(json, 'utf8'); // plain bytes (one buffer only)
   }
 
-  // IMPORTANT: same Buffer instance goes to both aggregate and outbox
   return {
     type,
-    payload: buf, // for aggregate table
+    payload: buf,
     version,
     requestId,
-    blockHeight,
+    blockHeight: normalizedHeight,
     isCompressed,
+    timestamp,
     payloadUncompressedBytes: uncompressedLen,
-    payloadAggregate: buf,
-    payloadOutbox: buf,
   };
 }
 
 /** Read-side helper (OK to parse). Aggregate row uses Buffer payload. */
 export async function deserializeToDomainEvent(
   aggregateId: string,
-  { type, requestId, blockHeight, payload, isCompressed, version }: EventDataParameters,
+  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataParameters,
   _dbDriver: DriverType = 'postgres'
 ): Promise<DomainEvent> {
   const jsonStr = isCompressed ? await CompressionUtils.decompressBufferToString(payload) : payload.toString('utf8');
-  const body = JSON.parse(jsonStr);
+  const userPayload = JSON.parse(jsonStr);
 
-  const proto: any = { payload: body };
-  proto.constructor = { name: type } as any;
+  const proto: any = {};
+  Object.defineProperty(proto, 'constructor', {
+    value: { name: type },
+    enumerable: false,
+    configurable: true,
+    writable: false,
+  });
 
   const event: DomainEvent = Object.assign(Object.create(proto), {
     aggregateId,
     requestId,
-    blockHeight,
-    version,
-    timestamp: body?.timestamp,
+    blockHeight: blockHeight ?? -1, // null => -1
+    timestamp,
+    payload: userPayload,
   });
 
   return event;

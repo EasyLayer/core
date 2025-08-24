@@ -34,7 +34,7 @@ export class CqrsTransportModule implements OnModuleInit {
         Publisher,
         Subscriber,
       ],
-      exports: [],
+      exports: [Publisher],
     };
   }
 

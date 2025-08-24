@@ -11,11 +11,10 @@ import {
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { BaseAdapter, SnapshotRetention, FIXED_OVERHEAD } from './base-adapter';
-import { OutboxRowInternal } from '../outbox.model';
+import { OutboxRowInternal, deserializeToOutboxRaw } from '../outbox.model';
 import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
 import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import { CompressionUtils } from '../compression';
 
 /**
  * sql.js + IndexedDB manual flush:
@@ -50,8 +49,32 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
 {
   public readonly driver = 'sqljs' as const;
 
-  /** Max rows per INSERT/DELETE batch (keep < 999 — SQLite param limit). */
-  private readonly sqljsBatchSize: number = 900;
+  /**
+   * SQLite/sql.js host parameter limit per statement.
+   * We compute rows-per-insert from this, based on columns per row.
+   */
+  private static readonly SQLITE_MAX_PARAMS = 999;
+
+  /** Columns per row in aggregate events table INSERT. */
+  private static readonly AGG_COLS_PER_ROW = 6; // type, payload, version, requestId, blockHeight, isCompressed
+
+  /** Columns per row in outbox INSERT. */
+  private static readonly OUTBOX_COLS_PER_ROW = 9; // aggregateId, eventType, eventVersion, requestId, blockHeight, payload, timestamp, isCompressed, payload_uncompressed_bytes
+
+  /** Safe rows-per-INSERT for aggregates. */
+  private static readonly AGG_ROWS_PER_INSERT = Math.max(
+    1,
+    Math.floor(BrowserSqljsAdapter.SQLITE_MAX_PARAMS / BrowserSqljsAdapter.AGG_COLS_PER_ROW)
+  ); // 999/6 => 166
+
+  /** Safe rows-per-INSERT for outbox. */
+  private static readonly OUTBOX_ROWS_PER_INSERT = Math.max(
+    1,
+    Math.floor(BrowserSqljsAdapter.SQLITE_MAX_PARAMS / BrowserSqljsAdapter.OUTBOX_COLS_PER_ROW)
+  ); // 999/9 => 111
+
+  /** Chunk size for IN (...) deletes; keep below 999. */
+  private readonly idDeleteChunkSize: number = 900;
 
   /** Watermark for outbox streaming (global order by (timestamp,id)). */
   private lastSeenTsUs = 0;
@@ -115,6 +138,9 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
    * We create ONE Buffer per event (optionally compressed) and reuse it for BOTH:
    *  - aggregate tables (payload: BLOB)
    *  - outbox table  (payload: BLOB)
+   *
+   * IMPORTANT: We batch INSERTs by **rows-per-statement**, derived from
+   * the SQLite/sql.js 999-parameter limit and the number of columns per row.
    */
   async persistAggregatesAndOutbox(aggregates: T[]): Promise<void> {
     if (!aggregates.length) return;
@@ -141,20 +167,22 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
           // Aggregate row
           rows.push({
             type: ser.type,
-            payload: ser.payloadAggregate, // same Buffer
+            payload: ser.payload, // same Buffer
             version: ser.version,
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
             isCompressed: ser.isCompressed,
+            timestamp: ser.timestamp,
           });
 
+          // Outbox row
           outRows.push({
             aggregateId: agg.aggregateId,
             eventType: ser.type,
             eventVersion: ser.version,
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
-            payload: ser.payloadOutbox, // same Buffer
+            payload: ser.payload, // same Buffer
             timestamp: ev.timestamp!,
             isCompressed: ser.isCompressed ?? false,
             payload_uncompressed_bytes: ser.payloadUncompressedBytes,
@@ -170,20 +198,24 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
         return;
       }
 
-      // Insert aggregates batched
+      // INSERT aggregates batched by rows-per-statement (avoid >999 params)
       for (const [aggId, rows] of perAgg.entries()) {
         const repo = qr.manager.getRepository<EventDataParameters>(aggId);
-        for (let i = 0; i < rows.length; i += this.sqljsBatchSize) {
-          const batch = rows.slice(i, i + this.sqljsBatchSize);
+        const step = BrowserSqljsAdapter.AGG_ROWS_PER_INSERT; // 166
+        for (let i = 0; i < rows.length; i += step) {
+          const batch = rows.slice(i, i + step);
           await repo.createQueryBuilder().insert().values(batch).updateEntity(false).execute();
         }
       }
 
-      // Insert outbox in one go (sql.js handles large INSERT well; split if needed)
-      const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
-      for (let i = 0; i < outRows.length; i += this.sqljsBatchSize) {
-        const batch = outRows.slice(i, i + this.sqljsBatchSize);
-        await outboxRepo.createQueryBuilder().insert().values(batch).updateEntity(false).execute();
+      // INSERT outbox batched by rows-per-statement (avoid >999 params)
+      {
+        const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
+        const step = BrowserSqljsAdapter.OUTBOX_ROWS_PER_INSERT; // 111
+        for (let i = 0; i < outRows.length; i += step) {
+          const batch = outRows.slice(i, i + step);
+          await outboxRepo.createQueryBuilder().insert().values(batch).updateEntity(false).execute();
+        }
       }
 
       // Mark all events as saved
@@ -200,102 +232,95 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Outbox streaming: read ORDER BY (timestamp,id) → deliver → ACK delete
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Outbox streaming for sql.js (IndexedDB-backed).
-   * - Single connection; use a (timestamp,id) watermark.
-   * - Adaptive LIMIT to reduce round-trips.
-   * - Chunked DELETE to avoid the 999-parameter limit.
-   * - Manual flush after COMMIT.
-   */
+  // ======== Outbox streaming: read ORDER BY (timestamp,id) -> ACK -> IMMEDIATE delete ========
   async fetchDeliverAckChunk(
     wireBudgetBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
   ): Promise<number> {
     const ids: number[] = [];
     const events: WireEventRecord[] = [];
-
-    // Adaptive LIMIT based on moving average
-    const est = Math.max(512, this.avgRowBytes);
-    const maxLimit = 256; // reasonable upper bound for UI/web
     let budget = wireBudgetBytes;
-    let limit = Math.max(1, Math.min(maxLimit, Math.floor(budget / est)));
 
-    const rows = (await this.dataSource.query(
-      `SELECT id, aggregateId, eventType, eventVersion, requestId, blockHeight,
-              payload, isCompressed, payload_uncompressed_bytes AS ulen, "timestamp"
-       FROM outbox
-       WHERE ("timestamp" > ? OR ("timestamp" = ? AND id > ?))
-       ORDER BY "timestamp" ASC, id ASC
-       LIMIT ?`,
-      [this.lastSeenTsUs, this.lastSeenTsUs, this.lastSeenId, limit]
-    )) as Array<{
-      id: number;
-      aggregateId: string;
-      eventType: string;
-      eventVersion: number;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: number | boolean;
-      ulen: number;
-      timestamp: number;
-    }>;
+    while (true) {
+      // Read one row at a time to maintain strict watermark semantics
+      const rows = (await this.dataSource.query(
+        `SELECT id, aggregateId, eventType, eventVersion, requestId, blockHeight,
+                payload, isCompressed, payload_uncompressed_bytes AS ulen, "timestamp"
+          FROM outbox
+          WHERE ("timestamp" > ? OR ("timestamp" = ? AND id > ?))
+          ORDER BY "timestamp" ASC, id ASC
+          LIMIT 1`,
+        [this.lastSeenTsUs, this.lastSeenTsUs, this.lastSeenId]
+      )) as Array<{
+        id: number;
+        aggregateId: string;
+        eventType: string;
+        eventVersion: number;
+        requestId: string;
+        blockHeight: number; // may be NULL in DB
+        payload: Buffer;
+        isCompressed: number | boolean; // SQLite may return 0/1
+        ulen: number; // payload_uncompressed_bytes
+        timestamp: number;
+      }>;
 
-    if (rows.length === 0) return 0;
+      if (rows.length === 0) break;
 
-    for (const r of rows) {
+      const r = rows[0]!;
+
+      // Compute row size BEFORE decompressing and BEFORE moving the watermark.
       const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
+
+      // If we already have at least one event and this row won't fit — stop.
+      // IMPORTANT: do not move watermark in this case, otherwise the row will be skipped.
       if (events.length > 0 && rowBytes > budget) break;
 
-      // Move the watermark strictly by (timestamp,id)
+      // Accept row → build WireEventRecord in one helper (decompress if needed).
+      const evt = await deserializeToOutboxRaw({
+        aggregateId: r.aggregateId,
+        eventType: r.eventType,
+        eventVersion: r.eventVersion,
+        requestId: r.requestId,
+        blockHeight: r.blockHeight,
+        payload: r.payload,
+        isCompressed: !!r.isCompressed,
+        timestamp: r.timestamp,
+      });
+
+      ids.push(r.id);
+      events.push(evt);
+
+      // Move watermark ONLY after we actually accepted the row.
+      // This guarantees at-least-once delivery when budget stops us.
       this.lastSeenTsUs = Number(r.timestamp);
       this.lastSeenId = Number(r.id);
 
-      // Current wire contract: deliver JSON string (decompress if needed)
-      const compressed = !!r.isCompressed;
-      const jsonStr = compressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
-
-      ids.push(r.id);
-      events.push({
-        modelName: r.aggregateId,
-        eventType: r.eventType,
-        eventVersion: Number(r.eventVersion),
-        requestId: r.requestId,
-        blockHeight: Number(r.blockHeight),
-        payload: jsonStr,
-        timestamp: Number(r.timestamp),
-      });
-
-      // Update moving average & budget
-      this.avgRowBytes = 0.9 * this.avgRowBytes + 0.1 * rowBytes;
+      // Update remaining budget.
       budget = Math.max(0, budget - rowBytes);
     }
 
     if (events.length === 0) return 0;
 
-    // Deliver one batch, expect a single ACK
+    // We send one batch and wait for a single ACK
     await deliver(events);
 
-    // Delete ACK'ed ids (chunked)
+    // Remove ACK'ed ids (chunk IN(...) to keep params < 999)
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
-    await qr.startTransaction();
+    await qr.query('BEGIN IMMEDIATE');
+
     try {
-      for (let i = 0; i < ids.length; i += this.sqljsBatchSize) {
-        const chunk = ids.slice(i, i + this.sqljsBatchSize);
+      const step = this.idDeleteChunkSize; // 900
+      for (let i = 0; i < ids.length; i += step) {
+        const chunk = ids.slice(i, i + step);
         await qr.manager.query(`DELETE FROM outbox WHERE id IN (${chunk.map(() => '?').join(',')})`, chunk);
       }
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
+      await qr.query('COMMIT');
     } catch (e) {
-      await qr.rollbackTransaction().catch(() => undefined);
+      await qr.query('ROLLBACK').catch(() => undefined);
       throw e;
     } finally {
-      await qr.release().catch(() => undefined);
+      await qr.release();
     }
 
     return events.length;
@@ -346,8 +371,8 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
       // Outbox cleanup for all aggregates (one txn, chunked IN)
       await qr.startTransaction();
       try {
-        for (let i = 0; i < aggregateIds.length; i += this.sqljsBatchSize) {
-          const chunk = aggregateIds.slice(i, i + this.sqljsBatchSize);
+        for (let i = 0; i < aggregateIds.length; i += this.idDeleteChunkSize) {
+          const chunk = aggregateIds.slice(i, i + this.idDeleteChunkSize);
           const placeholders = chunk.map(() => '?').join(',');
           await qr.manager.query(
             `DELETE FROM outbox
@@ -485,12 +510,12 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
     }
   }
 
-  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number, ret?: SnapshotRetention): Promise<void> {
+  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number): Promise<void> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.startTransaction();
     try {
-      await this.applySnapshotRetentionTx(qr, aggregateId, currentBlockHeight, ret);
+      await this.applySnapshotRetentionTx(qr, aggregateId, currentBlockHeight);
       await qr.commitTransaction();
       await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
     } catch (e) {
@@ -644,7 +669,6 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
     if (minHeight !== -Infinity) {
       qb.andWhere('blockHeight < :bh', { bh: minHeight });
     } else {
-      // If no window, allow everything except keepIds
       qb.andWhere('1=1');
     }
 

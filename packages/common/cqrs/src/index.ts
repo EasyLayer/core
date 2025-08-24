@@ -11,4 +11,5 @@ export { setQueryMetadata, setEventMetadata } from './utils';
 export { CustomCqrsModule as CqrsModule } from './custom-cqrs.module';
 export { CustomEventBus } from './custom-event-bus';
 export { CustomAggregateRoot as AggregateRoot } from './custom-aggregate-root';
+export type { AggregateOptions } from './custom-aggregate-root';
 export { EventPublisher } from './event-publisher';

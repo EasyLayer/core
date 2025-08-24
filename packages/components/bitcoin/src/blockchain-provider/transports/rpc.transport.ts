@@ -1,4 +1,5 @@
-import { Agent as UndiciAgent, fetch } from 'undici';
+import { Agent as UndiciAgent } from 'undici';
+import type { RequestInit as UndiciRequestInit } from 'undici';
 import * as zmq from 'zeromq';
 import { v4 as uuidv4 } from 'uuid';
 import type { BaseTransportOptions } from './base.transport';
@@ -212,13 +213,15 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), this.responseTimeout);
 
-      const response = await fetch(this.baseUrl, {
+      const init: UndiciRequestInit = {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
-        dispatcher: this._dispatcher, // <— Undici agent
-        signal: ac.signal, // <— real timeout
-      }).finally(() => clearTimeout(timer));
+        signal: ac.signal,
+        dispatcher: this._dispatcher,
+      };
+
+      const response = await fetch(this.baseUrl, init as unknown as RequestInit).finally(() => clearTimeout(timer));
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');

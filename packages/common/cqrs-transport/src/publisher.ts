@@ -1,7 +1,7 @@
 import { Subject } from 'rxjs';
 import { Injectable, Inject } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
-import { DomainEvent, IEventPublisher } from '@easylayer/common/cqrs';
+import { DomainEvent, IEventPublisher, setEventMetadata } from '@easylayer/common/cqrs';
 import { ProducersManager } from '@easylayer/common/network-transport';
 import { WireEventRecord } from './event-record.interface';
 
@@ -58,10 +58,8 @@ export class Publisher implements IEventPublisher<DomainEvent> {
       }
 
       try {
-        const body = JSON.parse(wireEvent.payload);
-
         // Create domain event from wire event
-        const domainEvent: DomainEvent = this.createDomainEventFromWire(wireEvent, body);
+        const domainEvent: DomainEvent = this.createDomainEventFromWire(wireEvent);
 
         this.subject$.next(domainEvent);
       } catch (error) {
@@ -84,22 +82,40 @@ export class Publisher implements IEventPublisher<DomainEvent> {
   }
 
   /**
-   * Create domain event object from wire event
+   * Create a DomainEvent instance from a wire record.
+   *
+   * Important bits:
+   * - We create a tiny "constructor" object whose name equals the event type (class name).
+   * - We **stamp NestJS EVENT_METADATA** on that constructor: { id: <type-name> }.
+   *   This makes the event discoverable by Nest CQRS internals & by our CustomEventBus.
+   * - This happens **only** for whitelisted (system) events.
    */
-  private createDomainEventFromWire(wireEvent: WireEventRecord, body: any): DomainEvent {
-    // Create prototype with constructor name
-    const proto: any = { payload: body };
-    proto.constructor = { name: wireEvent.eventType } as any;
+  private createDomainEventFromWire(wireEvent: WireEventRecord): DomainEvent {
+    const body = JSON.parse(wireEvent.payload);
 
-    // Create domain event with all properties
-    const domainEvent: DomainEvent = Object.assign(Object.create(proto), {
+    // Synthetic constructor “holder” whose name matches the wire event type.
+    // We attach EVENT_METADATA to it so CQRS filtering by id keeps working.
+    const ctor: any = { name: wireEvent.eventType };
+    setEventMetadata(ctor as any);
+
+    // Build a plain event object with OWN 'payload' property (no prototype tricks).
+    const event: DomainEvent = {
       aggregateId: wireEvent.modelName,
       requestId: wireEvent.requestId,
       blockHeight: wireEvent.blockHeight,
-      version: wireEvent.eventVersion,
       timestamp: wireEvent.timestamp,
+      payload: body, // parsed JSON body as a normal field
+    };
+
+    // Ensure event.constructor.name === wireEvent.eventType for ofType()/metadata routes,
+    // but do NOT put payload on the prototype. Make it non-enumerable to avoid leaking in JSON.
+    Object.defineProperty(event, 'constructor', {
+      value: ctor,
+      writable: false,
+      enumerable: false,
+      configurable: true,
     });
 
-    return domainEvent;
+    return event;
   }
 }

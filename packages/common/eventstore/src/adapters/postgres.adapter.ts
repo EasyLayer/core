@@ -12,7 +12,7 @@ import { PostgresError } from 'pg-error-enum';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
 import { BaseAdapter, SnapshotRetention, FIXED_OVERHEAD } from './base-adapter';
-import { OutboxRowInternal } from '../outbox.model';
+import { OutboxRowInternal, deserializeToOutboxRaw } from '../outbox.model';
 import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
 import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
@@ -63,11 +63,12 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           // Aggregate row (binary payload)
           rows.push({
             type: ser.type,
-            payload: ser.payloadAggregate, // same Buffer
+            payload: ser.payload, // same Buffer
             version: ser.version,
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
             isCompressed: ser.isCompressed,
+            timestamp: ser.timestamp,
           });
 
           // Outbox row (binary payload + uncompressed byte length)
@@ -77,7 +78,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
             eventVersion: ser.version,
             requestId: ser.requestId,
             blockHeight: ser.blockHeight,
-            payload: ser.payloadOutbox, // same Buffer
+            payload: ser.payload, // same Buffer
             timestamp: ev.timestamp!,
             isCompressed: ser.isCompressed ?? false,
             payload_uncompressed_bytes: ser.payloadUncompressedBytes,
@@ -190,7 +191,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         eventType: string;
         eventVersion: number;
         requestId: string;
-        blockHeight: number | null;
+        blockHeight: number;
         payload: Buffer;
         isCompressed: boolean;
         timestamp: number;
@@ -210,19 +211,20 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
         if (events.length > 0 && rowBytes > budget) break;
 
-        const compressed = !!r.isCompressed;
-        const jsonStr = compressed ? await CompressionUtils.decompressAny(r.payload) : r.payload.toString('utf8');
-
-        events.push({
-          modelName: r.aggregateId,
+        // Accept row → build WireEventRecord in one helper (decompress if needed).
+        const evt = await deserializeToOutboxRaw({
+          aggregateId: r.aggregateId,
           eventType: r.eventType,
-          eventVersion: Number(r.eventVersion),
+          eventVersion: r.eventVersion,
           requestId: r.requestId,
-          blockHeight: r.blockHeight == null ? null : Number(r.blockHeight),
-          payload: jsonStr,
-          timestamp: Number(r.timestamp),
-          contentEncoding: r.isCompressed ? 'deflate' : 'json',
-        } as any);
+          blockHeight: r.blockHeight,
+          payload: r.payload,
+          isCompressed: !!r.isCompressed,
+          timestamp: r.timestamp,
+        });
+
+        ids.push(r.id);
+        events.push(evt);
 
         budget -= Math.max(0, rowBytes);
       }

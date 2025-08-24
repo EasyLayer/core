@@ -1,4 +1,6 @@
 import { EntitySchema } from 'typeorm';
+import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
+import { CompressionUtils } from './compression';
 import type { DriverType } from './adapters';
 
 export interface OutboxRowInternal {
@@ -45,9 +47,7 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
       requestId: {
         type: 'varchar',
       },
-      blockHeight: {
-        type: 'int',
-      },
+      blockHeight: { type: 'int', nullable: true, default: true },
       payload: { type: binaryType as any }, // binary
       timestamp: {
         type: 'bigint',
@@ -71,3 +71,37 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
     ],
   });
 };
+
+/**
+ * Convert an outbox DB row into a WireEventRecord.
+ * - Decompresses if needed and returns payload as a JSON **string** (no JSON.parse).
+ * - Normalizes blockHeight: DB NULL → -1 (wire/domain convention).
+ * - Coerces numeric fields to Number.
+ */
+export async function deserializeToOutboxRaw(
+  row: Pick<
+    OutboxRowInternal,
+    | 'aggregateId'
+    | 'eventType'
+    | 'eventVersion'
+    | 'requestId'
+    | 'blockHeight'
+    | 'payload'
+    | 'isCompressed'
+    | 'timestamp'
+  >
+): Promise<WireEventRecord> {
+  const payloadString = row.isCompressed
+    ? await CompressionUtils.decompressBufferToString(row.payload)
+    : row.payload.toString('utf8');
+
+  return {
+    modelName: row.aggregateId,
+    eventType: row.eventType,
+    eventVersion: Number(row.eventVersion),
+    requestId: row.requestId,
+    blockHeight: row.blockHeight ?? -1, // DB NULL → -1
+    payload: payloadString, // JSON string, NOT parsed
+    timestamp: Number(row.timestamp),
+  };
+}

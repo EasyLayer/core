@@ -130,7 +130,12 @@ async function ensureNonNegativeGuards(
   log: AppLogger
 ) {
   if (driver === 'postgres') {
-    await ensurePgCheck(ds, outboxTable, 'chk_outbox_blockheight_nonneg', `"blockHeight" >= 0`);
+    await ensurePgCheck(
+      ds,
+      outboxTable,
+      'chk_outbox_blockheight_nonneg',
+      `"blockHeight" IS NULL OR "blockHeight" >= 0`
+    );
     await ensurePgCheck(ds, outboxTable, 'chk_outbox_eventversion_nonneg', `"eventVersion" >= 0`);
     for (const t of aggregateTables) {
       await ensurePgCheck(ds, t, `chk_${t}_version_nonneg`, `"version" >= 0`);
@@ -138,7 +143,7 @@ async function ensureNonNegativeGuards(
     log.info('PG CHECK constraints ensured (non-negative guards).');
   } else {
     // SQLite: add BEFORE INSERT/UPDATE triggers that abort on negative values (safe for existing tables)
-    await ensureSqliteNonNegTrigger(ds, outboxTable, 'blockHeight');
+    await ensureSqliteNonNegTrigger(ds, outboxTable, 'blockHeight', /*allowNull*/ true);
     await ensureSqliteNonNegTrigger(ds, outboxTable, 'eventVersion');
     for (const t of aggregateTables) {
       await ensureSqliteNonNegTrigger(ds, t, 'version');
@@ -166,36 +171,44 @@ async function ensurePgCheck(ds: DataSource, table: string, constraint: string, 
   }
 }
 
-async function ensureSqliteNonNegTrigger(ds: DataSource, table: string, column: string) {
-  const trigName = `trg_${table}_${column}_nonneg`;
-  const row = (await ds.query(`SELECT name FROM sqlite_master WHERE type='trigger' AND name=? LIMIT 1`, [
-    trigName,
-  ])) as Array<{ name: string }>;
-  if (row.length > 0) return;
+async function ensureSqliteNonNegTrigger(ds: DataSource, table: string, column: string, allowNull = false) {
+  const base = `trg_${table}_${column}_nonneg`;
+  const triggers = [`${base}_ins`, `${base}_upd`];
 
-  // Two triggers: BEFORE INSERT и BEFORE UPDATE
+  // check both
+  const rows = (await ds.query(
+    `SELECT name FROM sqlite_master WHERE type='trigger' AND name IN (${triggers.map(() => '?').join(',')})`,
+    triggers
+  )) as Array<{ name: string }>;
+
+  if (rows.length === triggers.length) return; // already created
+
+  const cond = allowNull ? `NEW."${column}" IS NOT NULL AND NEW."${column}" < 0` : `NEW."${column}" < 0`;
+
   const ddlInsert = `
-    CREATE TRIGGER "${trigName}_ins"
+    CREATE TRIGGER "${base}_ins"
     BEFORE INSERT ON "${table}"
-    WHEN NEW."${column}" < 0
+    WHEN ${cond}
     BEGIN
-      SELECT RAISE(ABORT, 'Constraint ${trigName}: ${column} must be >= 0');
+      SELECT RAISE(ABORT, 'Constraint ${base}: ${column} must be >= 0 (NULL allowed=${allowNull})');
     END;
   `;
+
   const ddlUpdate = `
-    CREATE TRIGGER "${trigName}_upd"
+    CREATE TRIGGER "${base}_upd"
     BEFORE UPDATE ON "${table}"
-    WHEN NEW."${column}" < 0
+    WHEN ${cond}
     BEGIN
-      SELECT RAISE(ABORT, 'Constraint ${trigName}: ${column} must be >= 0');
+      SELECT RAISE(ABORT, 'Constraint ${base}: ${column} must be >= 0 (NULL allowed=${allowNull})');
     END;
   `;
+
   const qr = ds.createQueryRunner();
   await qr.connect();
   await qr.startTransaction();
   try {
-    await qr.query(ddlInsert);
-    await qr.query(ddlUpdate);
+    if (!rows.find((r) => r.name === `${base}_ins`)) await qr.query(ddlInsert);
+    if (!rows.find((r) => r.name === `${base}_upd`)) await qr.query(ddlUpdate);
     await qr.commitTransaction();
   } catch (e) {
     await qr.rollbackTransaction().catch(() => undefined);
