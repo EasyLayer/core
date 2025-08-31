@@ -42,11 +42,11 @@ export const createEventDataEntity = (
     columns: {
       id,
       version: { type: 'int', default: 0 },
-      requestId: { type: 'varchar', default: null },
+      requestId: { type: 'varchar', nullable: false },
       type: { type: 'varchar' },
       // Store binary payload; exact same bytes as we put to outbox:
       payload,
-      blockHeight: { type: 'int', nullable: true, default: true },
+      blockHeight: { type: 'int', nullable: true, default: null },
       isCompressed: { type: 'boolean', default: false, nullable: true },
       timestamp: {
         type: 'bigint',
@@ -64,7 +64,7 @@ export const createEventDataEntity = (
  * No extra plain-buffer if compression is used.
  */
 export async function serializeEventRow(
-  event: Record<string, any>,
+  event: DomainEvent,
   version: number,
   dbDriver: DriverType = 'postgres'
 ): Promise<
@@ -72,11 +72,12 @@ export async function serializeEventRow(
     payloadUncompressedBytes: number;
   }
 > {
-  const { aggregateId, requestId, blockHeight, timestamp, payload } = event;
+  const { requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
   if (version == null) throw new Error('Version is missing');
   if (blockHeight == null) throw new Error('blockHeight is missing in the event');
+  if (!timestamp) throw new Error('timestamp is missing in the event');
 
   // -1 => null
   const normalizedHeight = blockHeight < 0 ? null : blockHeight;
@@ -107,7 +108,7 @@ export async function serializeEventRow(
     payload: buf,
     version,
     requestId,
-    blockHeight: normalizedHeight,
+    blockHeight: normalizedHeight as any,
     isCompressed,
     timestamp,
     payloadUncompressedBytes: uncompressedLen,

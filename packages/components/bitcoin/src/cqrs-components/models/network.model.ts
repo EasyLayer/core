@@ -70,48 +70,6 @@ export class Network extends AggregateRoot {
   }
 
   /**
-   * Gets current chain statistics
-   * Time complexity: O(1)
-   * Memory: Creates small statistics object (~200 bytes)
-   */
-  public getChainStats(): {
-    size: number;
-    maxSize: number;
-    currentHeight?: number;
-    firstHeight?: number;
-    isEmpty: boolean;
-    isFull: boolean;
-    memoryUsage: {
-      estimatedBytes: number;
-      blocksStorageBytes: number;
-      indexingBytes: number;
-    };
-  } {
-    const firstBlock = this.chain.toArray()[0]; // This is O(1) since we just get head
-    const size = this.chain.size;
-
-    // Estimate memory usage - LightBlock: ~200 bytes base + (tx_count × 64 bytes)
-    // Average block: ~200 + (1500 × 64) = ~96KB per block
-    const blocksStorageBytes = size * 96 * 1024; // ~96KB per block average
-    const indexingBytes = size * 48; // ~48 bytes per block for indexing
-    const estimatedBytes = blocksStorageBytes + indexingBytes;
-
-    return {
-      size,
-      maxSize: this.__maxSize,
-      currentHeight: this.chain.lastBlockHeight,
-      firstHeight: firstBlock?.height,
-      isEmpty: size === 0,
-      isFull: size >= this.__maxSize,
-      memoryUsage: {
-        estimatedBytes,
-        blocksStorageBytes,
-        indexingBytes,
-      },
-    };
-  }
-
-  /**
    * Gets the last block in chain
    * Time complexity: O(1)
    */
@@ -200,33 +158,28 @@ export class Network extends AggregateRoot {
 
   // ===== SNAPSHOTS =====
 
-  // protected toJsonPayload(): any {
-  //   return {
-  //     // Convert Blockchain to an array of blocks for serialization
-  //     chain: this.chain.toArray(),
-  //     maxSize: this.__maxSize,
-  //   };
-  // }
+  protected serializeUserState(): Record<string, any> {
+    return {
+      maxSize: this.__maxSize,
+      chain: this.chain.toArray(), // LightBlock[]
+    };
+  }
 
-  // protected fromSnapshot(state: any): void {
-  //   // Safety check for state
-  //   if (!state || typeof state !== 'object') {
-  //     return;
-  //   }
+  protected restoreUserState(state: any): void {
+    if (typeof state?.maxSize === 'number') {
+      this.__maxSize = state.maxSize;
+    }
 
-  //   // Safe restore with type checking
-  //   this.__maxSize = typeof state.maxSize === 'number' ? state.maxSize : this.__maxSize;
+    if (state?.chain && Array.isArray(state?.chain)) {
+      this.chain = new Blockchain({
+        maxSize: this.__maxSize,
+        baseBlockHeight: this.lastBlockHeight,
+      });
+      this.chain.fromArray(state.chain);
+    }
 
-  //   if (state.chain && Array.isArray(state.chain)) {
-  //     this.chain = new Blockchain({
-  //       maxSize: this.__maxSize,
-  //       baseBlockHeight: this._lastBlockHeight,
-  //     });
-  //     this.chain.fromArray(state.chain);
-  //   }
-
-  //   Object.setPrototypeOf(this, Network.prototype);
-  // }
+    Object.setPrototypeOf(this, Network.prototype);
+  }
 
   // ===== PUBLIC COMMAND METHODS =====
 
@@ -236,7 +189,7 @@ export class Network extends AggregateRoot {
    */
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
     // Event payload size estimation: ~1KB (minimal data)
-    await this.apply(
+    this.apply(
       new BitcoinNetworkInitializedEvent(
         {
           aggregateId: this.aggregateId,
@@ -254,7 +207,7 @@ export class Network extends AggregateRoot {
    */
   public async clearChain({ requestId }: { requestId: string }) {
     // Event payload size estimation: ~1KB (minimal data)
-    await this.apply(
+    this.apply(
       new BitcoinNetworkClearedEvent(
         {
           aggregateId: this.aggregateId,
@@ -279,7 +232,7 @@ export class Network extends AggregateRoot {
     // Event payload size estimation:
     // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
     // Total event size: ~9.6MB per blocks batch
-    return await this.apply(
+    return this.apply(
       new BitcoinNetworkBlocksAddedEvent(
         {
           aggregateId: this.aggregateId,
@@ -329,7 +282,7 @@ export class Network extends AggregateRoot {
         // Event payload size estimation:
         // - blocks: ~d blocks × 96KB where d = reorg depth
         // Total event size: ~d × 96KB per reorganization
-        return await this.apply(
+        return this.apply(
           new BitcoinNetworkReorganizedEvent(
             {
               aggregateId: this.aggregateId,

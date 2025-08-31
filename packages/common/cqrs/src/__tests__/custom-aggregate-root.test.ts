@@ -55,7 +55,7 @@ describe('CustomAggregateRoot', () => {
         },
       ];
 
-      await aggregate.loadFromHistory(events);
+      aggregate.loadFromHistory(events);
 
       expect(aggregate.value).toBe(200);
       expect(aggregate.version).toBe(2);

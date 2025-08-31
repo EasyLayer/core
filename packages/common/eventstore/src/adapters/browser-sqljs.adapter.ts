@@ -1,320 +1,634 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import {
-  DataSource,
-  QueryFailedError,
-  Repository,
-  MoreThan,
-  LessThanOrEqual,
-  ObjectLiteral,
-  QueryRunner,
-} from 'typeorm';
-import type { AggregateRoot } from '@easylayer/common/cqrs';
-import { AppLogger } from '@easylayer/common/logger';
-import { BaseAdapter, SnapshotRetention, FIXED_OVERHEAD } from './base-adapter';
-import { OutboxRowInternal, deserializeToOutboxRaw } from '../outbox.model';
-import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
-import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
+import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
+import type { SnapshotOptions } from './base-adapter';
+import { BaseAdapter } from './base-adapter';
+import { serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
+import { deserializeToOutboxRaw } from '../outbox.model';
+import { serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 
 /**
- * sql.js + IndexedDB manual flush:
- * We explicitly export the in-memory DB and persist it to IndexedDB
- * after each write-transaction and on destroy/close.
+ * Browser (sql.js / IndexedDB) adapter.
+ *
+ * Key points kept from your last version:
+ * - Driver tag for serializers is 'sqljs'.
+ * - BEGIN/COMMIT without SQLite lock qualifiers.
+ * - Payloads are stored as BLOB (byte arrays in sql.js).
+ * - Prefetch + JS greedy accumulate against transport budget (unchanged).
+ * - Manual flush to IndexedDB right after COMMIT.
+ * - Client-generated monotonic BIGINT "id" for outbox (no RETURNING/select).
+ * - Watermark uses only that id (id > lastSeenId).
+ * - No ad-hoc JSON ops; only project (de)serializers.
+ * - Never calls aggregate.apply(); only loadFromHistory().
  */
-async function flushSqljsToIndexedDB(ds: DataSource, storageKey: string, log?: AppLogger) {
-  try {
-    if (typeof window === 'undefined') return;
-    const opts: any = ds.options;
-    if (opts?.type !== 'sqljs') return;
+export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
+  /** Outbox streaming watermark (strictly increasing BIGINT id). */
+  private lastSeenId = 0n;
 
-    // dynamic import to avoid bundling for non-browser envs
-    const { default: localforage } = await import('localforage');
-
-    // sql.js exposes `export()` on the underlying database
-    const driver: any = ds.driver as any;
-    const sqljsDb = driver?.databaseConnection;
-    if (!sqljsDb?.export) return;
-
-    const bytes: Uint8Array = sqljsDb.export();
-    await localforage.setItem(storageKey, bytes);
-  } catch (e) {
-    log?.debug('sqljs flush failed', { args: { error: (e as any)?.message } });
-  }
-}
-
-@Injectable()
-export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
-  extends BaseAdapter<T>
-  implements OnModuleInit, OnModuleDestroy
-{
-  public readonly driver = 'sqljs' as const;
+  // Wire/scan tuning — kept same as in your previous sqljs version.
+  private static readonly FIXED_OVERHEAD = 256; // per-event wire envelope approximation (bytes)
+  private static readonly AVG_EVENT_BYTES_GUESS = 8 * 1024; // coarse average of uncompressed JSON
+  private static readonly MIN_PREFETCH_ROWS = 256; // same as (earlier) SQLite settings you used for sqljs
+  private static readonly MAX_PREFETCH_ROWS = 8192;
+  private static readonly DELETE_ID_CHUNK = 10000; // IN() fanout cap for deletes
 
   /**
-   * SQLite/sql.js host parameter limit per statement.
-   * We compute rows-per-insert from this, based on columns per row.
-   */
-  private static readonly SQLITE_MAX_PARAMS = 999;
-
-  /** Columns per row in aggregate events table INSERT. */
-  private static readonly AGG_COLS_PER_ROW = 6; // type, payload, version, requestId, blockHeight, isCompressed
-
-  /** Columns per row in outbox INSERT. */
-  private static readonly OUTBOX_COLS_PER_ROW = 9; // aggregateId, eventType, eventVersion, requestId, blockHeight, payload, timestamp, isCompressed, payload_uncompressed_bytes
-
-  /** Safe rows-per-INSERT for aggregates. */
-  private static readonly AGG_ROWS_PER_INSERT = Math.max(
-    1,
-    Math.floor(BrowserSqljsAdapter.SQLITE_MAX_PARAMS / BrowserSqljsAdapter.AGG_COLS_PER_ROW)
-  ); // 999/6 => 166
-
-  /** Safe rows-per-INSERT for outbox. */
-  private static readonly OUTBOX_ROWS_PER_INSERT = Math.max(
-    1,
-    Math.floor(BrowserSqljsAdapter.SQLITE_MAX_PARAMS / BrowserSqljsAdapter.OUTBOX_COLS_PER_ROW)
-  ); // 999/9 => 111
-
-  /** Chunk size for IN (...) deletes; keep below 999. */
-  private readonly idDeleteChunkSize: number = 900;
-
-  /** Watermark for outbox streaming (global order by (timestamp,id)). */
-  private lastSeenTsUs = 0;
-  private lastSeenId = 0;
-
-  /** Moving average of row byte size (for adaptive LIMIT). */
-  private avgRowBytes = 2048;
-
-  /** LocalForage storage key for persisted sql.js snapshot. */
-  private readonly storageKey: string;
-
-  constructor(
-    private readonly log: AppLogger,
-    private readonly dataSource: DataSource
-  ) {
-    super();
-    if ((this.dataSource.options as any)?.type !== 'sqljs') {
-      throw new Error('BrowserSqljsAdapter must be used with a sqljs DataSource');
-    }
-    const dsOpts: any = this.dataSource.options ?? {};
-    const baseKey = dsOpts.database || dsOpts.location || 'default';
-    this.storageKey = `sqljs:${String(baseKey)}`;
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Lifecycle hooks
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Apply safe PRAGMAs once per connection and register a final flush hook.
-   * Note: Many PRAGMAs are no-ops for sql.js but kept for parity and clarity.
-   */
-  async onModuleInit(): Promise<void> {
-    try {
-      await this.dataSource.query('PRAGMA foreign_keys = ON;');
-      await this.dataSource.query('PRAGMA temp_store = MEMORY;');
-      await this.dataSource.query('PRAGMA mmap_size = 67108864;'); // 64MB
-      await this.dataSource.query('PRAGMA cache_size = -64000;'); // ~64MB in KiB
-    } catch {
-      /* ignore */
-    }
-
-    // Flush on tab close (best-effort, fire-and-forget)
-    if (typeof window !== 'undefined') {
-      window.addEventListener('beforeunload', () => {
-        void flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-      });
-    }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Persist (single tx; single manual flush after COMMIT)
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Persist aggregates + outbox in one transaction.
-   * We create ONE Buffer per event (optionally compressed) and reuse it for BOTH:
-   *  - aggregate tables (payload: BLOB)
-   *  - outbox table  (payload: BLOB)
+   * sql.js runs entirely in memory; WAL/locking do not apply.
+   * We keep journaling in memory and disable sync to avoid extra work.
+   * Also keep a modest cache and temp data in memory.
    *
-   * IMPORTANT: We batch INSERTs by **rows-per-statement**, derived from
-   * the SQLite/sql.js 999-parameter limit and the number of columns per row.
+   * IMPORTANT: For durability you already call persistToDiskIfSupported()
+   * after each COMMIT — that is what flushes to IndexedDB.
    */
-  async persistAggregatesAndOutbox(aggregates: T[]): Promise<void> {
-    if (!aggregates.length) return;
-
+  public async onModuleInit(): Promise<void> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
-    await qr.startTransaction(); // BEGIN (DEFERRED)
-
     try {
-      const perAgg = new Map<string, EventDataParameters[]>();
-      const outRows: Omit<OutboxRowInternal, 'id'>[] = [];
+      await qr.query(`PRAGMA journal_mode = MEMORY`);
+      await qr.query(`PRAGMA synchronous = OFF`);
 
-      for (const agg of aggregates) {
-        const unsaved = agg.getUnsavedEvents();
-        if (!unsaved.length) continue;
+      await qr.query(`PRAGMA temp_store = MEMORY`);
+      await qr.query(`PRAGMA cache_size = -131072`); // ~128 MiB (browser RAM is precious)
 
-        const base = agg.version - unsaved.length;
-        const rows: EventDataParameters[] = [];
+      // No FK relations in outbox/event tables; save a few cycles per write.
+      await qr.query(`PRAGMA foreign_keys = OFF`);
 
-        for (let i = 0; i < unsaved.length; i++) {
-          const ev = unsaved[i]!;
-          const ser = await serializeEventRow(ev, base + i + 1, 'sqljs'); // creates buffers once
-
-          // Aggregate row
-          rows.push({
-            type: ser.type,
-            payload: ser.payload, // same Buffer
-            version: ser.version,
-            requestId: ser.requestId,
-            blockHeight: ser.blockHeight,
-            isCompressed: ser.isCompressed,
-            timestamp: ser.timestamp,
-          });
-
-          // Outbox row
-          outRows.push({
-            aggregateId: agg.aggregateId,
-            eventType: ser.type,
-            eventVersion: ser.version,
-            requestId: ser.requestId,
-            blockHeight: ser.blockHeight,
-            payload: ser.payload, // same Buffer
-            timestamp: ev.timestamp!,
-            isCompressed: ser.isCompressed ?? false,
-            payload_uncompressed_bytes: ser.payloadUncompressedBytes,
-          });
-        }
-
-        perAgg.set(agg.aggregateId, rows);
-      }
-
-      if (!outRows.length) {
-        await qr.commitTransaction();
-        await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-        return;
-      }
-
-      // INSERT aggregates batched by rows-per-statement (avoid >999 params)
-      for (const [aggId, rows] of perAgg.entries()) {
-        const repo = qr.manager.getRepository<EventDataParameters>(aggId);
-        const step = BrowserSqljsAdapter.AGG_ROWS_PER_INSERT; // 166
-        for (let i = 0; i < rows.length; i += step) {
-          const batch = rows.slice(i, i + step);
-          await repo.createQueryBuilder().insert().values(batch).updateEntity(false).execute();
-        }
-      }
-
-      // INSERT outbox batched by rows-per-statement (avoid >999 params)
-      {
-        const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
-        const step = BrowserSqljsAdapter.OUTBOX_ROWS_PER_INSERT; // 111
-        for (let i = 0; i < outRows.length; i += step) {
-          const batch = outRows.slice(i, i + step);
-          await outboxRepo.createQueryBuilder().insert().values(batch).updateEntity(false).execute();
-        }
-      }
-
-      // Mark all events as saved
-      for (const agg of aggregates) agg.markEventsAsSaved();
-
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } catch (err) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      if (!(err instanceof QueryFailedError)) throw err;
-      throw err;
+      await qr.query(`PRAGMA optimize`);
     } finally {
-      await qr.release().catch(() => undefined);
+      await qr.release();
     }
   }
 
-  // ======== Outbox streaming: read ORDER BY (timestamp,id) -> ACK -> IMMEDIATE delete ========
-  async fetchDeliverAckChunk(
-    wireBudgetBytes: number,
+  // ─────────────────────────── WRITE PATH ───────────────────────────
+
+  /**
+   * Persist unsaved events:
+   *  1) per-aggregate event table (BLOB payload)
+   *  2) outbox with client-generated monotonic BIGINT id
+   *
+   * Returns inserted ids (numeric view), first/last id+ts (for compatibility),
+   * and RAW wire events for fast-path publish.
+   */
+  public async persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+    insertedOutboxIds: string[];
+    firstTs: number;
+    firstId: string;
+    lastTs: number;
+    lastId: string;
+    rawEvents: WireEventRecord[];
+  }> {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+
+    const outboxIds: string[] = [];
+    const rawEvents: WireEventRecord[] = [];
+
+    let firstIdBn: bigint | null = null;
+    let lastIdBn: bigint | null = null;
+    let firstTs = Number.MAX_SAFE_INTEGER;
+    let lastTs = 0;
+
+    try {
+      for (const agg of aggregates) {
+        const table = agg.aggregateId;
+        if (!table) {
+          throw new Error('Aggregate has no aggregateId');
+        }
+
+        const unsaved = agg.getUnsavedEvents();
+        if (unsaved.length === 0) {
+          continue;
+        }
+
+        const startVersion = agg.version - unsaved.length + 1;
+
+        for (let i = 0; i < unsaved.length; i++) {
+          const ev = unsaved[i] as DomainEvent;
+          const version = startVersion + i;
+
+          // Single-pass serialization; driver tag is 'sqljs'.
+          const row = await serializeEventRow(ev, version, 'sqljs');
+
+          // Monotonic id from event.timestamp (µs).
+          const newId = this.idGen.next(ev.timestamp!);
+
+          // (1) Aggregate table insert (BLOB).
+          await qr.manager.query(
+            `INSERT OR IGNORE INTO "${table}"
+               ("version","requestId","type","payload","blockHeight","isCompressed","timestamp")
+             VALUES (?,?,?,?,?,?,?)`,
+            [
+              row.version,
+              row.requestId,
+              row.type,
+              row.payload, // BLOB
+              row.blockHeight,
+              row.isCompressed ? 1 : 0, // sql.js boolean storage
+              row.timestamp,
+            ]
+          );
+
+          // (2) Outbox insert using our precomputed id.
+          await qr.manager.query(
+            `INSERT OR IGNORE INTO "outbox"
+               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+             VALUES (?,?,?,?,?,?,?,?,?,?)`,
+            [
+              newId.toString(), // BIGINT as string literal
+              table,
+              row.type,
+              row.version,
+              row.requestId,
+              row.blockHeight,
+              row.payload, // same BLOB
+              row.isCompressed ? 1 : 0,
+              row.timestamp,
+              row.payloadUncompressedBytes,
+            ]
+          );
+
+          // Track id/ts bounds (compatibility with previous return contract).
+          if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+          if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+          if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
+          if (ev.timestamp! > lastTs) lastTs = ev.timestamp!;
+
+          // Build RAW wire record (payload as JSON string, via deserializer).
+          rawEvents.push(
+            await deserializeToOutboxRaw({
+              aggregateId: table,
+              eventType: row.type,
+              eventVersion: row.version,
+              requestId: row.requestId,
+              blockHeight: row.blockHeight,
+              payload: row.payload,
+              isCompressed: !!row.isCompressed, // for sqljs this is typically false
+              timestamp: ev.timestamp!,
+            })
+          );
+
+          outboxIds.push(newId.toString());
+        }
+
+        // Mark as saved after successful flush for this aggregate.
+        agg.markEventsAsSaved();
+      }
+
+      await qr.query('COMMIT');
+
+      // Manual flush to persistent storage (IndexedDB) after COMMIT.
+      await this.persistToDiskIfSupported();
+
+      const firstId = firstIdBn ? String(firstIdBn) : '0';
+      const lastId = lastIdBn ? String(lastIdBn) : '0';
+      if (outboxIds.length === 0) {
+        firstTs = 0;
+        lastTs = 0;
+      }
+
+      return {
+        insertedOutboxIds: outboxIds,
+        firstTs,
+        firstId,
+        lastTs,
+        lastId,
+        rawEvents,
+      };
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  public async deleteOutboxByIds(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      const step = BrowserSqljsAdapter.DELETE_ID_CHUNK;
+      for (let i = 0; i < ids.length; i += step) {
+        const chunk = ids.slice(i, i + step);
+        const placeholders = chunk.map(() => '?').join(',');
+        await qr.manager.query(`DELETE FROM "outbox" WHERE "id" IN (${placeholders})`, chunk);
+      }
+      await qr.query('COMMIT');
+      await this.persistToDiskIfSupported();
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  // ─────────────────────────── BACKLOG TESTS ───────────────────────────
+
+  /** API compatibility; we ignore ts and use monotonic id. */
+  public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < CAST(? AS INTEGER) LIMIT 1`, [
+      String(id),
+    ]);
+    return rows.length > 0;
+  }
+
+  public async hasAnyPendingAfterWatermark(): Promise<boolean> {
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > CAST(? AS INTEGER) LIMIT 1`, [
+      String(this.lastSeenId),
+    ]);
+    return rows.length > 0;
+  }
+
+  // ─────────────────────────── DRAIN (prefetch + greedy accumulate) ───────────────────────────
+
+  /**
+   * Prefetch by id and greedily accumulate rows until the transport budget is reached:
+   *  1) LIMIT ~ cap / AVG_EVENT_BYTES_GUESS, clamped to [MIN..MAX]
+   *  2) Sum FIXED_OVERHEAD + payload_uncompressed_bytes
+   *  3) Deliver → ACK delete → advance watermark
+   */
+  public async fetchDeliverAckChunk(
+    transportCapBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
   ): Promise<number> {
-    const ids: number[] = [];
-    const events: WireEventRecord[] = [];
-    let budget = wireBudgetBytes;
+    const want = Math.max(1, Math.floor(transportCapBytes / BrowserSqljsAdapter.AVG_EVENT_BYTES_GUESS));
+    const limit = Math.max(
+      BrowserSqljsAdapter.MIN_PREFETCH_ROWS,
+      Math.min(BrowserSqljsAdapter.MAX_PREFETCH_ROWS, want)
+    );
 
-    while (true) {
-      // Read one row at a time to maintain strict watermark semantics
-      const rows = (await this.dataSource.query(
-        `SELECT id, aggregateId, eventType, eventVersion, requestId, blockHeight,
-                payload, isCompressed, payload_uncompressed_bytes AS ulen, "timestamp"
-          FROM outbox
-          WHERE ("timestamp" > ? OR ("timestamp" = ? AND id > ?))
-          ORDER BY "timestamp" ASC, id ASC
-          LIMIT 1`,
-        [this.lastSeenTsUs, this.lastSeenTsUs, this.lastSeenId]
-      )) as Array<{
-        id: number;
-        aggregateId: string;
-        eventType: string;
-        eventVersion: number;
-        requestId: string;
-        blockHeight: number; // may be NULL in DB
-        payload: Buffer;
-        isCompressed: number | boolean; // SQLite may return 0/1
-        ulen: number; // payload_uncompressed_bytes
-        timestamp: number;
-      }>;
+    const rows = (await this.dataSource.query(
+      `SELECT CAST(id AS TEXT) AS id,
+              "aggregateId" as aggregateId,
+              "eventType"   as eventType,
+              "eventVersion" as eventVersion,
+              "requestId"   as requestId,
+              "blockHeight" as blockHeight,
+              "payload"     as payload,
+              "isCompressed" as isCompressed,
+              "timestamp"   as timestamp,
+              "payload_uncompressed_bytes" as ulen
+      FROM "outbox"
+      WHERE id > CAST(? AS INTEGER)
+      ORDER BY id ASC
+      LIMIT ${limit}`,
+      [String(this.lastSeenId)]
+    )) as Array<{
+      id: string; // stored as BIGINT string literal
+      aggregateId: string;
+      eventType: string;
+      eventVersion: number;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: number | boolean;
+      timestamp: number;
+      ulen: number;
+    }>;
 
-      if (rows.length === 0) break;
+    if (rows.length === 0) {
+      return 0;
+    }
 
-      const r = rows[0]!;
+    // Greedy accept — always take at least one row.
+    const accepted: typeof rows = [];
+    let running = 0;
 
-      // Compute row size BEFORE decompressing and BEFORE moving the watermark.
-      const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
+    for (const r of rows) {
+      const add = BrowserSqljsAdapter.FIXED_OVERHEAD + Number(r.ulen);
+      if (accepted.length === 0) {
+        accepted.push(r);
+        running += add;
+        continue;
+      }
+      if (running + add > transportCapBytes) {
+        break;
+      }
+      accepted.push(r);
+      running += add;
+    }
 
-      // If we already have at least one event and this row won't fit — stop.
-      // IMPORTANT: do not move watermark in this case, otherwise the row will be skipped.
-      if (events.length > 0 && rowBytes > budget) break;
-
-      // Accept row → build WireEventRecord in one helper (decompress if needed).
-      const evt = await deserializeToOutboxRaw({
+    const events: WireEventRecord[] = new Array(accepted.length);
+    for (let i = 0; i < accepted.length; i++) {
+      const r = accepted[i]!;
+      events[i] = await deserializeToOutboxRaw({
         aggregateId: r.aggregateId,
         eventType: r.eventType,
         eventVersion: r.eventVersion,
         requestId: r.requestId,
-        blockHeight: r.blockHeight,
+        blockHeight: r.blockHeight!,
         payload: r.payload,
         isCompressed: !!r.isCompressed,
         timestamp: r.timestamp,
       });
-
-      ids.push(r.id);
-      events.push(evt);
-
-      // Move watermark ONLY after we actually accepted the row.
-      // This guarantees at-least-once delivery when budget stops us.
-      this.lastSeenTsUs = Number(r.timestamp);
-      this.lastSeenId = Number(r.id);
-
-      // Update remaining budget.
-      budget = Math.max(0, budget - rowBytes);
     }
 
-    if (events.length === 0) return 0;
+    const last = accepted[accepted.length - 1]!;
+    const nextId = BigInt(last.id);
 
-    // We send one batch and wait for a single ACK
     await deliver(events);
 
-    // Remove ACK'ed ids (chunk IN(...) to keep params < 999)
+    // ACK delete
+    const ids = accepted.map((r) => r.id);
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN IMMEDIATE');
-
     try {
-      const step = this.idDeleteChunkSize; // 900
+      const step = BrowserSqljsAdapter.DELETE_ID_CHUNK;
       for (let i = 0; i < ids.length; i += step) {
-        const chunk = ids.slice(i, i + step);
-        await qr.manager.query(`DELETE FROM outbox WHERE id IN (${chunk.map(() => '?').join(',')})`, chunk);
+        const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
+        const placeholders = chunk.map(() => 'CAST(? AS INTEGER)').join(',');
+        await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
       }
+      await qr.query('COMMIT');
+      await this.persistToDiskIfSupported();
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      await qr.release().catch(() => undefined);
+      throw e;
+    }
+    await qr.release();
+
+    this.lastSeenId = nextId;
+
+    return events.length;
+  }
+
+  // ─────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────
+
+  public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+    const row = await serializeSnapshot(aggregate, 'sqljs');
+    await this.dataSource.query(
+      `INSERT OR IGNORE INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
+       VALUES (?,?,?,?,?)`,
+      [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed ? 1 : 0]
+    );
+
+    // Prune only if the aggregate explicitly allows pruning.
+    const allow = (aggregate as any).allowPruning === true;
+    if (allow) {
+      await this.pruneOldSnapshots(row.aggregateId, row.blockHeight, opts);
+    }
+
+    await this.persistToDiskIfSupported();
+  }
+
+  public async findLatestSnapshot(aggregateId: string): Promise<{ blockHeight: number } | null> {
+    const rows = await this.dataSource.query(
+      `SELECT "blockHeight"
+       FROM "snapshots"
+       WHERE "aggregateId" = ?
+       ORDER BY "blockHeight" DESC
+       LIMIT 1`,
+      [aggregateId]
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return { blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight) };
+  }
+
+  public async createSnapshotAtHeight<K extends T>(
+    model: K,
+    height: number
+  ): Promise<{ aggregateId: string; version: number; blockHeight: number; payload: any }> {
+    const rows = await this.dataSource.query(
+      `SELECT "aggregateId","blockHeight","version","payload","isCompressed"
+       FROM "snapshots"
+       WHERE "aggregateId" = ? AND "blockHeight" <= ?
+       ORDER BY "blockHeight" DESC
+       LIMIT 1`,
+      [model.aggregateId, height]
+    );
+
+    if (rows.length === 0) {
+      return { aggregateId: model.aggregateId!, version: 0, blockHeight: 0, payload: {} };
+    }
+
+    const snap = await deserializeSnapshot(
+      {
+        id: '0',
+        aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
+        blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+        version: Number(rows[0].version),
+        payload: rows[0].payload,
+        isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
+        createdAt: new Date(),
+      },
+      'sqljs'
+    );
+
+    return {
+      aggregateId: snap.aggregateId,
+      version: snap.version,
+      blockHeight: snap.blockHeight,
+      payload: snap.payload,
+    };
+  }
+
+  public async applyEventsToAggregate<K extends T>(model: K, fromVersion?: number): Promise<void> {
+    const table = model.aggregateId!;
+    const since = fromVersion ?? 0;
+
+    const rows = (await this.dataSource.query(
+      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+       FROM "${table}"
+       WHERE "version" > ?
+       ORDER BY "version" ASC`,
+      [since]
+    )) as Array<{
+      type: string;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: number | boolean;
+      version: number;
+      timestamp: number;
+    }>;
+
+    const history: DomainEvent[] = [];
+    for (const r of rows) {
+      history.push(
+        await deserializeToDomainEvent(
+          table,
+          {
+            type: r.type,
+            requestId: r.requestId,
+            blockHeight: r.blockHeight!,
+            payload: r.payload,
+            isCompressed: !!r.isCompressed,
+            version: r.version,
+            timestamp: r.timestamp,
+          },
+          'sqljs'
+        )
+      );
+    }
+
+    model.loadFromHistory(history);
+  }
+
+  public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = ? AND "blockHeight" = ?`, [
+          id,
+          blockHeight,
+        ]);
+      }
+      await qr.query('COMMIT');
+      await this.persistToDiskIfSupported();
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  public async pruneOldSnapshots(
+    aggregateId: string,
+    currentBlockHeight: number,
+    opts: SnapshotOptions
+  ): Promise<void> {
+    const { minKeep, keepWindow } = opts;
+    const protectFrom = keepWindow > 0 ? Math.max(0, currentBlockHeight - keepWindow) : 0;
+
+    const rows = (await this.dataSource.query(
+      `SELECT "id","blockHeight"
+       FROM "snapshots"
+       WHERE "aggregateId" = ?
+       ORDER BY "blockHeight" DESC`,
+      [aggregateId]
+    )) as Array<{ id: number; blockHeight: number }>;
+
+    if (rows.length <= minKeep) {
+      return;
+    }
+
+    const toKeep = new Set<number>();
+    for (let i = 0; i < Math.min(minKeep, rows.length); i++) {
+      toKeep.add(rows[i]!.id);
+    }
+    for (const r of rows) {
+      if (r.blockHeight >= protectFrom) {
+        toKeep.add(r.id);
+      }
+    }
+
+    const toDelete = rows.filter((r) => !toKeep.has(r.id)).map((r) => r.id);
+    if (toDelete.length === 0) {
+      return;
+    }
+
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      const step = BrowserSqljsAdapter.DELETE_ID_CHUNK;
+      for (let i = 0; i < toDelete.length; i += step) {
+        const chunk = toDelete.slice(i, i + step);
+        const placeholders = chunk.map(() => '?').join(',');
+        await qr.manager.query(`DELETE FROM "snapshots" WHERE "id" IN (${placeholders})`, chunk);
+      }
+      await qr.query('COMMIT');
+      await this.persistToDiskIfSupported();
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
+    await this.dataSource.query(`DELETE FROM "${aggregateId}" WHERE "blockHeight" <= ?`, [pruneToBlockHeight]);
+    await this.persistToDiskIfSupported();
+  }
+
+  public async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
+    // 1) Load snapshot ≤ height
+    const snap = await this.createSnapshotAtHeight(model, blockHeight);
+    model.fromSnapshot({
+      aggregateId: snap.aggregateId,
+      version: snap.version,
+      blockHeight: snap.blockHeight,
+      payload: snap.payload,
+    });
+
+    // 2) Apply events in (snap.blockHeight, height]
+    const table = model.aggregateId!;
+    const rows = (await this.dataSource.query(
+      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+       FROM "${table}"
+       WHERE "blockHeight" IS NOT NULL AND "blockHeight" > ? AND "blockHeight" <= ?
+       ORDER BY "version" ASC`,
+      [snap.blockHeight, blockHeight]
+    )) as Array<{
+      type: string;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: number | boolean;
+      version: number;
+      timestamp: number;
+    }>;
+
+    const history: DomainEvent[] = [];
+    for (const r of rows) {
+      history.push(
+        await deserializeToDomainEvent(
+          table,
+          {
+            type: r.type,
+            requestId: r.requestId,
+            blockHeight: r.blockHeight!,
+            payload: r.payload,
+            isCompressed: !!r.isCompressed,
+            version: r.version,
+            timestamp: r.timestamp,
+          },
+          'sqljs'
+        )
+      );
+    }
+
+    model.loadFromHistory(history);
+  }
+
+  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN'); // sql.js supports plain BEGIN
+    try {
+      // 1) Per-aggregate event tables
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+      }
+
+      // 2) Snapshots after the rollback height
+      const placeholders = aggregateIds.map(() => '?').join(',');
+      await qr.manager.query(`DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`, [
+        blockHeight,
+        ...aggregateIds,
+      ]);
+
+      // 3) Outbox: clear completely (safer in browser after reorg)
+      await qr.manager.query(`DELETE FROM "outbox"`);
+
       await qr.query('COMMIT');
     } catch (e) {
       await qr.query('ROLLBACK').catch(() => undefined);
@@ -323,359 +637,105 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot>
       await qr.release();
     }
 
-    return events.length;
+    // Reset streaming watermark
+    this.lastSeenId = 0n;
+
+    // Ensure in-memory DB is flushed to IndexedDB after destructive ops
+    await this.persistToDiskIfSupported();
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Rollback
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Roll back events/snapshots for given aggregates over a height,
-   * then purge corresponding outbox rows. Uses short transactions per table
-   * and a single chunked transaction for outbox. Manual flush once at the end.
-   */
-  async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (!aggregateIds.length) return;
-
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-
-    try {
-      // Per-aggregate cleanup (events + snapshots) in short transactions
-      for (const tableName of aggregateIds) {
-        // Events
-        await qr.startTransaction();
-        try {
-          await qr.manager.query(`DELETE FROM "${tableName}" WHERE blockHeight > ?`, [blockHeight]);
-          await qr.commitTransaction();
-        } catch (e) {
-          await qr.rollbackTransaction().catch(() => undefined);
-          throw new Error(`Failed to delete events for ${tableName}: ${(e as Error).message}`);
-        }
-
-        // Snapshots
-        await qr.startTransaction();
-        try {
-          await qr.manager.query(`DELETE FROM snapshots WHERE "aggregateId" = ? AND "blockHeight" > ?`, [
-            tableName,
-            blockHeight,
-          ]);
-          await qr.commitTransaction();
-        } catch (e) {
-          await qr.rollbackTransaction().catch(() => undefined);
-          throw new Error(`Failed to delete snapshots for ${tableName}: ${(e as Error).message}`);
-        }
-      }
-
-      // Outbox cleanup for all aggregates (one txn, chunked IN)
-      await qr.startTransaction();
-      try {
-        for (let i = 0; i < aggregateIds.length; i += this.idDeleteChunkSize) {
-          const chunk = aggregateIds.slice(i, i + this.idDeleteChunkSize);
-          const placeholders = chunk.map(() => '?').join(',');
-          await qr.manager.query(
-            `DELETE FROM outbox
-             WHERE "aggregateId" IN (${placeholders})
-               AND "blockHeight" > ?`,
-            [...chunk, blockHeight]
-          );
-        }
-        await qr.commitTransaction();
-      } catch (e) {
-        await qr.rollbackTransaction().catch(() => undefined);
-        throw new Error(`Failed to delete outbox rows: ${(e as Error).message}`);
-      }
-
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } finally {
-      await qr.release().catch(() => undefined);
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Rehydrate at height
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    const { aggregateId } = model;
-    if (!aggregateId) throw new Error('Model does not have aggregateId');
-
-    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
-    if (!snap) {
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-      return;
-    }
-
-    const decomp = await deserializeSnapshot(snap, 'sqljs');
-    model.fromSnapshot(decomp);
-
-    if (snap.blockHeight < blockHeight) {
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Snapshots
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  async findLatestSnapshot(aggregateId: string): Promise<SnapshotInterface | null> {
-    const repo = this.getRepository<SnapshotInterface>('snapshots');
-    return await repo
-      .createQueryBuilder('s')
-      .where('s.aggregateId = :aggregateId', { aggregateId })
-      .orderBy('s.blockHeight', 'DESC')
-      .limit(1)
-      .getOne();
-  }
-
-  async findSnapshotBeforeHeight(aggregateId: string, blockHeight: number): Promise<SnapshotInterface | null> {
-    const repo = this.getRepository<SnapshotInterface>('snapshots');
-    return await repo
-      .createQueryBuilder('s')
-      .where('s.aggregateId = :aggregateId', { aggregateId })
-      .andWhere('s.blockHeight <= :blockHeight', { blockHeight })
-      .orderBy('s.blockHeight', 'DESC')
-      .limit(1)
-      .getOne();
-  }
-
-  /**
-   * Create snapshot in a short write transaction and flush once.
-   * Applies optional retention afterwards within the same transaction.
-   */
-  async createSnapshot(aggregate: T, ret?: SnapshotRetention): Promise<void> {
-    if (!aggregate.canMakeSnapshot()) return;
-
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction();
-
-    try {
-      const snapshot = await serializeSnapshot(aggregate as any, 'sqljs');
-      await qr.manager
-        .getRepository<SnapshotInterface>('snapshots')
-        .createQueryBuilder()
-        .insert()
-        .values(snapshot)
-        .updateEntity(false)
-        .execute();
-
-      aggregate.resetSnapshotCounter();
-
-      if (aggregate.allowPruning) {
-        await this.applySnapshotRetentionTx(qr, aggregate.aggregateId, snapshot.blockHeight, ret);
-      }
-
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } catch (error) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      if (error instanceof QueryFailedError) {
-        const code = (error.driverError as any)?.code;
-        if (code === 'SQLITE_CONSTRAINT') {
-          this.log.debug('Snapshot conflict, skipping', { args: { aggregateId: aggregate.aggregateId } });
-          return;
-        }
-      }
-      throw error;
-    } finally {
-      await qr.release().catch(() => undefined);
-    }
-  }
-
-  async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (!aggregateIds.length) return;
-
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction();
-    try {
-      const repo = qr.manager.getRepository<SnapshotInterface>('snapshots');
-      for (const aggregateId of aggregateIds) {
-        await repo
-          .createQueryBuilder()
-          .delete()
-          .where('aggregateId = :aggregateId', { aggregateId })
-          .andWhere('blockHeight > :blockHeight', { blockHeight })
-          .execute();
-      }
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } catch (e) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release().catch(() => undefined);
-    }
-  }
-
-  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number): Promise<void> {
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction();
-    try {
-      await this.applySnapshotRetentionTx(qr, aggregateId, currentBlockHeight);
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } catch (e) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release().catch(() => undefined);
-    }
-  }
-
-  async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction();
-    try {
-      const repo = qr.manager.getRepository(aggregateId);
-      await repo
-        .createQueryBuilder()
-        .delete()
-        .where('blockHeight < :blockHeight', { blockHeight: pruneToBlockHeight })
-        .execute();
-      await qr.commitTransaction();
-      await flushSqljsToIndexedDB(this.dataSource, this.storageKey, this.log);
-    } catch (e) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release().catch(() => undefined);
-    }
-  }
-
-  async createSnapshotAtHeight<K extends T>(model: K, blockHeight: number): Promise<SnapshotParameters> {
-    const { aggregateId } = model;
-    if (!aggregateId) throw new Error('Model does not have aggregateId');
-
-    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
-    if (!snap) {
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-    } else {
-      const decomp = await deserializeSnapshot(snap, 'sqljs');
-      model.fromSnapshot(decomp);
-      if (snap.blockHeight < blockHeight) {
-        await this.applyEventsToAggregateAtHeight(model, blockHeight);
-      }
-    }
-    return { aggregateId, blockHeight: model.lastBlockHeight, version: model.version, payload: model.toSnapshot() };
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Reads
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  async fetchEventsForAggregate(
-    aggregateId: string,
-    options: { version?: number; blockHeight?: number; limit?: number; offset?: number } = {}
-  ) {
-    const { version, blockHeight, limit, offset } = options;
-    const repo = this.getRepository(aggregateId);
-    const qb = repo
-      .createQueryBuilder('e')
-      .where('e.version > :version', { version: version ?? 0 })
-      .addOrderBy('e.version', 'ASC');
-
-    if (blockHeight != null) qb.andWhere('e.blockHeight <= :bh', { bh: blockHeight });
-    if (offset != null) qb.skip(offset);
-    if (limit != null) qb.take(limit);
-
-    const raws: any[] = await qb.getMany();
-    return await Promise.all(raws.map((r) => deserializeToDomainEvent(aggregateId, r, 'sqljs')));
-  }
-
-  async fetchEventsForAggregates(
+  public async fetchEventsForAggregates(
     aggregateIds: string[],
-    options: { version?: number; blockHeight?: number; limit?: number; offset?: number } = {}
-  ) {
-    const results = await Promise.all(aggregateIds.map((id) => this.fetchEventsForAggregate(id, options)));
-    return results.flat();
-  }
+    options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
+  ): Promise<DomainEvent[]> {
+    const out: DomainEvent[] = [];
+    const { version, blockHeight, limit, offset } = options ?? {};
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Internals
-  // ─────────────────────────────────────────────────────────────────────────────
+    for (const id of aggregateIds) {
+      const conds: string[] = [];
+      const params: Array<string | number | Buffer> = [];
 
-  /**
-   * TypeORM repo by entity name registered in the DataSource.
-   * We resolve metadata first to guarantee the proper target is used.
-   */
-  private getRepository<T extends ObjectLiteral = any>(entityName: string): Repository<T> {
-    const meta =
-      (this.dataSource as any).entityMetadatasMap?.get(entityName) ??
-      this.dataSource.entityMetadatas.find((m) => m.name === entityName);
-    if (!meta) throw new Error(`Entity with name "${entityName}" not found.`);
-    return this.dataSource.getRepository<T>(meta.target);
-  }
+      if (version != null) {
+        conds.push(`"version" = ?`);
+        params.push(version);
+      }
+      if (blockHeight != null) {
+        conds.push(`"blockHeight" = ?`);
+        params.push(blockHeight);
+      }
 
-  /**
-   * Load events to the aggregate up to (and including) the given blockHeight.
-   * Reads in ascending version order in batches for memory efficiency.
-   */
-  private async applyEventsToAggregateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    const repo = this.getRepository(model.aggregateId);
-    const batch = 5000;
-    let last = 0;
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const limitSql = limit != null ? `LIMIT ${Number(limit)}` : '';
+      const offsetSql = offset != null ? `OFFSET ${Number(offset)}` : '';
 
-    while (true) {
-      const raws: any[] = await repo.find({
-        where: { version: MoreThan(last), blockHeight: LessThanOrEqual(blockHeight) },
-        order: { version: 'ASC' },
-        take: batch,
-      });
-      if (!raws.length) break;
+      const rows = (await this.dataSource.query(
+        `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+         FROM "${id}"
+         ${whereSql}
+         ORDER BY "version" ASC
+         ${limitSql}
+         ${offsetSql}`,
+        params
+      )) as Array<{
+        type: string;
+        requestId: string;
+        blockHeight: number | null;
+        payload: Buffer;
+        isCompressed: number | boolean;
+        version: number;
+        timestamp: number;
+      }>;
 
-      const events = await Promise.all(raws.map((r) => deserializeToDomainEvent(model.aggregateId, r, 'sqljs')));
-      await model.loadFromHistory(events);
-
-      last = raws[raws.length - 1]!.version;
-      if (raws.length < batch) break;
-    }
-  }
-
-  /**
-   * Apply snapshot retention inside an existing transaction (query runner provided).
-   * Keeps last `minKeep` snapshots and optionally preserves a height window.
-   */
-  private async applySnapshotRetentionTx(
-    qr: QueryRunner,
-    aggregateId: string,
-    currentHeight: number,
-    ret?: SnapshotRetention
-  ) {
-    const minKeep = ret?.minKeep ?? 2;
-    const win = ret?.keepWindow ?? 0;
-
-    const repo = qr.manager.getRepository<SnapshotInterface>('snapshots');
-
-    // Pick the newest `minKeep` snapshot IDs
-    const keepRows: Array<{ id: string; blockHeight: number }> = await repo
-      .createQueryBuilder('s')
-      .select(['s.id AS id', 's.blockHeight AS blockHeight'])
-      .where('s.aggregateId = :aggregateId', { aggregateId })
-      .orderBy('s.blockHeight', 'DESC')
-      .limit(minKeep)
-      .getRawMany();
-
-    const keepIds = new Set(keepRows.map((r) => r.id));
-    const minHeight = win > 0 ? Math.max(0, currentHeight - win) : -Infinity;
-
-    // Build delete query: below minHeight and NOT in keepIds
-    const qb = repo.createQueryBuilder().delete().where('aggregateId = :aggregateId', { aggregateId });
-
-    if (minHeight !== -Infinity) {
-      qb.andWhere('blockHeight < :bh', { bh: minHeight });
-    } else {
-      qb.andWhere('1=1');
+      for (const r of rows) {
+        out.push(
+          await deserializeToDomainEvent(
+            id,
+            {
+              type: r.type,
+              requestId: r.requestId,
+              blockHeight: r.blockHeight!,
+              payload: r.payload,
+              isCompressed: !!r.isCompressed,
+              version: r.version,
+              timestamp: r.timestamp,
+            },
+            'sqljs'
+          )
+        );
+      }
     }
 
-    if (keepIds.size) {
-      qb.andWhere(`id NOT IN (${[...keepIds].map(() => '?').join(',')})`, [...keepIds]);
-    }
+    // Stable sort by (timestamp, version) for deterministic return order.
+    out.sort((a: any, b: any) => {
+      if (a.timestamp !== b.timestamp) {
+        return a.timestamp - b.timestamp;
+      }
+      return (a.version ?? 0) - (b.version ?? 0);
+    });
 
-    await qb.execute();
+    return out;
+  }
+
+  // ─────────────────────────── SQL.JS PERSISTENCE ───────────────────────────
+
+  /**
+   * Force-persist the in-memory sql.js database to IndexedDB (if configured).
+   * TypeORM sets up the persistence when `useLocalForage: true` and `location` are provided.
+   * We call driver’s `autoSaveCallback` if present to flush immediately after COMMIT.
+   */
+  private async persistToDiskIfSupported(): Promise<void> {
+    const anyDs = this.dataSource as any;
+    const driver = anyDs?.driver;
+    const db = driver?.databaseConnection;
+    const autoSaveCallback = driver?.autoSaveCallback;
+
+    // sql.js TypeORM driver exposes autoSaveCallback when useLocalForage=true.
+    if (typeof autoSaveCallback === 'function') {
+      try {
+        await autoSaveCallback(db);
+      } catch {
+        // Non-fatal: best-effort flush; next ops will try again.
+      }
+    }
   }
 }

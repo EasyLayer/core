@@ -1,511 +1,698 @@
-import { Injectable } from '@nestjs/common';
-import {
-  DataSource,
-  QueryFailedError,
-  Repository,
-  MoreThan,
-  LessThanOrEqual,
-  QueryRunner,
-  ObjectLiteral,
-} from 'typeorm';
-import { PostgresError } from 'pg-error-enum';
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
-import { AppLogger } from '@easylayer/common/logger';
-import { BaseAdapter, SnapshotRetention, FIXED_OVERHEAD } from './base-adapter';
-import { OutboxRowInternal, deserializeToOutboxRaw } from '../outbox.model';
-import { EventDataParameters, serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
-import { SnapshotInterface, SnapshotParameters, serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import { CompressionUtils } from '../compression';
+import type { SnapshotOptions } from './base-adapter';
+import { BaseAdapter } from './base-adapter';
+import { serializeEventRow, deserializeToDomainEvent } from '../event-data.model';
+import { serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
+import { deserializeToOutboxRaw } from '../outbox.model';
 
-@Injectable()
+/**
+ * Postgres adapter.
+ *
+ * Design notes:
+ * - Never calls aggregate.apply(); only aggregate.loadFromHistory().
+ * - Uses project serializers/deserializers exclusively (no ad-hoc JSON ops).
+ * - Payload is stored as bytea in both per-aggregate tables and the outbox.
+ * - Outbox ordering is by a client-generated BIGINT PRIMARY KEY "id" (monotonic).
+ * - PG handles boolean natively; we bind booleans as true/false.
+ * - We avoid RETURNING because we already know the id; one less round trip.
+ * - Delivery chunk sizing is computed locally from the provided transport cap:
+ *     prefetch LIMIT ~ cap / AVG_EVENT_BYTES_GUESS (clamped) and then greedily
+ *     accumulate by (FIXED_OVERHEAD + payload_uncompressed_bytes).
+ */
 export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
-  public readonly driver = 'postgres' as const;
+  /** Outbox delivery watermark (strictly increasing). */
+  private lastSeenId = 0n;
 
-  constructor(
-    private readonly log: AppLogger,
-    private readonly dataSource: DataSource
-  ) {
-    super();
-    if (this.dataSource.options.type !== 'postgres') {
-      throw new Error('PostgresAdapter must be used with Postgres DataSource');
-    }
-  }
+  /** Delete IN() chunk size to keep packets under driver param/packet limits. */
+  private static readonly DELETE_ID_CHUNK = 50_000;
 
-  // ======== Persist (single tx) ========
+  /** Prefetch tuning for PG (larger is fine compared to SQLite). */
+  private static readonly FIXED_OVERHEAD = 256; // per-event wire envelope approx (bytes)
+  private static readonly AVG_EVENT_BYTES_GUESS = 8 * 1024;
+  private static readonly MIN_PREFETCH_ROWS = 1_024;
+  private static readonly MAX_PREFETCH_ROWS = 32_768;
+
+  // ─────────────────────────────── WRITE PATH ───────────────────────────────
 
   /**
-   * Persist aggregates + outbox in a single READ COMMITTED tx.
-   * We generate exactly ONE Buffer per event, and reuse it for BOTH inserts.
+   * Persist unsaved events of each aggregate into:
+   *   1) per-aggregate event table (bytea payload)
+   *   2) outbox (bytea payload) — with client-generated monotonic BIGINT id
+   *
+   * Returns the inserted outbox ids, first/last (id & timestamp) for compatibility,
+   * and a raw array suitable for fast-path publish (same bytes as in DB).
    */
-  async persistAggregatesAndOutbox(aggregates: T[]): Promise<void> {
-    if (!aggregates.length) return;
-
+  public async persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+    insertedOutboxIds: string[]; // numeric view (safe while ids < 2^53); keep as string if you prefer
+    firstTs: number;
+    firstId: string;
+    lastTs: number;
+    lastId: string;
+    rawEvents: WireEventRecord[];
+    avgUncompressedBytes?: number;
+  }> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
-    await qr.startTransaction('READ COMMITTED');
+    await qr.query('BEGIN');
+
+    const outboxIds: string[] = [];
+    const rawEvents: WireEventRecord[] = [];
+
+    let firstIdBn: bigint | null = null;
+    let lastIdBn: bigint | null = null;
+    let firstTs = Number.MAX_SAFE_INTEGER;
+    let lastTs = 0;
 
     try {
-      const perAgg = new Map<string, EventDataParameters[]>(); // aggregate rows
-      const outRows: Omit<OutboxRowInternal, 'id'>[] = []; // outbox rows
-
       for (const agg of aggregates) {
-        const unsaved = agg.getUnsavedEvents();
-        if (!unsaved.length) continue;
+        const table = agg.aggregateId;
+        if (!table) {
+          throw new Error('Aggregate has no aggregateId');
+        }
 
-        const base = agg.version - unsaved.length;
-        const rows: EventDataParameters[] = [];
+        const unsaved: DomainEvent[] = agg.getUnsavedEvents();
+        if (unsaved.length === 0) {
+          continue;
+        }
+
+        // First version for these unsaved events = agg.version - unsaved.length + 1
+        const startVersion = agg.version - unsaved.length + 1;
 
         for (let i = 0; i < unsaved.length; i++) {
-          const ev = unsaved[i]!;
-          const ser = await serializeEventRow(ev, base + i + 1, 'postgres'); // ONE buffer created inside
+          const ev = unsaved[i] as DomainEvent;
+          const version = startVersion + i;
 
-          // Aggregate row (binary payload)
-          rows.push({
-            type: ser.type,
-            payload: ser.payload, // same Buffer
-            version: ser.version,
-            requestId: ser.requestId,
-            blockHeight: ser.blockHeight,
-            isCompressed: ser.isCompressed,
-            timestamp: ser.timestamp,
-          });
+          // Serialize once; driver tag 'postgres' enables compression heuristics in serializers.
+          const row = await serializeEventRow(ev, version, 'postgres');
 
-          // Outbox row (binary payload + uncompressed byte length)
-          outRows.push({
-            aggregateId: agg.aggregateId,
-            eventType: ser.type,
-            eventVersion: ser.version,
-            requestId: ser.requestId,
-            blockHeight: ser.blockHeight,
-            payload: ser.payload, // same Buffer
-            timestamp: ev.timestamp!,
-            isCompressed: ser.isCompressed ?? false,
-            payload_uncompressed_bytes: ser.payloadUncompressedBytes,
-          });
+          // Generate monotonic outbox id from event.timestamp.
+          const newId = this.idGen.next(ev.timestamp!);
+
+          // (1) Insert into per-aggregate table (bytea payload).
+          await qr.manager.query(
+            `INSERT INTO "${table}"
+               ("version","requestId","type","payload","blockHeight","isCompressed","timestamp")
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT ("version","requestId") DO NOTHING`,
+            [
+              row.version,
+              row.requestId,
+              row.type,
+              row.payload, // bytea
+              row.blockHeight,
+              row.isCompressed, // boolean
+              row.timestamp,
+            ]
+          );
+
+          // (2) Insert into outbox with our precomputed BIGINT id.
+          await qr.manager.query(
+            `INSERT INTO "outbox"
+               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT ON CONSTRAINT "UQ_outbox_aggregate_version" DO NOTHING`,
+            [
+              newId.toString(), // bind as string; PG BIGINT friendly
+              table,
+              row.type,
+              row.version,
+              row.requestId,
+              row.blockHeight,
+              row.payload, // same bytea
+              row.isCompressed, // boolean
+              row.timestamp,
+              row.payloadUncompressedBytes,
+            ]
+          );
+
+          // Track id bounds & timestamps for compatibility.
+          if (firstIdBn === null || newId < firstIdBn) {
+            firstIdBn = newId;
+          }
+          if (lastIdBn === null || newId > lastIdBn) {
+            lastIdBn = newId;
+          }
+          if (ev.timestamp! < firstTs) {
+            firstTs = ev.timestamp!;
+          }
+          if (ev.timestamp! > lastTs) {
+            lastTs = ev.timestamp!;
+          }
+
+          // Build RAW wire record (no JSON parse — deserializer returns string payload).
+          rawEvents.push(
+            await deserializeToOutboxRaw({
+              aggregateId: table,
+              eventType: row.type,
+              eventVersion: row.version,
+              requestId: row.requestId,
+              blockHeight: row.blockHeight,
+              payload: row.payload,
+              isCompressed: !!row.isCompressed,
+              timestamp: ev.timestamp!,
+            })
+          );
+
+          outboxIds.push(newId.toString());
         }
 
-        perAgg.set(agg.aggregateId, rows);
+        // Clear unsaved events after a successful flush for this aggregate.
+        agg.markEventsAsSaved();
       }
 
-      if (!outRows.length) {
-        await qr.commitTransaction();
-        await qr.release();
-        return;
+      await qr.query('COMMIT');
+
+      const firstId = firstIdBn ? String(firstIdBn) : '0';
+      const lastId = lastIdBn ? String(lastIdBn) : '0';
+      if (outboxIds.length === 0) {
+        firstTs = 0;
+        lastTs = 0;
       }
 
-      // Insert aggregate rows
-      for (const [aggId, rows] of perAgg.entries()) {
-        const repo = qr.manager.getRepository<EventDataParameters>(aggId);
-        await repo.createQueryBuilder().insert().values(rows).updateEntity(false).execute();
-      }
-
-      // Insert outbox rows
-      const outboxRepo = qr.manager.getRepository<OutboxRowInternal>('outbox');
-      await outboxRepo.createQueryBuilder().insert().values(outRows).updateEntity(false).execute();
-
-      // Mark events saved (whole batch is one tx)
-      for (const agg of aggregates) agg.markEventsAsSaved();
-
-      await qr.commitTransaction();
-      await qr.release();
-    } catch (err) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      await qr.release().catch(() => undefined);
-
-      if (err instanceof QueryFailedError) {
-        const code = (err as any).driverError?.code;
-        if (
-          code === PostgresError.UNIQUE_VIOLATION &&
-          String((err as any).driverError?.detail || '').includes('Key (aggregateId, eventVersion)')
-        ) {
-          // outbox idempotency
-          this.log.debug('Idempotency: duplicate outbox row — skipping (Postgres)');
-          return;
-        }
-        if (
-          code === PostgresError.UNIQUE_VIOLATION &&
-          String((err as any).driverError?.detail || '').includes('Key (version, request_id)')
-        ) {
-          // aggregate table idempotency
-          this.log.debug('Idempotency: duplicate event — skipping (Postgres)');
-          return;
-        }
-      }
-      throw err;
-    }
-  }
-
-  // ======== Outbox streaming: lock -> deliver+ACK -> delete -> commit (ORDER BY timestamp,id) ========
-  async fetchDeliverAckChunk(
-    wireBudgetBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<void>
-  ): Promise<number> {
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction('READ COMMITTED');
-
-    try {
-      const idRows = (await qr.manager.query(
-        `
-        WITH ordered AS (
-          SELECT id,
-                "payload_uncompressed_bytes" AS ulen
-          FROM outbox
-          ORDER BY "timestamp", id
-        ),
-        accum AS (
-          SELECT id,
-                SUM(ulen + $2) OVER (ORDER BY id) AS run
-          FROM ordered
-        )
-        SELECT id
-        FROM accum
-        WHERE run <= $1
-      `,
-        [wireBudgetBytes, FIXED_OVERHEAD]
-      )) as Array<{ id: number }>;
-
-      if (idRows.length === 0) {
-        await qr.commitTransaction();
-        await qr.release();
-        return 0;
-      }
-
-      const ids = idRows.map((r) => r.id);
-
-      const rows = (await qr.manager.query(
-        `
-        SELECT id, "aggregateId", "eventType", "eventVersion", "requestId",
-              "blockHeight", payload, "isCompressed", "timestamp",
-              "payload_uncompressed_bytes" AS ulen
-        FROM outbox
-        WHERE id = ANY($1)
-        FOR UPDATE SKIP LOCKED
-        ORDER BY "timestamp", id
-      `,
-        [ids]
-      )) as Array<{
-        id: number;
-        aggregateId: string;
-        eventType: string;
-        eventVersion: number;
-        requestId: string;
-        blockHeight: number;
-        payload: Buffer;
-        isCompressed: boolean;
-        timestamp: number;
-        ulen: number;
-      }>;
-
-      if (rows.length === 0) {
-        await qr.commitTransaction();
-        await qr.release();
-        return 0;
-      }
-
-      const events: WireEventRecord[] = [];
-      let budget = wireBudgetBytes;
-
-      for (const r of rows) {
-        const rowBytes = FIXED_OVERHEAD + Number(r.ulen);
-        if (events.length > 0 && rowBytes > budget) break;
-
-        // Accept row → build WireEventRecord in one helper (decompress if needed).
-        const evt = await deserializeToOutboxRaw({
-          aggregateId: r.aggregateId,
-          eventType: r.eventType,
-          eventVersion: r.eventVersion,
-          requestId: r.requestId,
-          blockHeight: r.blockHeight,
-          payload: r.payload,
-          isCompressed: !!r.isCompressed,
-          timestamp: r.timestamp,
-        });
-
-        ids.push(r.id);
-        events.push(evt);
-
-        budget -= Math.max(0, rowBytes);
-      }
-
-      if (events.length === 0) {
-        await qr.commitTransaction();
-        await qr.release();
-        return 0;
-      }
-
-      // We send the batch and wait for ACK
-      await deliver(events);
-
-      // Remove ACK'ed rows in the same transaction
-      await qr.manager.query(`DELETE FROM outbox WHERE id = ANY($1)`, [ids]);
-
-      await qr.commitTransaction();
-      await qr.release();
-      return events.length;
+      return {
+        insertedOutboxIds: outboxIds,
+        firstTs,
+        firstId,
+        lastTs,
+        lastId,
+        rawEvents,
+        // Optionally, you can compute avgUncompressedBytes here if you track it.
+      };
     } catch (e) {
-      await qr.rollbackTransaction().catch(() => undefined);
-      await qr.release().catch(() => undefined);
+      await qr.query('ROLLBACK').catch(() => undefined);
       throw e;
-    }
-  }
-
-  // ======== Rollback (single tx) ========
-
-  async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
-    await this.runInTx(async (qr) => {
-      // events
-      for (const id of aggregateIds) {
-        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
-      }
-      // snapshots
-      await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = ANY($1) AND "blockHeight" > $2`, [
-        aggregateIds,
-        blockHeight,
-      ]);
-      // outbox
-      await qr.manager.query(`DELETE FROM "outbox" WHERE "aggregateId" = ANY($1) AND "blockHeight" > $2`, [
-        aggregateIds,
-        blockHeight,
-      ]);
-    });
-  }
-
-  async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    const { aggregateId } = model;
-    if (!aggregateId) throw new Error('Model does not have aggregateId');
-
-    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
-    if (!snap) {
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-      return;
-    }
-    if (snap.blockHeight < blockHeight) {
-      const decomp = await deserializeSnapshot(snap, 'postgres');
-      model.fromSnapshot(decomp);
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-    } else {
-      const decomp = await deserializeSnapshot(snap, 'postgres');
-      model.fromSnapshot(decomp);
-    }
-  }
-
-  // ======== Reads / Snapshots ========
-
-  async findLatestSnapshot(aggregateId: string): Promise<SnapshotInterface | null> {
-    const repo = this.getRepository<SnapshotInterface>('snapshots');
-    return await repo.findOneBy({ aggregateId });
-  }
-
-  async findSnapshotBeforeHeight(aggregateId: string, blockHeight: number): Promise<SnapshotInterface | null> {
-    const repo = this.getRepository<SnapshotInterface>('snapshots');
-    return await repo
-      .createQueryBuilder('s')
-      .where('s.aggregateId = :aggregateId', { aggregateId })
-      .andWhere('s.blockHeight <= :blockHeight', { blockHeight })
-      .orderBy('s.blockHeight', 'DESC')
-      .limit(1)
-      .getOne();
-  }
-
-  async applyEventsToAggregate<K extends T>(model: K, fromVersion: number = 0): Promise<void> {
-    const repo = this.getRepository(model.aggregateId);
-    const batch = 5000;
-    let last = fromVersion;
-    while (true) {
-      const raws: any[] = await repo.find({
-        where: { version: MoreThan(last) },
-        order: { version: 'ASC' },
-        take: batch,
-      });
-      if (!raws.length) break;
-      const events = await Promise.all(raws.map((r) => deserializeToDomainEvent(model.aggregateId, r, 'postgres')));
-      await model.loadFromHistory(events);
-      last = raws[raws.length - 1]!.version;
-      if (raws.length < batch) break;
-    }
-  }
-
-  async createSnapshot(aggregate: T, ret?: SnapshotRetention): Promise<void> {
-    if (!aggregate.canMakeSnapshot()) return;
-    try {
-      const snapshot = await serializeSnapshot(aggregate as any, 'postgres');
-      const repo = this.getRepository('snapshots');
-      await repo.createQueryBuilder().insert().values(snapshot).updateEntity(false).execute();
-      aggregate.resetSnapshotCounter();
-
-      if (aggregate.allowPruning) {
-        await this.applySnapshotRetention(aggregate.aggregateId, snapshot.blockHeight, ret);
-      }
-    } catch (error) {
-      if (error instanceof QueryFailedError) {
-        const code = (error.driverError as any)?.code;
-        if (code === PostgresError.UNIQUE_VIOLATION) {
-          this.log.debug('Snapshot conflict, skipping', { args: { aggregateId: aggregate.aggregateId } });
-          return;
-        }
-      }
-      throw error;
-    }
-  }
-
-  async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
-    const repo = this.getRepository('snapshots');
-    for (const aggregateId of aggregateIds) {
-      await repo
-        .createQueryBuilder()
-        .delete()
-        .where('aggregateId = :aggregateId', { aggregateId })
-        .andWhere('blockHeight > :blockHeight', { blockHeight })
-        .execute();
-    }
-  }
-
-  async pruneOldSnapshots(aggregateId: string, currentBlockHeight: number, ret?: SnapshotRetention): Promise<void> {
-    await this.applySnapshotRetention(aggregateId, currentBlockHeight, ret);
-  }
-
-  async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
-    const repo = this.getRepository(aggregateId);
-    await repo
-      .createQueryBuilder()
-      .delete()
-      .where('blockHeight < :blockHeight', { blockHeight: pruneToBlockHeight })
-      .execute();
-  }
-
-  async createSnapshotAtHeight<K extends T>(model: K, blockHeight: number): Promise<SnapshotParameters> {
-    const { aggregateId } = model;
-    if (!aggregateId) throw new Error('Model does not have aggregateId');
-
-    const snap = await this.findSnapshotBeforeHeight(aggregateId, blockHeight);
-    if (!snap) {
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-    } else if (snap.blockHeight < blockHeight) {
-      const decomp = await deserializeSnapshot(snap, 'postgres');
-      model.fromSnapshot(decomp);
-      await this.applyEventsToAggregateAtHeight(model, blockHeight);
-    } else {
-      const decomp = await deserializeSnapshot(snap, 'postgres');
-      model.fromSnapshot(decomp);
-    }
-    return { aggregateId, blockHeight: model.lastBlockHeight, version: model.version, payload: model.toSnapshot() };
-  }
-
-  async fetchEventsForAggregate(
-    aggregateId: string,
-    options: { version?: number; blockHeight?: number; limit?: number; offset?: number } = {}
-  ): Promise<DomainEvent[]> {
-    const { version, blockHeight, limit, offset } = options;
-    const repo = this.getRepository(aggregateId);
-    const qb = repo
-      .createQueryBuilder('e')
-      .where('e.version > :version', { version: version ?? 0 })
-      .addOrderBy('e.version', 'ASC');
-    if (blockHeight != null) qb.andWhere('e.blockHeight <= :bh', { bh: blockHeight });
-    if (offset != null) qb.skip(offset);
-    if (limit != null) qb.take(limit);
-    const raws = await qb.getMany();
-    return await Promise.all(raws.map((r: any) => deserializeToDomainEvent(aggregateId, r, 'postgres')));
-  }
-
-  async fetchEventsForAggregates(
-    aggregateIds: string[],
-    options: { version?: number; blockHeight?: number; limit?: number; offset?: number } = {}
-  ): Promise<DomainEvent[]> {
-    const results = await Promise.all(aggregateIds.map((id) => this.fetchEventsForAggregate(id, options)));
-    return results.flat();
-  }
-
-  // ======== internals ========
-
-  private async runInTx<T>(fn: (qr: QueryRunner) => Promise<T>): Promise<T> {
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.startTransaction('READ COMMITTED');
-    try {
-      const res = await fn(qr);
-      await qr.commitTransaction();
-      return res;
-    } catch (err) {
-      await qr.rollbackTransaction();
-      this.handleDatabaseError(err as any);
-      throw err;
     } finally {
       await qr.release();
     }
   }
 
-  private getRepository<T extends ObjectLiteral = any>(entityName: string): Repository<T> {
-    const meta = this.dataSource.entityMetadatasMap.get(entityName);
-    if (!meta) throw new Error(`Entity with name "${entityName}" not found.`);
-    return this.dataSource.getRepository<T>(meta.target);
+  public async deleteOutboxByIds(ids: string[]): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      const step = PostgresAdapter.DELETE_ID_CHUNK;
+      for (let i = 0; i < ids.length; i += step) {
+        const chunk = ids.slice(i, i + step).map((x) => x.toString());
+        const placeholders = chunk.map((_, idx) => `$${idx + 1}`).join(',');
+        await qr.manager.query(`DELETE FROM "outbox" WHERE "id" IN (${placeholders})`, chunk);
+      }
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
   }
 
-  private handleDatabaseError(error: any): void {
-    if (error instanceof QueryFailedError) {
-      const code = (error.driverError as any)?.code as string | undefined;
-      const constraint = (error as any)?.constraint as string | undefined;
+  // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
 
-      if (code === PostgresError.UNIQUE_VIOLATION) {
-        if (constraint === 'UQ_outbox_aggregate_version') {
-          // this.log.debug('Idempotency: duplicate outbox row — skipping (Postgres)');
-          return;
-        }
-        if (constraint === 'UQ_aggregate_blockheight') {
-          // this.log.debug('Snapshot conflict — skipping (Postgres)');
-          return;
-        }
-        if (constraint && /UQ_.*_version_requestId/.test(constraint)) {
-          // this.log.debug('Idempotency: duplicate event — skipping (Postgres)');
-          return;
-        }
+  public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < ?::bigint LIMIT 1`, [String(id)]);
+    return rows.length > 0;
+  }
+
+  public async hasAnyPendingAfterWatermark(): Promise<boolean> {
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > ?::bigint LIMIT 1`, [
+      String(this.lastSeenId),
+    ]);
+    return rows.length > 0;
+  }
+
+  // ─────────────────────────────── DELIVER / ACK ───────────────────────────────
+
+  /**
+   * Delivery strategy (Postgres):
+   * 1) Prefetch an ordered slice by id (LIMIT N), where
+   *      N ≈ transportCapBytes / AVG_EVENT_BYTES_GUESS,
+   *      clamped to [MIN_PREFETCH_ROWS .. MAX_PREFETCH_ROWS].
+   * 2) In JS, greedily accumulate rows while
+   *      (FIXED_OVERHEAD + payload_uncompressed_bytes) fits the budget.
+   * 3) Deliver → ACK delete chosen ids.
+   */
+  public async fetchDeliverAckChunk(
+    transportCapBytes: number,
+    deliver: (events: WireEventRecord[]) => Promise<void>
+  ): Promise<number> {
+    const wantRows = Math.max(1, Math.floor(transportCapBytes / PostgresAdapter.AVG_EVENT_BYTES_GUESS));
+    const scanLimit = Math.max(
+      PostgresAdapter.MIN_PREFETCH_ROWS,
+      Math.min(PostgresAdapter.MAX_PREFETCH_ROWS, wantRows)
+    );
+
+    const rows = (await this.dataSource.query(
+      `SELECT id,
+                "aggregateId" as aggregateId,
+                "eventType"   as eventType,
+                "eventVersion" as eventVersion,
+                "requestId"   as requestId,
+                "blockHeight" as blockHeight,
+                "payload"     as payload,
+                "isCompressed" as isCompressed,
+                "timestamp"   as timestamp,
+                "payload_uncompressed_bytes" as ulen
+        FROM "outbox"
+        WHERE id > ?::bigint
+        ORDER BY id ASC
+        LIMIT ${scanLimit}`,
+      [String(this.lastSeenId)]
+    )) as Array<{
+      id: string; // BIGINT comes as string from PG driver
+      aggregateId: string;
+      eventType: string;
+      eventVersion: number;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: boolean;
+      timestamp: number;
+      ulen: number;
+    }>;
+
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    // Pick first K rows that fit the transport budget (always at least one).
+    const accepted: typeof rows = [];
+    let running = 0;
+
+    for (const r of rows) {
+      const add = PostgresAdapter.FIXED_OVERHEAD + Number(r.ulen);
+      if (accepted.length === 0) {
+        accepted.push(r);
+        running += add;
+        continue;
+      }
+      if (running + add > transportCapBytes) {
+        break;
+      }
+      accepted.push(r);
+      running += add;
+    }
+
+    const events: WireEventRecord[] = new Array(accepted.length);
+    for (let i = 0; i < accepted.length; i++) {
+      const r = accepted[i]!;
+      events[i] = await deserializeToOutboxRaw({
+        aggregateId: r.aggregateId,
+        eventType: r.eventType,
+        eventVersion: r.eventVersion,
+        requestId: r.requestId,
+        blockHeight: r.blockHeight!,
+        payload: r.payload,
+        isCompressed: !!r.isCompressed,
+        timestamp: r.timestamp,
+      });
+    }
+
+    const last = accepted[accepted.length - 1]!;
+    const nextId = BigInt(last.id);
+
+    await deliver(events);
+
+    // ACK delete accepted ids.
+    const ids = accepted.map((r) => r.id);
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      const step = 10000;
+      for (let i = 0; i < ids.length; i += step) {
+        const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
+        const placeholders = chunk.map(() => '?::bigint').join(',');
+        await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+      }
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      await qr.release().catch(() => undefined);
+      throw e;
+    }
+    await qr.release();
+
+    this.lastSeenId = nextId;
+
+    return events.length;
+  }
+
+  // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
+
+  public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+    const row = await serializeSnapshot(aggregate, 'postgres');
+    await this.dataSource.query(
+      `INSERT INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT ON CONSTRAINT "UQ_aggregate_blockheight" DO NOTHING`,
+      [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed]
+    );
+
+    // Prune only if the aggregate explicitly allows pruning.
+    const allow = (aggregate as any).allowPruning === true;
+    if (allow) {
+      await this.pruneOldSnapshots(row.aggregateId, row.blockHeight, opts);
+    }
+  }
+
+  public async findLatestSnapshot(aggregateId: string): Promise<{ blockHeight: number } | null> {
+    const rows = await this.dataSource.query(
+      `SELECT "blockHeight"
+       FROM "snapshots"
+       WHERE "aggregateId" = $1
+       ORDER BY "blockHeight" DESC
+       LIMIT 1`,
+      [aggregateId]
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return { blockHeight: Number(rows[0].blockHeight) };
+  }
+
+  public async createSnapshotAtHeight<K extends T>(
+    model: K,
+    height: number
+  ): Promise<{ aggregateId: string; version: number; blockHeight: number; payload: any }> {
+    const rows = await this.dataSource.query(
+      `SELECT "aggregateId","blockHeight","version","payload","isCompressed"
+       FROM "snapshots"
+       WHERE "aggregateId" = $1 AND "blockHeight" <= $2
+       ORDER BY "blockHeight" DESC
+       LIMIT 1`,
+      [model.aggregateId, height]
+    );
+
+    if (rows.length === 0) {
+      return { aggregateId: model.aggregateId!, version: 0, blockHeight: 0, payload: {} };
+    }
+
+    const snap = await deserializeSnapshot(
+      {
+        id: '0',
+        aggregateId: rows[0].aggregateId,
+        blockHeight: Number(rows[0].blockHeight),
+        version: Number(rows[0].version),
+        payload: rows[0].payload,
+        isCompressed: !!rows[0].isCompressed,
+        createdAt: new Date(),
+      },
+      'postgres'
+    );
+
+    return {
+      aggregateId: snap.aggregateId,
+      version: snap.version,
+      blockHeight: snap.blockHeight,
+      payload: snap.payload,
+    };
+  }
+
+  public async applyEventsToAggregate<K extends T>(model: K, fromVersion?: number): Promise<void> {
+    const table = model.aggregateId!;
+    const since = fromVersion ?? 0;
+
+    const rows = (await this.dataSource.query(
+      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+       FROM "${table}"
+       WHERE "version" > $1
+       ORDER BY "version" ASC`,
+      [since]
+    )) as Array<{
+      type: string;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: boolean;
+      version: number;
+      timestamp: number;
+    }>;
+
+    const history: DomainEvent[] = [];
+    for (const r of rows) {
+      history.push(
+        await deserializeToDomainEvent(
+          table,
+          {
+            type: r.type,
+            requestId: r.requestId,
+            blockHeight: r.blockHeight!,
+            payload: r.payload,
+            isCompressed: !!r.isCompressed,
+            version: r.version,
+            timestamp: r.timestamp,
+          },
+          'postgres'
+        )
+      );
+    }
+
+    model.loadFromHistory(history);
+  }
+
+  public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = $1 AND "blockHeight" = $2`, [
+          id,
+          blockHeight,
+        ]);
+      }
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  public async pruneOldSnapshots(
+    aggregateId: string,
+    currentBlockHeight: number,
+    opts: SnapshotOptions
+  ): Promise<void> {
+    const { minKeep, keepWindow } = opts;
+    const protectFrom = keepWindow > 0 ? Math.max(0, currentBlockHeight - keepWindow) : 0;
+
+    const rows = (await this.dataSource.query(
+      `SELECT "id","blockHeight"
+       FROM "snapshots"
+       WHERE "aggregateId" = $1
+       ORDER BY "blockHeight" DESC`,
+      [aggregateId]
+    )) as Array<{ id: number; blockHeight: number }>;
+
+    if (rows.length <= minKeep) {
+      return;
+    }
+
+    const toKeep = new Set<number>();
+    for (let i = 0; i < Math.min(minKeep, rows.length); i++) {
+      toKeep.add(rows[i]!.id);
+    }
+    for (const r of rows) {
+      if (r.blockHeight >= protectFrom) {
+        toKeep.add(r.id);
       }
     }
-  }
 
-  private async applyEventsToAggregateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    const repo = this.getRepository(model.aggregateId);
-    const batch = 5000;
-    let last = 0;
-    while (true) {
-      const raws: any[] = await repo.find({
-        where: { version: MoreThan(last), blockHeight: LessThanOrEqual(blockHeight) },
-        order: { version: 'ASC' },
-        take: batch,
-      });
-      if (!raws.length) break;
-      const events = await Promise.all(raws.map((r) => deserializeToDomainEvent(model.aggregateId, r, 'postgres')));
-      await model.loadFromHistory(events);
-      last = raws[raws.length - 1]!.version;
-      if (raws.length < batch) break;
+    const toDelete = rows.filter((r) => !toKeep.has(r.id)).map((r) => r.id);
+    if (toDelete.length === 0) {
+      return;
+    }
+
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN');
+    try {
+      const step = PostgresAdapter.DELETE_ID_CHUNK;
+      for (let i = 0; i < toDelete.length; i += step) {
+        const chunk = toDelete.slice(i, i + step);
+        const placeholders = chunk.map((_, idx) => `$${idx + 1}`).join(',');
+        await qr.manager.query(`DELETE FROM "snapshots" WHERE "id" IN (${placeholders})`, chunk);
+      }
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
     }
   }
 
-  private async applySnapshotRetention(aggregateId: string, currentHeight: number, ret?: SnapshotRetention) {
-    const minKeep = ret?.minKeep ?? 2;
-    const win = ret?.keepWindow ?? 0;
+  public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
+    await this.dataSource.query(
+      `DELETE FROM "${aggregateId}" WHERE "blockHeight" IS NOT NULL AND "blockHeight" <= $1`,
+      [pruneToBlockHeight]
+    );
+  }
 
-    const repo = this.getRepository<SnapshotInterface>('snapshots');
+  public async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
+    // 1) load snapshot ≤ height
+    const snap = await this.createSnapshotAtHeight(model, blockHeight);
+    model.fromSnapshot({
+      aggregateId: snap.aggregateId,
+      version: snap.version,
+      blockHeight: snap.blockHeight,
+      payload: snap.payload,
+    });
 
-    const keepRows: Array<{ id: string; blockHeight: number }> = await repo
-      .createQueryBuilder('s')
-      .select(['s.id AS id', 's.blockHeight AS blockHeight'])
-      .where('s.aggregateId = :aggregateId', { aggregateId })
-      .orderBy('s.blockHeight', 'DESC')
-      .limit(minKeep)
-      .getRawMany();
+    // 2) apply events in (snap.blockHeight, height]
+    const table = model.aggregateId!;
+    const rows = (await this.dataSource.query(
+      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+       FROM "${table}"
+       WHERE "blockHeight" IS NOT NULL AND "blockHeight" > $1 AND "blockHeight" <= $2
+       ORDER BY "version" ASC`,
+      [snap.blockHeight, blockHeight]
+    )) as Array<{
+      type: string;
+      requestId: string;
+      blockHeight: number | null;
+      payload: Buffer;
+      isCompressed: boolean;
+      version: number;
+      timestamp: number;
+    }>;
 
-    const keepIds = new Set(keepRows.map((r) => r.id));
-    const minHeight = win > 0 ? currentHeight - win : -Infinity;
+    const history: DomainEvent[] = [];
+    for (const r of rows) {
+      history.push(
+        await deserializeToDomainEvent(
+          table,
+          {
+            type: r.type,
+            requestId: r.requestId,
+            blockHeight: r.blockHeight!,
+            payload: r.payload,
+            isCompressed: !!r.isCompressed,
+            version: r.version,
+            timestamp: r.timestamp,
+          },
+          'postgres'
+        )
+      );
+    }
 
-    await repo
-      .createQueryBuilder()
-      .delete()
-      .where('aggregateId = :aggregateId', { aggregateId })
-      .andWhere('blockHeight < :bh', { bh: Math.max(0, minHeight) })
-      .andWhere(keepIds.size ? `id NOT IN (${[...keepIds].map(() => '?').join(',')})` : '1=1', [...keepIds])
-      .execute();
+    model.loadFromHistory(history);
+  }
+
+  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) {
+      return;
+    }
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN'); // PG transactional block
+    try {
+      // 1) Per-aggregate event tables: drop everything above the given block height
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
+      }
+
+      // 2) Snapshots: remove snapshots created after the rollback height for these aggregates
+      const placeholders = aggregateIds.map((_, i) => `$${i + 2}`).join(',');
+      await qr.manager.query(
+        `DELETE FROM "snapshots" WHERE "blockHeight" > $1 AND "aggregateId" IN (${placeholders})`,
+        [blockHeight, ...aggregateIds]
+      );
+
+      // 3) Outbox: drop everything — safer after a chain reorg; repopulation will happen naturally
+      await qr.manager.query(`TRUNCATE TABLE "outbox"`);
+
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+
+    // Reset streaming watermark so the next drain starts fresh
+    this.lastSeenId = 0n;
+  }
+
+  public async fetchEventsForAggregates(
+    aggregateIds: string[],
+    options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
+  ): Promise<DomainEvent[]> {
+    const out: DomainEvent[] = [];
+    const { version, blockHeight, limit, offset } = options ?? {};
+
+    for (const id of aggregateIds) {
+      const conds: string[] = [];
+      const params: Array<string | number | Buffer | boolean> = [];
+      let p = 1;
+
+      if (version != null) {
+        conds.push(`"version" = $${p++}`);
+        params.push(version);
+      }
+      if (blockHeight != null) {
+        conds.push(`"blockHeight" = $${p++}`);
+        params.push(blockHeight);
+      }
+
+      const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+      const limitSql = limit != null ? `LIMIT ${Number(limit)}` : '';
+      const offsetSql = offset != null ? `OFFSET ${Number(offset)}` : '';
+
+      const rows = (await this.dataSource.query(
+        `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+         FROM "${id}"
+         ${whereSql}
+         ORDER BY "version" ASC
+         ${limitSql}
+         ${offsetSql}`,
+        params
+      )) as Array<{
+        type: string;
+        requestId: string;
+        blockHeight: number | null;
+        payload: Buffer;
+        isCompressed: boolean;
+        version: number;
+        timestamp: number;
+      }>;
+
+      for (const r of rows) {
+        out.push(
+          await deserializeToDomainEvent(
+            id,
+            {
+              type: r.type,
+              requestId: r.requestId,
+              blockHeight: r.blockHeight!,
+              payload: r.payload,
+              isCompressed: !!r.isCompressed,
+              version: r.version,
+              timestamp: r.timestamp,
+            },
+            'postgres'
+          )
+        );
+      }
+    }
+
+    // Stable sort by (timestamp, version) for deterministic return order (if needed).
+    out.sort((a: any, b: any) => {
+      if (a.timestamp !== b.timestamp) {
+        return a.timestamp - b.timestamp;
+      }
+      return (a.version ?? 0) - (b.version ?? 0);
+    });
+
+    return out;
   }
 }

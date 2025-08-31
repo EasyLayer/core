@@ -45,7 +45,9 @@ export class Publisher implements IEventPublisher<DomainEvent> {
     await this.producersManager.streamWireWithAck(events);
 
     // Emit system events locally after ACK
-    this.emitSystemEventsLocally(events);
+    queueMicrotask(() => {
+      this.emitSystemEventsLocally(events);
+    });
   }
 
   /**

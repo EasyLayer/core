@@ -1,7 +1,9 @@
-import { BlockchainProviderService, Block } from '../../../blockchain-provider';
-import { AppLogger, RuntimeTracker } from '@easylayer/common/logger';
-import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
-import { BlocksQueue } from '../../blocks-queue';
+import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
+import type { AppLogger } from '@easylayer/common/logger';
+import { RuntimeTracker } from '@easylayer/common/logger';
+import type { BlocksLoadingStrategy } from './load-strategy.interface';
+import { StrategyNames } from './load-strategy.interface';
+import type { BlocksQueue } from '../../blocks-queue';
 
 interface BlockInfo {
   hash: string;
@@ -209,7 +211,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @returns Array of fetched blocks.
    * @throws Will throw an error if fetching blocks fails after maximum retries.
    */
-  @RuntimeTracker({ warningThresholdMs: 3000, errorThresholdMs: 10000 })
+  // @RuntimeTracker({ warningThresholdMs: 3000, errorThresholdMs: 10000 })
   private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
     let attempt = 0;
     while (attempt < maxRetries) {

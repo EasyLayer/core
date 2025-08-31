@@ -4,7 +4,7 @@ import { CompressionUtils } from './compression';
 import type { DriverType } from './adapters';
 
 export interface OutboxRowInternal {
-  id: number; // bigserial/integer autoincrement
+  id: string | number; // bigserial/integer
   aggregateId: string;
   eventType: string;
   eventVersion: number;
@@ -19,11 +19,11 @@ export interface OutboxRowInternal {
 export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<OutboxRowInternal> => {
   const isPostgres = dbDriver === 'postgres';
 
-  // Auto-incrementing sequence for guaranteed order
+  // IMPORTANT: primary key WITHOUT auto-generation
   const id: any = {
-    type: isPostgres ? 'bigserial' : 'integer',
+    type: isPostgres ? 'bigint' : 'integer', // sqlite/sqljs use INTEGER (rowid-capable)
     primary: true,
-    generated: isPostgres ? true : 'increment',
+    generated: false,
   };
 
   // TypeORM column type for binary
@@ -46,8 +46,9 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
       },
       requestId: {
         type: 'varchar',
+        nullable: false,
       },
-      blockHeight: { type: 'int', nullable: true, default: true },
+      blockHeight: { type: 'int', nullable: true, default: null },
       payload: { type: binaryType as any }, // binary
       timestamp: {
         type: 'bigint',
@@ -59,15 +60,13 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
       },
       payload_uncompressed_bytes: { type: bytesType },
     },
-    uniques: [
-      {
-        name: 'UQ_outbox_aggregate_version',
-        columns: ['aggregateId', 'eventVersion'],
-      },
-    ],
+    uniques: [{ name: 'UQ_outbox_aggregate_version', columns: ['aggregateId', 'eventVersion'] }],
     indices: [
-      { name: 'IDX_outbox_ts_id', columns: ['timestamp', 'id'] },
-      // { name: 'IDX_outbox_agg_block', columns: ['aggregateId', 'blockHeight'] },
+      // With monotonic id we can order and range-scan by PRIMARY KEY only.
+      { name: 'IDX_outbox_id', columns: ['id'] },
+
+      // Keep a small helper index on timestamp if you still filter by time anywhere else.
+      // { name: 'IDX_outbox_ts', columns: ['timestamp'] },
     ],
   });
 };

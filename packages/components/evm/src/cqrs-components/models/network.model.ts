@@ -49,28 +49,6 @@ export class Network extends AggregateRoot {
   }
 
   /**
-   * Gets current chain statistics
-   * Complexity: O(1)
-   */
-  public getChainStats(): {
-    size: number;
-    maxSize: number;
-    currentHeight?: number;
-    firstHeight?: number;
-    isEmpty: boolean;
-    isFull: boolean;
-  } {
-    return {
-      size: this.chain.size,
-      maxSize: this.__maxSize,
-      currentHeight: this.chain.lastBlockHeight,
-      firstHeight: this.chain.head?.block.blockNumber,
-      isEmpty: this.chain.size === 0,
-      isFull: this.chain.size >= this.__maxSize,
-    };
-  }
-
-  /**
    * Gets the last block in chain
    * Complexity: O(1)
    */
@@ -102,28 +80,33 @@ export class Network extends AggregateRoot {
     return this.chain.toArray();
   }
 
-  // protected toJsonPayload(): any {
-  //   return {
-  //     // Convert Blockchain to an array of blocks for serialization
-  //     chain: this.chain.toArray(),
-  //     maxSize: this.__maxSize,
-  //   };
-  // }
+  // ===== SNAPSHOTS =====
 
-  // protected fromSnapshot(state: any): void {
-  //   if (state.chain && Array.isArray(state.chain)) {
-  //     this.chain = new Blockchain({
-  //       maxSize: state.maxSize || this.__maxSize,
-  //       baseBlockHeight: this._lastBlockHeight,
-  //     });
-  //     this.chain.fromArray(state.chain);
-  //   }
+  protected serializeUserState(): Record<string, any> {
+    return {
+      maxSize: this.__maxSize,
+      chain: this.chain.toArray(), // LightBlock[]
+    };
+  }
 
-  //   Object.setPrototypeOf(this, Network.prototype);
-  // }
+  protected restoreUserState(state: any): void {
+    if (typeof state?.maxSize === 'number') {
+      this.__maxSize = state.maxSize;
+    }
+
+    if (state?.chain && Array.isArray(state?.chain)) {
+      this.chain = new Blockchain({
+        maxSize: this.__maxSize,
+        baseBlockHeight: this.lastBlockHeight,
+      });
+      this.chain.fromArray(state.chain);
+    }
+
+    Object.setPrototypeOf(this, Network.prototype);
+  }
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
-    await this.apply(
+    this.apply(
       new EvmNetworkInitializedEvent(
         {
           aggregateId: this.aggregateId,
@@ -137,7 +120,7 @@ export class Network extends AggregateRoot {
 
   // Method to clear all blockchain data(for database cleaning)
   public async clearChain({ requestId }: { requestId: string }) {
-    await this.apply(
+    this.apply(
       new EvmNetworkClearedEvent(
         {
           aggregateId: this.aggregateId,
@@ -154,7 +137,7 @@ export class Network extends AggregateRoot {
       throw new BlockchainValidationError();
     }
 
-    return await this.apply(
+    return this.apply(
       new EvmNetworkBlocksAddedEvent(
         {
           aggregateId: this.aggregateId,
@@ -195,7 +178,7 @@ export class Network extends AggregateRoot {
       const isForkPoint = remoteBlock.hash === localBlock.hash && remoteBlock.parentHash === localBlock.parentHash;
 
       if (isForkPoint) {
-        return await this.apply(
+        return this.apply(
           new EvmNetworkReorganizedEvent(
             {
               aggregateId: this.aggregateId,

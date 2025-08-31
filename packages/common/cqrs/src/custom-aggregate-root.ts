@@ -12,6 +12,17 @@ export interface AggregateOptions {
 
   /** Interval between snapshots (default: 1000 versions) */
   snapshotInterval?: number;
+
+  /** Optional per-field snapshot adapters (instance-level) */
+  snapshotAdapters?: SnapshotAdapters;
+
+  /** Per-aggregate snapshot retention: keep at least N snapshots */
+  snapshotMinKeep?: number;
+
+  /** Per-aggregate snapshot retention: protect last K block heights (0 => disabled) */
+  snapshotKeepWindow?: number;
+
+  [k: string]: any;
 }
 
 const INTERNAL_EVENTS = Symbol();
@@ -22,46 +33,108 @@ const INTERNAL_EVENTS = Symbol();
  * Map/Set/BigInt/Date handled automatically.
  */
 export type SnapshotFieldAdapter = {
-  toJSON: (value: any) => any;
-  fromJSON: (raw: any) => any;
+  toJSON(value: any): any;
+  fromJSON(raw: any): any;
 };
 
-// ===== Built-in snapshot replacer / reviver =====
-// - Serializes Map/Set/Date/BigInt
-// - Respects user-provided field adapters (if any)
-function snapshotReplacer(adapters?: Record<string, SnapshotFieldAdapter>) {
-  const seen = new WeakSet();
-  return function (key: string, value: any) {
-    if (adapters && key && adapters[key]) return adapters[key]!.toJSON(value);
-    if (typeof value === 'bigint') return { __t: 'BigInt', v: value.toString() };
-    if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) return;
-      seen.add(value);
-      if (value instanceof Map) return { __t: 'Map', v: Array.from(value.entries()) };
-      if (value instanceof Set) return { __t: 'Set', v: Array.from(value.values()) };
-      if (value instanceof Date) return { __t: 'Date', v: value.toISOString() };
+/** Field adapters keyed by either top-level field name OR dot-path */
+export type SnapshotAdapters = Record<string, SnapshotFieldAdapter>;
+
+/** Utility: shallow-merge adapters, instance > static */
+function mergeAdapters(
+  staticAdapters?: SnapshotAdapters,
+  instanceAdapters?: SnapshotAdapters
+): SnapshotAdapters | undefined {
+  if (!staticAdapters && !instanceAdapters) return undefined;
+  return { ...(staticAdapters ?? {}), ...(instanceAdapters ?? {}) };
+}
+
+/** Match either exact key or dot-path */
+function matchAdapter(adapters: SnapshotAdapters | undefined, path: string, key: string) {
+  if (!adapters) return undefined;
+  // prefer full path match, else fall back to immediate key match
+  return adapters[path] ?? adapters[key];
+}
+
+/**
+ * Built-in snapshot replacer / reviver with:
+ * - Map/Set/Date/BigInt support
+ * - Optional per-field adapters (by key or dot-path)
+ * - Cycle guarding
+ */
+function createSnapshotReplacer(adapters?: SnapshotAdapters) {
+  const seen = new WeakSet<any>();
+  const pathStack: string[] = []; // track a dot-path
+
+  return function replacer(this: any, key: string, value: any) {
+    // update path
+    if (key) pathStack.push(key);
+    const currentPath = pathStack.join('.');
+
+    try {
+      const adapter = matchAdapter(adapters, currentPath, key);
+      if (adapter) return adapter.toJSON(value);
+
+      if (typeof value === 'bigint') return { __t: 'BigInt', v: value.toString() };
+
+      if (typeof value === 'object' && value !== null) {
+        if (seen.has(value)) return; // drop cycles
+        seen.add(value);
+        if (value instanceof Map) return { __t: 'Map', v: Array.from(value.entries()) };
+        if (value instanceof Set) return { __t: 'Set', v: Array.from(value.values()) };
+        if (value instanceof Date) return { __t: 'Date', v: value.toISOString() };
+      }
+      return value;
+    } finally {
+      if (key) pathStack.pop();
     }
-    return value;
   };
 }
 
-function snapshotReviver(adapters?: Record<string, SnapshotFieldAdapter>) {
-  return function (key: string, value: any) {
-    if (adapters && key && adapters[key]) return adapters[key]!.fromJSON(value);
-    if (value && typeof value === 'object' && '__t' in value) {
-      switch (value.__t) {
-        case 'Map':
-          return new Map(value.v);
-        case 'Set':
-          return new Set(value.v);
-        case 'Date':
-          return new Date(value.v);
-        case 'BigInt':
-          return BigInt(value.v);
+function createSnapshotReviver(adapters?: SnapshotAdapters) {
+  const pathStack: string[] = [];
+
+  return function reviver(this: any, key: string, value: any) {
+    if (key) pathStack.push(key);
+    const currentPath = pathStack.join('.');
+
+    try {
+      const adapter = matchAdapter(adapters, currentPath, key);
+      if (adapter) return adapter.fromJSON(value);
+
+      if (value && typeof value === 'object' && '__t' in value) {
+        switch (value.__t) {
+          case 'Map':
+            return new Map(value.v);
+          case 'Set':
+            return new Set(value.v);
+          case 'Date':
+            return new Date(value.v);
+          case 'BigInt':
+            return BigInt(value.v);
+        }
       }
+      return value;
+    } finally {
+      if (key) pathStack.pop();
     }
-    return value;
   };
+}
+
+function reviveObjectDeep<T>(input: T, reviver: (this: any, key: string, value: any) => any): T {
+  // We emulate JSON.parse’s reviver descent order:
+  function walk(holder: any, key: string) {
+    const value = holder[key];
+    if (value && typeof value === 'object') {
+      for (const k of Object.keys(value)) walk(value, k);
+    }
+    const revived = reviver.call(holder, key, value);
+    holder[key] = revived;
+  }
+  // Clone shallow to avoid mutating original payload reference
+  const root = Array.isArray(input) ? [...(input as any)] : { ...(input as any) };
+  walk({ '': root }, '');
+  return root as T;
 }
 
 export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
@@ -74,12 +147,13 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
   // Snapshot control parameters
   private _snapshotsEnabled: boolean = true;
   private _snapshotInterval: number = 1000;
+  protected _snapshotAdapters?: SnapshotAdapters;
+  // Retention parameters (per-aggregate)
+  private _snapshotMinKeep: number = Infinity;
+  private _snapshotKeepWindow: number = 0;
 
   // Pruning control parameter
   private _allowPruning: boolean = false;
-
-  // OPTIONAL: per-field snapshot adapters on child classes
-  // static snapshotFieldAdapters?: Record<string, SnapshotFieldAdapter>;
 
   constructor(aggregateId: string, lastBlockHeight: number, options?: AggregateOptions) {
     if (!aggregateId) throw new Error('aggregateId is required');
@@ -91,6 +165,10 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     if (options?.snapshotsEnabled !== undefined) this._snapshotsEnabled = options.snapshotsEnabled;
     if (options?.allowPruning !== undefined) this._allowPruning = options.allowPruning;
     if (options?.snapshotInterval !== undefined) this._snapshotInterval = options.snapshotInterval;
+    if (options?.SnapshotAdapters !== undefined) this._snapshotAdapters = options.SnapshotAdapters;
+    // per-aggregate retention (optional; service defaults apply if undefined)
+    if (options?.snapshotMinKeep !== undefined) this._snapshotMinKeep = options.snapshotMinKeep;
+    if (options?.snapshotKeepWindow !== undefined) this._snapshotKeepWindow = options.snapshotKeepWindow;
   }
 
   get aggregateId() {
@@ -107,6 +185,12 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
   }
   get snapshotInterval() {
     return this._snapshotInterval;
+  }
+  public getSnapshotRetention(): { minKeep: number; keepWindow: number } {
+    return {
+      minKeep: this._snapshotMinKeep,
+      keepWindow: this._snapshotKeepWindow,
+    };
   }
 
   /**
@@ -221,13 +305,13 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     return true;
   }
 
-  public async loadFromHistory<T extends E>(history: T[]): Promise<void> {
+  public loadFromHistory<T extends E>(history: T[]): void {
     for (const event of history) {
-      await this.apply(event, { fromHistory: true, skipHandler: false });
+      this.apply(event, { fromHistory: true, skipHandler: false });
     }
   }
 
-  public async apply<T extends E>(event: T, options?: { fromHistory?: boolean; skipHandler?: boolean }): Promise<void> {
+  public apply<T extends E>(event: T, options?: { fromHistory?: boolean; skipHandler?: boolean }): void {
     const fromHistory = !!options?.fromHistory;
     const skipHandler = !!options?.skipHandler;
 
@@ -260,11 +344,12 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
       ...userPayload,
     };
 
-    const adapters = (this.constructor as any).snapshotFieldAdapters as
-      | Record<string, SnapshotFieldAdapter>
-      | undefined;
+    const mergedAdapters = mergeAdapters(
+      (this.constructor as any).snapshotFieldAdapters as SnapshotAdapters | undefined,
+      this._snapshotAdapters
+    );
 
-    return JSON.stringify(payload, snapshotReplacer(adapters));
+    return JSON.stringify(payload, createSnapshotReplacer(mergedAdapters));
   }
 
   public fromSnapshot({
@@ -278,7 +363,7 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     blockHeight: number;
     payload: Record<string, any>;
   }): void {
-    this.constructor = { name: payload.__type } as typeof Object.constructor;
+    // this.constructor = { name: payload.__type } as typeof Object.constructor;
 
     if (!aggregateId) {
       throw new Error('aggregate Id is missed');
@@ -297,33 +382,32 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     this._lastBlockHeight = blockHeight;
     this._versionsFromSnapshot = 0; // Reset counter when loading from snapshot
 
-    const adapters = (this.constructor as any).snapshotFieldAdapters as
-      | Record<string, SnapshotFieldAdapter>
-      | undefined;
+    const mergedAdapters = mergeAdapters(
+      (this.constructor as any).snapshotFieldAdapters as SnapshotAdapters | undefined,
+      this._snapshotAdapters
+    );
 
-    const revived = JSON.parse(JSON.stringify(payload), snapshotReviver(adapters));
+    const revived = JSON.parse(JSON.stringify(payload), createSnapshotReviver(mergedAdapters));
+    // Option B (preferred): deep revive without stringify/parse
+    // const revived = reviveObjectDeep(payload, createSnapshotReviver(mergedAdapters));
 
-    // IMPORTANT: We don't need to restore the prototype and properties since restoreUserState() is not a static method,
-    // but a method inside an instance of the base aggregate.
-    // const instance = Object.create(CustomAggregateRoot.prototype);
-    // Object.assign(this, instance);
+    // First, assign all revived fields (default/adapter path)
+    Object.assign(this as any, revived);
+    // Then let the child fix up anything custom (partial is fine)
     this.restoreUserState(revived);
   }
 
-  // IMPORTANT: This method can be overridden by user for custom transformations
-  // System fields are always excluded at toSnapshotPayload level
-  protected serializeUserState(): any {
-    // Default implementation returns empty object
-    // User can override this method in derived classes for custom transformations
+  // Child may override to provide partial, field-level overrides.
+  // Return only the keys you want to replace in the snapshot payload.
+  // Everything else will be auto-collected & adapter-processed.
+  protected serializeUserState(): Record<string, any> {
     return {};
   }
 
-  // IMPORTANT: When an aggregate inherits from CustomAggregateRoot
-  // and has complex structures in its properties, for the restoration of which a prototype is required,
-  // then this restoreUserState method must be overridden in the aggregate itself,
-  // since it has access to the classes of its structures.
-  protected restoreUserState(state: any): void {
-    Object.assign(this, state);
+  // Child may override to fix-up cross-field invariants, rebuild prototypes,
+  // run migrations, decrypt fields, etc. Default: no-op.
+  protected restoreUserState(_revived: any): void {
+    // no-op by default
   }
 
   // IMPORTANT: System part - always executes, automatically serializes all properties
