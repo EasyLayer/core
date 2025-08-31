@@ -1,117 +1,60 @@
-import { Test } from '@nestjs/testing';
-import { ProducersManager } from '@easylayer/common/network-transport';
-import { LoggerModule } from '@easylayer/common/logger';
-import type { DomainEvent, SystemFields } from '@easylayer/common/cqrs';
-import { Publisher } from '../publisher';
+import "reflect-metadata";
+import { Publisher } from "../publisher";
 
-class TestEvent implements DomainEvent {
-  aggregateId: string;
-  requestId: string;
-  blockHeight: number;
+jest.mock("@easylayer/common/logger", () => ({
+  AppLogger: class { debug(){} error(){} },
+}));
 
-  constructor(
-    public readonly payload: any,
-    systemFields: SystemFields
-  ) {
-    this.aggregateId = systemFields.aggregateId;
-    this.requestId = systemFields.requestId;
-    this.blockHeight = systemFields.blockHeight;
-  }
-}
+jest.mock("@easylayer/common/cqrs", () => ({
+  setEventMetadata: () => {},
+}));
 
-class TestSystemEvent implements DomainEvent {
-  aggregateId: string;
-  requestId: string;
-  blockHeight: number;
+jest.mock("@easylayer/common/network-transport", () => ({
+  ProducersManager: class {
+    calls: any[] = [];
+    async streamWireWithAck(events: any[]) {
+      this.calls.push(events);
+    }
+  },
+}));
 
-  constructor(
-    public readonly payload: any,
-    systemFields: SystemFields
-  ) {
-    this.aggregateId = systemFields.aggregateId;
-    this.requestId = systemFields.requestId;
-    this.blockHeight = systemFields.blockHeight;
-  }
-}
+describe("Publisher", () => {
+  it("streams to transport then emits only system events locally with correct constructor name", async () => {
+    const { ProducersManager } = require("@easylayer/common/network-transport");
+    const { AppLogger } = require("@easylayer/common/logger");
 
-describe('Publisher', () => {
-  let publisher: Publisher;
-  let mockProducersManager: jest.Mocked<ProducersManager>;
+    const pm = new ProducersManager();
+    const logger = new AppLogger();
+    const system = ["sys-model"];
+    const pub = new Publisher(pm as any, logger as any, system);
 
-  beforeEach(async () => {
-    mockProducersManager = {
-      broadcast: jest.fn().mockResolvedValue(undefined),
-    } as any;
+    const got: any[] = [];
+    const sub = pub.events$.subscribe((e) => got.push(e));
 
-    const moduleRef = await Test.createTestingModule({
-      imports: [
-        LoggerModule.forRoot({ componentName: 'CqrsTransportModule' })
-      ],
-      providers: [
-        Publisher,
-        {
-          provide: ProducersManager,
-          useValue: mockProducersManager,
-        },
-      ],
-    }).compile();
+    const sysWire = {
+      modelName: "sys-model",
+      eventType: "UserCreated",
+      eventVersion: 1,
+      requestId: "r1",
+      blockHeight: 10,
+      payload: JSON.stringify({ a: 1 }),
+      timestamp: Date.now(),
+    };
+    const nonSysWire = { ...sysWire, modelName: "external" };
 
-    publisher = moduleRef.get(Publisher);
-  });
+    await pub.publishWireStreamBatchWithAck([sysWire, nonSysWire]);
 
-  describe('publish()', () => {
-    it('should broadcast event to external transport', async () => {
-      const event = new TestEvent({}, { aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
-      await publisher.publish(event);
+    await Promise.resolve();
+    await Promise.resolve();
 
-      expect(mockProducersManager.broadcast).toHaveBeenCalledWith([event]);
-    });
+    expect(pm.calls.length).toBe(1);
+    expect(pm.calls[0][0]).toMatchObject(sysWire);
 
-    it('should publish system event to local transport after external broadcast', async () => {
-      const event = new TestSystemEvent({}, { aggregateId: 'uniq2', blockHeight: 100, requestId: '123' });
-      const eventsSpy = jest.spyOn(publisher['subject$'], 'next');
+    expect(got.length).toBe(1);
+    expect(got[0].aggregateId).toBe("sys-model");
+    expect(got[0].constructor?.name).toBe("UserCreated");
+    expect(got[0].payload).toEqual({ a: 1 });
 
-      await publisher.publish(event);
-
-      expect(mockProducersManager.broadcast).toHaveBeenCalledWith([event]);
-      expect(eventsSpy).toHaveBeenCalledWith(event);
-    });
-
-    // it('should not publish non-system event to local transport', async () => {
-    //   const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
-    //   const eventsSpy = jest.spyOn(publisher['subject$'], 'next');
-
-    //   await publisher.publish(event);
-
-    //   expect(mockProducersManager.broadcast).toHaveBeenCalledWith([event]);
-    //   expect(eventsSpy).not.toHaveBeenCalled();
-    // });
-  });
-
-  describe('publishAll()', () => {
-    it('should broadcast all events to external transport', async () => {
-      const events = [
-        new TestEvent({}, { aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
-        new TestSystemEvent({}, { aggregateId: 'uniq2', blockHeight: 100, requestId: '123' }),
-      ];
-
-      await publisher.publishAll(events);
-
-      expect(mockProducersManager.broadcast).toHaveBeenCalledWith(events);
-    });
-
-    // it('should publish only system events to local transport', async () => {
-    //   const events = [
-    //     new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
-    //     new TestSystemEvent({ aggregateId: 'uniq2', blockHeight: 100, requestId: '123' }),
-    //   ];
-    //   const eventsSpy = jest.spyOn(publisher['subject$'], 'next');
-
-    //   await publisher.publishAll(events);
-
-    //   expect(mockProducersManager.broadcast).toHaveBeenCalledWith(events);
-    //   expect(eventsSpy).toHaveBeenCalledTimes(1);
-    //   expect(eventsSpy).toHaveBeenCalledWith(events[1]); // TestSystemEvent
-    // });
+    sub.unsubscribe();
   });
 });

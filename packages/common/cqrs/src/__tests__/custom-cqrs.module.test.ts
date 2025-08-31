@@ -4,7 +4,7 @@ import { CustomCqrsModule } from "../custom-cqrs.module";
 import { CommandBus, EventBus, QueryBus } from "@nestjs/cqrs";
 import { CustomExplorerService } from "../custom-explorer.service";
 
-describe("custom-cqrs.module.ts", () => {
+describe("CustomCQRSModule", () => {
   it("wires explorer -> buses onModuleInit", async () => {
     const events = [class H1 {} as any];
     const queries = [class Q1 {} as any];

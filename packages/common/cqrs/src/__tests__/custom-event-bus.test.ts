@@ -26,7 +26,7 @@ class BHandler implements IEventHandler<BEvent> {
   }
 }
 
-describe("custom-event-bus.ts", () => {
+describe("CustomEventBus", () => {
   it("publishes to handlers, preserves order, reports handler errors", async () => {
     Reflect.defineMetadata(EVENT_METADATA, { id: AEvent.name }, AEvent);
     Reflect.defineMetadata(EVENT_METADATA, { id: BEvent.name }, BEvent);

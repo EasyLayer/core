@@ -65,13 +65,13 @@ export class Publisher implements IEventPublisher<DomainEvent> {
 
         this.subject$.next(domainEvent);
       } catch (error) {
-        this.log.debug('Failed to parse system event payload', {
-          args: {
-            modelName: wireEvent.modelName,
-            eventType: wireEvent.eventType,
-            error: (error as any)?.message,
-          },
-        });
+        // this.log.debug('Failed to parse system event payload', {
+        //   args: {
+        //     modelName: wireEvent.modelName,
+        //     eventType: wireEvent.eventType,
+        //     error: (error as any)?.message,
+        //   },
+        // });
       }
     }
   }

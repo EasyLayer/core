@@ -2,7 +2,7 @@ import { BasicEvent, nowMicroseconds } from "../basic-event";
 
 class TestEvent extends BasicEvent {}
 
-describe("basic-event.ts", () => {
+describe("BasicEvent", () => {
   it("timestamp is strictly monotonic across two instances", () => {
     const e1 = new TestEvent(
       { aggregateId: "a", requestId: "r", blockHeight: 1 },

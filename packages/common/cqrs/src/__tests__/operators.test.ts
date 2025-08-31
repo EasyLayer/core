@@ -5,7 +5,7 @@ import { BasicEvent } from "../basic-event";
 
 class Ev extends BasicEvent {}
 
-describe("operators.ts", () => {
+describe("Operators", () => {
   it("executeWithRetry retries until success and re-emits input", async () => {
     jest.useFakeTimers({ now: Date.now() });
 

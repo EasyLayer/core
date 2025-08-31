@@ -23,6 +23,14 @@ export interface TransportModuleOptions {
 
 @Module({})
 export class TransportModule {
+  static forFeature(): DynamicModule {
+    return {
+      module: TransportModule,
+      providers: [],
+      exports: [ProducersManager],
+    };
+  }
+
   static forRoot(options: TransportModuleOptions): DynamicModule {
     const imports: any[] = [LoggerModule.forRoot({ componentName: 'TransportModule' })];
     const producerTokens: string[] = [];
