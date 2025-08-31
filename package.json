@@ -31,7 +31,7 @@
     "lint:fix": "yarn workspaces foreach -A run lint:fix",
     "prepare": "ts-patch install -s && husky install",
     "pre-commit": "yarn workspaces foreach -A run lint",
-    "pre-push": "",
+    "pre-push": "yarn workspaces foreach -A run test:unit",
     "commit": "cz",
     "docs:development:generate": "typedoc",
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s -r 1 -k lerna.json"

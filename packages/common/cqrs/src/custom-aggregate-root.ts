@@ -56,18 +56,53 @@ function matchAdapter(adapters: SnapshotAdapters | undefined, path: string, key:
   return adapters[path] ?? adapters[key];
 }
 
-/**
- * Built-in snapshot replacer / reviver with:
- * - Map/Set/Date/BigInt support
- * - Optional per-field adapters (by key or dot-path)
- * - Cycle guarding
- */
-function createSnapshotReplacer(adapters?: SnapshotAdapters) {
-  const seen = new WeakSet<any>();
-  const pathStack: string[] = []; // track a dot-path
+function reviveObjectDeepWithAdapters(input: any, adapters?: SnapshotAdapters): any {
+  const pathStack: string[] = [];
 
-  return function replacer(this: any, key: string, value: any) {
-    // update path
+  const walk = (value: any, key: string): any => {
+    if (key) pathStack.push(key);
+    const currentPath = pathStack.join('.');
+
+    try {
+      const adapter = matchAdapter(adapters, currentPath, key);
+      if (adapter) return adapter.fromJSON(value);
+
+      if (value && typeof value === 'object') {
+        if ('__t' in value) {
+          switch ((value as any).__t) {
+            case 'Map':
+              return new Map((value as any).v.map(([k, v]: [string, any]) => [k, walk(v, String(k))]));
+            case 'Set':
+              return new Set((value as any).v.map((v: any, i: number) => walk(v, String(i))));
+            case 'Date':
+              return new Date((value as any).v);
+            case 'BigInt':
+              return BigInt((value as any).v);
+          }
+        }
+        if (Array.isArray(value)) {
+          return value.map((v, i) => walk(v, String(i)));
+        }
+        const out: any = {};
+        for (const k of Object.keys(value)) {
+          out[k] = walk((value as any)[k], k);
+        }
+        return out;
+      }
+      return value;
+    } finally {
+      if (key) pathStack.pop();
+    }
+  };
+
+  return walk(input, '');
+}
+
+function serializeObjectDeep(input: any, adapters?: SnapshotAdapters): any {
+  const seen = new WeakSet<any>();
+  const pathStack: string[] = [];
+
+  const walk = (value: any, key: string): any => {
     if (key) pathStack.push(key);
     const currentPath = pathStack.join('.');
 
@@ -77,64 +112,38 @@ function createSnapshotReplacer(adapters?: SnapshotAdapters) {
 
       if (typeof value === 'bigint') return { __t: 'BigInt', v: value.toString() };
 
-      if (typeof value === 'object' && value !== null) {
-        if (seen.has(value)) return; // drop cycles
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) return undefined;
         seen.add(value);
-        if (value instanceof Map) return { __t: 'Map', v: Array.from(value.entries()) };
-        if (value instanceof Set) return { __t: 'Set', v: Array.from(value.values()) };
-        if (value instanceof Date) return { __t: 'Date', v: value.toISOString() };
-      }
-      return value;
-    } finally {
-      if (key) pathStack.pop();
-    }
-  };
-}
 
-function createSnapshotReviver(adapters?: SnapshotAdapters) {
-  const pathStack: string[] = [];
-
-  return function reviver(this: any, key: string, value: any) {
-    if (key) pathStack.push(key);
-    const currentPath = pathStack.join('.');
-
-    try {
-      const adapter = matchAdapter(adapters, currentPath, key);
-      if (adapter) return adapter.fromJSON(value);
-
-      if (value && typeof value === 'object' && '__t' in value) {
-        switch (value.__t) {
-          case 'Map':
-            return new Map(value.v);
-          case 'Set':
-            return new Set(value.v);
-          case 'Date':
-            return new Date(value.v);
-          case 'BigInt':
-            return BigInt(value.v);
+        if (value instanceof Map) {
+          const arr = Array.from(value.entries()).map(([k, v]) => [k, walk(v, String(k))]);
+          return { __t: 'Map', v: arr };
         }
+        if (value instanceof Set) {
+          const arr = Array.from(value.values()).map((v) => walk(v, ''));
+          return { __t: 'Set', v: arr };
+        }
+        if (value instanceof Date) {
+          return { __t: 'Date', v: value.toISOString() };
+        }
+        if (Array.isArray(value)) {
+          return value.map((v, i) => walk(v, String(i)));
+        }
+        const out: any = {};
+        for (const k of Object.keys(value)) {
+          const v = walk((value as any)[k], k);
+          if (v !== undefined) out[k] = v;
+        }
+        return out;
       }
       return value;
     } finally {
       if (key) pathStack.pop();
     }
   };
-}
 
-function reviveObjectDeep<T>(input: T, reviver: (this: any, key: string, value: any) => any): T {
-  // We emulate JSON.parse’s reviver descent order:
-  function walk(holder: any, key: string) {
-    const value = holder[key];
-    if (value && typeof value === 'object') {
-      for (const k of Object.keys(value)) walk(value, k);
-    }
-    const revived = reviver.call(holder, key, value);
-    holder[key] = revived;
-  }
-  // Clone shallow to avoid mutating original payload reference
-  const root = Array.isArray(input) ? [...(input as any)] : { ...(input as any) };
-  walk({ '': root }, '');
-  return root as T;
+  return walk(input, '');
 }
 
 export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
@@ -165,7 +174,7 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     if (options?.snapshotsEnabled !== undefined) this._snapshotsEnabled = options.snapshotsEnabled;
     if (options?.allowPruning !== undefined) this._allowPruning = options.allowPruning;
     if (options?.snapshotInterval !== undefined) this._snapshotInterval = options.snapshotInterval;
-    if (options?.SnapshotAdapters !== undefined) this._snapshotAdapters = options.SnapshotAdapters;
+    if (options?.snapshotAdapters !== undefined) this._snapshotAdapters = options.snapshotAdapters;
     // per-aggregate retention (optional; service defaults apply if undefined)
     if (options?.snapshotMinKeep !== undefined) this._snapshotMinKeep = options.snapshotMinKeep;
     if (options?.snapshotKeepWindow !== undefined) this._snapshotKeepWindow = options.snapshotKeepWindow;
@@ -349,7 +358,7 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
       this._snapshotAdapters
     );
 
-    return JSON.stringify(payload, createSnapshotReplacer(mergedAdapters));
+    return JSON.stringify(serializeObjectDeep(payload, mergedAdapters));
   }
 
   public fromSnapshot({
@@ -387,9 +396,7 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
       this._snapshotAdapters
     );
 
-    const revived = JSON.parse(JSON.stringify(payload), createSnapshotReviver(mergedAdapters));
-    // Option B (preferred): deep revive without stringify/parse
-    // const revived = reviveObjectDeep(payload, createSnapshotReviver(mergedAdapters));
+    const revived = reviveObjectDeepWithAdapters(payload, mergedAdapters);
 
     // First, assign all revived fields (default/adapter path)
     Object.assign(this as any, revived);

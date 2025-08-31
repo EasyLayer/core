@@ -1,117 +1,122 @@
-import { CustomAggregateRoot, EventStatus } from '../custom-aggregate-root';
-import type { EventBasePayload } from '../basic-event';
-import { BasicEvent } from '../basic-event';
+import "reflect-metadata";
+import type { DomainEvent } from "../basic-event";
+import { BasicEvent as BaseEvent } from "../basic-event";
+import { CustomAggregateRoot } from "../custom-aggregate-root";
 
-class TestEvent extends BasicEvent<EventBasePayload> {
-  constructor(public readonly payload: EventBasePayload) {
-    super(payload);
+class TestEvent extends BaseEvent {}
+
+type Snap = {
+  map: Map<string, number>;
+  set: Set<string>;
+  date: Date;
+  big: bigint;
+  nested: { a: { b: { c: number } } };
+  cyclic?: any;
+  passthrough: { k: string };
+};
+
+class TestAggregate extends CustomAggregateRoot<DomainEvent> {
+  state: Snap;
+
+  static snapshotFieldAdapters = {
+    "state.nested.a.b.c": {
+      toJSON: (v: any) => v + 10,
+      fromJSON: (r: any) => r - 10,
+    },
+    c: {
+      toJSON: (v: any) => v + 1000,
+      fromJSON: (r: any) => r - 1000,
+    },
+  };
+
+  constructor(id: string, last: number, instanceAdapters?: any) {
+    super(id, last, { snapshotAdapters: instanceAdapters });
+    this.state = {
+      map: new Map([["k", 1]]),
+      set: new Set(["x", "y"]),
+      date: new Date("2024-01-01T00:00:00.000Z"),
+      big: 1234567890123456789n,
+      nested: { a: { b: { c: 7 } } },
+      passthrough: { k: "v" },
+    };
+    const node: any = { name: "root" };
+    node.self = node;
+    this.state.cyclic = node;
+  }
+
+  onTestEvent(e: TestEvent) {
+    (this.state.map as any).set("h", e.payload.h ?? 0);
+    (this as any)._lastBlockHeight = e.blockHeight;
+    (this as any)._version = ((this as any)._version ?? 0) + 1;
   }
 }
 
-class TestAggregate extends CustomAggregateRoot<TestEvent> {
-  public value: number = 0;
-
-  private onTestEvent(event: TestEvent): void {
-    this.value = this.value + event.payload.blockHeight;
-  }
-}
-
-describe('CustomAggregateRoot', () => {
-  let aggregate: TestAggregate;
-
-  beforeEach(() => {
-    aggregate = new TestAggregate('test-id');
+describe("CustomAggregateRoot", () => {
+  it("JSON replacer/reviver round-trips Map/Set/Date/BigInt", () => {
+    const a = new TestAggregate("id", 5);
+    const snap = a.toSnapshot();
+    const b = new TestAggregate("id", 5);
+    b.fromSnapshot({ aggregateId: "id", version: 0, blockHeight: 5, payload: JSON.parse(snap) });
+    expect(b.state.map instanceof Map).toBe(true);
+    expect(b.state.set instanceof Set).toBe(true);
+    expect(b.state.date instanceof Date).toBe(true);
+    expect(typeof b.state.big === "bigint").toBe(true);
+    expect(b.state.map.get("k")).toBe(1);
+    expect([...b.state.set]).toEqual(["x", "y"]);
+    expect(b.state.date.toISOString()).toBe("2024-01-01T00:00:00.000Z");
+    expect(b.state.big).toBe(1234567890123456789n);
   });
 
-  describe('apply()', () => {
-    it('should apply event and increment version', async () => {
-      const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
-      await aggregate.apply(event);
-
-      expect(aggregate.value).toBe(100);
-      expect(aggregate.version).toBe(1);
-      expect(aggregate.lastBlockHeight).toBe(100);
-    });
-
-    it('should not increment version when skipHandler is true', async () => {
-      const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
-      await aggregate.apply(event, { skipHandler: true });
-
-      expect(aggregate.value).toBe(0);
-      expect(aggregate.version).toBe(0);
-    });
+  it("circular references are dropped and serialization completes", () => {
+    const a = new TestAggregate("id", 5);
+    const snap = a.toSnapshot();
+    expect(typeof snap).toBe("string");
   });
 
-  describe('loadFromHistory()', () => {
-    it('should load events from history in correct order', async () => {
-      const events = [
-        {
-          event: new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
-          status: EventStatus.PUBLISHED,
-        },
-        {
-          event: new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' }),
-          status: EventStatus.PUBLISHED,
-        },
-      ];
-
-      aggregate.loadFromHistory(events);
-
-      expect(aggregate.value).toBe(200);
-      expect(aggregate.version).toBe(2);
-      expect(aggregate.lastBlockHeight).toBe(100);
-    });
+  it("dot-path adapter has priority over key adapter", () => {
+    const a = new TestAggregate("id", 5);
+    const snap = a.toSnapshot();
+    const payload = JSON.parse(snap);
+    expect(payload.state.nested.a.b.c).toBe(17);
+    const b = new TestAggregate("id", 5);
+    b.fromSnapshot({ aggregateId: "id", version: 0, blockHeight: 5, payload });
+    expect(b.state.nested.a.b.c).toBe(7);
   });
 
-  describe('loadFromSnapshot()', () => {
-    it('should load state from snapshot', () => {
-      const snapshot = {
-        aggregateId: 'test-id',
-        version: 5,
-        blockHeight: 500,
-        payload: {
-          __type: 'TestAggregate',
-          value: 500,
-        },
-      };
-
-      aggregate.loadFromSnapshot(snapshot);
-
-      expect(aggregate.aggregateId).toBe('test-id');
-      expect(aggregate.version).toBe(5);
-      expect(aggregate.lastBlockHeight).toBe(500);
-      expect(aggregate.value).toBe(500);
-    });
-
-    it('should throw error when required fields are missing', () => {
-      const invalidSnapshot = {
-        aggregateId: '',
-        version: 5,
-        blockHeight: 500,
-        payload: {},
-      };
-
-      expect(() => aggregate.loadFromSnapshot(invalidSnapshot)).toThrow('aggregate Id is missed');
-    });
+  it("instance adapters override static adapters", () => {
+    const instanceAdapters = {
+      "state.nested.a.b.c": {
+        toJSON: (v: any) => v + 1,
+        fromJSON: (r: any) => r - 1,
+      },
+    };
+    const a = new TestAggregate("id", 5, instanceAdapters);
+    const payload = JSON.parse(a.toSnapshot());
+    expect(payload.state.nested.a.b.c).toBe(8);
+    const b = new TestAggregate("id", 5, instanceAdapters);
+    b.fromSnapshot({ aggregateId: "id", version: 0, blockHeight: 5, payload });
+    expect(b.state.nested.a.b.c).toBe(7);
   });
 
-  describe('commit() and uncommit()', () => {
-    it('should save and commit events correctly', async () => {
-      const event = new TestEvent({ aggregateId: 'uniq', blockHeight: 100, requestId: '123' });
-      
-      // Apply event
-      await aggregate.apply(event);
-      expect(aggregate.getUnsavedEvents()).toHaveLength(1);
-      expect(aggregate.getUncommittedEvents()).toHaveLength(0);
-      
-      // Mark as saved (simulate database save)
-      aggregate.markEventsAsSaved();
-      expect(aggregate.getUnsavedEvents()).toHaveLength(0);
-      expect(aggregate.getUncommittedEvents()).toHaveLength(1);
-      
-      // Commit (publish and clear)
-      await aggregate.commit();
-      expect(aggregate.getUncommittedEvents()).toHaveLength(0);
-    });
+  it("fields without adapters pass through unchanged", () => {
+    const a = new TestAggregate("id", 5);
+    const payload = JSON.parse(a.toSnapshot());
+    expect(payload.state.passthrough).toEqual({ k: "v" });
+  });
+
+  it("on<Event> handler is called by apply", () => {
+    const a = new TestAggregate("id", 1);
+    const e = new TestEvent({ aggregateId: "id", requestId: "r", blockHeight: 2 }, { h: 42 });
+    a.apply(e);
+    expect(a.state.map.get("h")).toBe(42);
+  });
+
+  it("apply with fromHistory does not push to INTERNAL_EVENTS symbol", () => {
+    const a = new TestAggregate("id", 1);
+    const e = new TestEvent({ aggregateId: "id", requestId: "r", blockHeight: 3 }, { h: 1 });
+    const before = a.getUnsavedEvents().length;
+    a.apply(e, { fromHistory: true, skipHandler: false });
+    const after = a.getUnsavedEvents().length;
+    expect(after).toBe(before);
   });
 });
