@@ -6,6 +6,10 @@ import { serializeEventRow, deserializeToDomainEvent } from '../event-data.model
 import { deserializeToOutboxRaw } from '../outbox.model';
 import { serializeSnapshot, deserializeSnapshot } from '../snapshots.model';
 
+function toBuffer(x: any): Buffer {
+  return Buffer.isBuffer(x) ? x : Buffer.from(x);
+}
+
 /**
  * Browser (sql.js / IndexedDB) adapter.
  *
@@ -321,7 +325,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
         eventVersion: r.eventVersion,
         requestId: r.requestId,
         blockHeight: r.blockHeight!,
-        payload: r.payload,
+        payload: toBuffer(r.payload),
         isCompressed: !!r.isCompressed,
         timestamp: r.timestamp,
       });
@@ -415,7 +419,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
         aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
         blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
         version: Number(rows[0].version),
-        payload: rows[0].payload,
+        payload: toBuffer(rows[0].payload),
         isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
         createdAt: new Date(),
       },
@@ -459,7 +463,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
             type: r.type,
             requestId: r.requestId,
             blockHeight: r.blockHeight!,
-            payload: r.payload,
+            payload: toBuffer(r.payload),
             isCompressed: !!r.isCompressed,
             version: r.version,
             timestamp: r.timestamp,
@@ -593,7 +597,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
             type: r.type,
             requestId: r.requestId,
             blockHeight: r.blockHeight!,
-            payload: r.payload,
+            payload: toBuffer(r.payload),
             isCompressed: !!r.isCompressed,
             version: r.version,
             timestamp: r.timestamp,
@@ -694,7 +698,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
               type: r.type,
               requestId: r.requestId,
               blockHeight: r.blockHeight!,
-              payload: r.payload,
+              payload: toBuffer(r.payload),
               isCompressed: !!r.isCompressed,
               version: r.version,
               timestamp: r.timestamp,

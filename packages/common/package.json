@@ -52,6 +52,10 @@
     "./context": {
       "module": "./context/dist/esm/index.mjs",
       "default": "./context/dist/index.js"
+    },
+    "./framework": {
+      "module": "./framework/dist/esm/index.mjs",
+      "default": "./framework/dist/index.js"
     }
   },
   "files": [
@@ -68,7 +72,8 @@
     "eventstore/dist",
     "network-transport/dist",
     "secure-storage/dist",
-    "context/dist"
+    "context/dist",
+    "framework/dist"
   ],
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",

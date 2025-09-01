@@ -8,3 +8,4 @@ export * from './network-transport/dist/index';
 export * from './secure-storage/dist/index';
 export * from './shared-interfaces/dist/index';
 export * from './context/dist/index';
+export * from './famework/dist/index';

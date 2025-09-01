@@ -977,6 +977,27 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@easylayer/framework@workspace:packages/common/framework":
+  version: 0.0.0-use.local
+  resolution: "@easylayer/framework@workspace:packages/common/framework"
+  dependencies:
+    "@nestjs/common": "npm:10.2.10"
+    "@nestjs/testing": "npm:10.2.10"
+    "@rollup/plugin-typescript": "npm:11.1.6"
+    "@types/jest": "npm:29.5.11"
+    "@types/node": "npm:20.10.4"
+    "@types/uuid": "npm:9.0.7"
+    jest: "npm:29.7.0"
+    reflect-metadata: "npm:0.1.14"
+    rollup: "npm:4.17.2"
+    rxjs: "npm:7.8.1"
+    ts-jest: "npm:29.1.1"
+    ts-node: "npm:10.9.2"
+    typescript: "npm:5.3.3"
+    uuid: "npm:9.0.1"
+  languageName: unknown
+  linkType: soft
+
 "@easylayer/logger@workspace:packages/common/logger":
   version: 0.0.0-use.local
   resolution: "@easylayer/logger@workspace:packages/common/logger"

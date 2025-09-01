@@ -9,5 +9,6 @@ module.exports = {
     ...require('./network-transport/dist'),
     ...require('./secure-storage/dist'),
     ...require('./shared-interfaces/dist'),
-    ...require('./context/dist')
+    ...require('./context/dist'),
+    ...require('./framework/dist')
 };
