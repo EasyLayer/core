@@ -1,3 +1,3 @@
 export * from './base-consumer';
 export * from './base-producer';
-export * from './producers-manager';
+export * from './outbox-stream-manager';

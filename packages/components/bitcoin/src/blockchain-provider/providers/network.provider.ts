@@ -74,10 +74,9 @@ export class NetworkProvider extends BaseProvider {
    * Time complexity: O(k) where k = number of blocks requested
    *
    * @param hashes Array of block hashes
-   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input, null for missing blocks
    */
-  async getManyBlocksHexByHashes(hashes: string[], verifyMerkle: boolean = false): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksHexByHashes(hashes: string[]): Promise<(UniversalBlock | null)[]> {
     try {
       const hexBlockBuffers = await this.transport.requestHexBlocks(hashes);
 
@@ -108,13 +107,9 @@ export class NetworkProvider extends BaseProvider {
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
-   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input heights, null for missing blocks
    */
-  async getManyBlocksHexByHeights(
-    heights: number[],
-    verifyMerkle: boolean = false
-  ): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {
     const hashes = await this.getManyBlockHashesByHeights(heights);
     const validHashes = hashes.filter((hash): hash is string => hash !== null);
 
@@ -122,7 +117,7 @@ export class NetworkProvider extends BaseProvider {
       return new Array(heights.length).fill(null);
     }
 
-    const hexBlocks = await this.getManyBlocksHexByHashes(validHashes, false);
+    const hexBlocks = await this.getManyBlocksHexByHashes(validHashes);
 
     const hashToBlock = new Map<string, UniversalBlock | null>();
     validHashes.forEach((hash, index) => {
@@ -152,14 +147,9 @@ export class NetworkProvider extends BaseProvider {
    *
    * @param hashes Array of block hashes
    * @param verbosity Verbosity level (1=with tx hashes, 2=with full tx objects)
-   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input, null for missing blocks
    */
-  async getManyBlocksByHashes(
-    hashes: string[],
-    verbosity: number = 1,
-    verifyMerkle: boolean = false
-  ): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksByHashes(hashes: string[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
     const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, verbosity] }));
     const results = await this.transport.batchCall(requests);
 
@@ -183,14 +173,9 @@ export class NetworkProvider extends BaseProvider {
    *
    * @param heights Array of block heights
    * @param verbosity Verbosity level (1=with tx hashes, 2=with full tx objects)
-   * @param verifyMerkle Deprecated parameter, ignored
    * @returns Array of blocks in same order as input heights, null for missing blocks
    */
-  async getManyBlocksByHeights(
-    heights: number[],
-    verbosity: number = 1,
-    verifyMerkle: boolean = false
-  ): Promise<(UniversalBlock | null)[]> {
+  async getManyBlocksByHeights(heights: number[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
     const blocksHashes = await this.getManyBlockHashesByHeights(heights);
     const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
 
@@ -198,7 +183,7 @@ export class NetworkProvider extends BaseProvider {
       return new Array(heights.length).fill(null);
     }
 
-    const blocks = await this.getManyBlocksByHashes(validHashes, verbosity, false);
+    const blocks = await this.getManyBlocksByHashes(validHashes, verbosity);
 
     const hashToBlock = new Map<string, UniversalBlock | null>();
     validHashes.forEach((hash, index) => {

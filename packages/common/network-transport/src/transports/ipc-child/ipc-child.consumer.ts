@@ -1,110 +1,82 @@
-import { BaseConsumer } from '../../core';
-import type { AppLogger } from '@easylayer/common/logger';
-import type {
-  Envelope,
-  OutboxStreamAckPayload,
-  RegisterStreamConsumerPayload,
-  RpcRequestPayload,
-  RpcResponsePayload,
-} from '../../shared';
+import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
+import { QueryBus } from '@easylayer/common/cqrs';
+import { BaseConsumer } from '../../core/base-consumer';
+import type { Envelope, QueryRequestPayload, QueryResponsePayload, PongPayload } from '../../shared';
 import { Actions } from '../../shared';
+import { IpcChildProducer } from './ipc-child.producer';
 
-/**
- * IPC child consumer:
- * - Handles ping→pong, RPC with correlationId, and can process outbox batch
- *   (if child acts as the receiver) and reply OutboxStreamAck with same correlationId.
- * Memory: O(1) per message; allocations = reply envelopes only.
- */
-export class IpcChildConsumer extends BaseConsumer {
-  private readonly token?: string;
+export interface IpcServerOptions {
+  type: 'ipc';
+  maxMessageSize?: number;
+  heartbeatTimeout?: number;
+  connectionTimeout?: number;
+  token?: string;
+}
 
-  constructor(log: AppLogger, opts?: { token?: string }) {
-    super(log);
-    this.token = opts?.token;
-    this.attach();
+@Injectable()
+export class IpcChildConsumer extends BaseConsumer implements OnModuleDestroy {
+  constructor(
+    private readonly queryBus: QueryBus,
+    private readonly producer: IpcChildProducer,
+    @Inject('IPC_OPTIONS') private readonly options: IpcServerOptions
+  ) {
+    super();
+    if (!process.send) {
+      throw new Error('IPC transport requires running in a child process with IPC channel');
+    }
+    process.on('message', this.handleMessage);
   }
 
-  private attach() {
-    process.on('message', async (raw: any) => {
-      if (typeof raw !== 'string') return;
-      let msg: Envelope<any>;
-      try {
-        msg = JSON.parse(raw);
-      } catch {
-        return;
-      }
-      await this.onMessage(msg);
-    });
+  public async onModuleDestroy(): Promise<void> {
+    process.removeListener('message', this.handleMessage);
   }
 
-  protected async handleBusinessMessage(msg: Envelope, _ctx?: unknown): Promise<void> {
-    switch (msg.action) {
-      case Actions.RegisterStreamConsumer: {
-        // Usually parent initiates for WS; IPC child can ignore or implement handshake if needed.
-        return;
-      }
+  private handleMessage = async (raw: unknown) => {
+    if (!raw) return;
+    const message: Envelope<any> = typeof raw === 'string' ? JSON.parse(raw as string) : (raw as any);
+    await this.onMessage(message);
+  };
 
-      case Actions.OutboxStreamBatch: {
-        // If child is the actual consumer of outbox -> process and ACK with the same correlationId.
-        // Here we just send a generic allOk=true ack to demonstrate the strict correlationId round-trip.
-        const ack: Envelope<OutboxStreamAckPayload> = {
-          action: Actions.OutboxStreamAck,
-          correlationId: msg.correlationId, // MUST mirror
-          payload: { allOk: true },
-          timestamp: Date.now(),
-        };
-        await this._send(ack);
-        return;
+  protected async handlePong(message: Envelope<PongPayload>): Promise<void> {
+    const p = message.payload;
+    if (this.options.token && p?.nonce && p.proof) {
+      if (this.producer.verifyProof(p.nonce, p.ts || Date.now(), p.proof)) {
+        this.producer.onPong();
       }
-
-      case Actions.RpcRequest: {
-        const req = (msg.payload || {}) as RpcRequestPayload;
-        try {
-          const data = await this.dispatch(req.route, req.data);
-          const resp: Envelope<RpcResponsePayload> = {
-            action: Actions.RpcResponse,
-            correlationId: msg.correlationId,
-            payload: { route: req.route, data },
-            timestamp: Date.now(),
-            requestId: msg.requestId,
-          };
-          await this._send(resp);
-        } catch (e: any) {
-          const resp: Envelope<RpcResponsePayload> = {
-            action: Actions.RpcResponse,
-            correlationId: msg.correlationId,
-            payload: { route: req.route, err: String(e?.message ?? e) },
-            timestamp: Date.now(),
-            requestId: msg.requestId,
-          };
-          await this._send(resp);
-        }
-        return;
-      }
-
-      default:
-        return;
+    } else {
+      this.producer.onPong();
     }
   }
 
-  protected async _send(msg: Envelope): Promise<void> {
-    if (process.send) process.send(JSON.stringify(msg));
-  }
-
-  // Application routes living in the child process (example)
-  private async dispatch(route: string, data: any): Promise<any> {
-    switch (route) {
-      case 'health':
-        return { ok: true };
-      default:
-        return { ok: true, route, echo: data };
+  protected async handleQueryMessage(message: Envelope<QueryRequestPayload>): Promise<void> {
+    const name = message?.payload?.name ?? '';
+    const dto = message?.payload?.dto;
+    try {
+      const data = await this.executeQuery(this.queryBus, { name, dto });
+      const reply: Envelope<QueryResponsePayload> = {
+        action: Actions.QueryResponse,
+        payload: { name, data },
+        correlationId: message.correlationId,
+        requestId: message.requestId,
+        timestamp: Date.now(),
+      };
+      await this._send(reply);
+    } catch (e: any) {
+      const reply: Envelope<QueryResponsePayload> = {
+        action: Actions.QueryResponse,
+        payload: { name, err: String(e?.message ?? e) },
+        correlationId: message.correlationId,
+        requestId: message.requestId,
+        timestamp: Date.now(),
+      };
+      await this._send(reply);
     }
   }
 
-  /** Optional: child can proactively register as stream-consumer (if your protocol needs it). */
-  public registerAsStreamConsumer() {
-    const payload: RegisterStreamConsumerPayload = { token: this.token };
-    const m: Envelope = { action: Actions.RegisterStreamConsumer, payload, timestamp: Date.now() };
-    this._send(m);
+  protected async handleBusinessMessage(_message: Envelope): Promise<void> {
+    return;
+  }
+  protected async _send(message: Envelope): Promise<void> {
+    await this.producer.sendMessage(message);
   }
 }

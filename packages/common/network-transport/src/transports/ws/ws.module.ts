@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import { createServer, Server as HttpsServer } from 'node:https';
 import { createServer as createHttpServer, Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, Socket } from 'socket.io';
-import { LoggerModule, AppLogger } from '@easylayer/common/logger';
+import { QueryBus } from '@easylayer/common/cqrs';
+import { WsProducer, WsProducerConfig } from './ws.producer';
 import { WsGateway } from './ws.gateway';
-import { WsProducer } from './ws.producer';
 
 export interface WsServerOptions {
   type: 'ws';
@@ -17,9 +17,9 @@ export interface WsServerOptions {
     origin: string | string[];
     credentials?: boolean;
   };
-  heartbeatTimeout?: number; // e.g. 10000 (ms)
-  connectionTimeout?: number; // used as ackTimeout for producer, e.g. 5000
-  token?: string; // optional auth token for registerStreamConsumer
+  heartbeatTimeout?: number;
+  connectionTimeout?: number;
+  token?: string;
   ssl?: {
     enabled: boolean;
     key?: string;
@@ -30,14 +30,13 @@ export interface WsServerOptions {
 }
 
 class WsServerManager implements OnModuleInit, OnModuleDestroy {
-  private httpServer: any;
+  private httpServer: HttpServer | HttpsServer | null = null;
   private ioServer: SocketIOServer | null = null;
 
   constructor(
     @Inject('WS_OPTIONS') private readonly options: WsServerOptions,
     private readonly producer: WsProducer,
-    private readonly gateway: WsGateway,
-    private readonly logger: AppLogger
+    private readonly gateway: WsGateway
   ) {}
 
   async onModuleInit() {
@@ -50,7 +49,6 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
       transports = ['websocket', 'polling'],
     } = this.options;
 
-    // 1) Create HTTP or HTTPS server
     if (ssl?.enabled && ssl.key && ssl.cert) {
       const httpsOptions = {
         key: readFileSync(ssl.key, 'utf8'),
@@ -58,38 +56,29 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
         ...(ssl.ca && { ca: readFileSync(ssl.ca, 'utf8') }),
       };
       this.httpServer = createServer(httpsOptions);
-      this.logger.info(`Creating WSS server on ${host}:${port}${path}`);
     } else {
       this.httpServer = createHttpServer();
-      this.logger.info(`Creating WS server on ${host}:${port}${path}`);
     }
 
-    // 2) Single Socket.IO server instance
     this.ioServer = new SocketIOServer(this.httpServer, {
       path,
       cors: cors || { origin: '*', credentials: false },
       transports,
-      // ping timers are Socket.IO internal; we still keep our own heartbeat in producer
       pingTimeout: this.options.heartbeatTimeout || 10000,
       pingInterval: Math.max(500, Math.floor((this.options.heartbeatTimeout || 10000) / 2)),
       maxHttpBufferSize: this.options.maxMessageSize || 1024 * 1024,
     });
 
-    // Pass references to producer and gateway
     this.producer.setServer(this.ioServer);
     this.gateway.setServer(this.ioServer);
 
-    this.setupSocketIOHandlers();
-
-    // 3) Start listening
-    this.httpServer.listen(port, host, () => {
-      const protocol = ssl?.enabled ? 'wss' : 'ws';
-      this.logger.info(`WebSocket server listening on ${protocol}://${host}:${port}${path}`);
+    this.ioServer.on('connection', (socket: Socket) => {
+      socket.on('disconnect', () => {});
+      socket.on('message', (data) => this.gateway.handleMessage(data, socket).catch(() => {}));
     });
 
-    this.httpServer.on('error', (error: any) => {
-      this.logger.error('WebSocket server error:', { args: { error } });
-    });
+    this.httpServer.listen(port, host);
+    this.httpServer.on('error', () => {});
   }
 
   async onModuleDestroy() {
@@ -101,55 +90,36 @@ class WsServerManager implements OnModuleInit, OnModuleDestroy {
       this.httpServer.close();
       this.httpServer = null;
     }
-    this.logger.info('WebSocket server stopped');
-  }
-
-  private setupSocketIOHandlers() {
-    if (!this.ioServer) return;
-
-    this.ioServer.on('connection', (socket: Socket) => {
-      this.logger.debug('Client connected', { args: { socketId: socket.id } });
-
-      socket.on('disconnect', (reason) => {
-        this.logger.debug('Client disconnected', { args: { socketId: socket.id, reason } });
-      });
-
-      // Forward every business packet to the gateway.
-      socket.on('message', (data) => {
-        this.logger.debug('Received WS message', { args: { socketId: socket.id, hasData: !!data } });
-        this.gateway.handleMessage(data, socket).catch((err) => this.logger.error('Gateway error', { args: { err } }));
-      });
-    });
   }
 }
 
 @Module({
-  imports: [LoggerModule.forRoot({ componentName: 'WsTransportModule' })],
   providers: [
-    // options
     { provide: 'WS_OPTIONS', useValue: {} },
-
-    // gateway + producer
-    WsGateway,
     {
       provide: WsProducer,
-      useFactory: (logger: AppLogger, opts: WsServerOptions) => {
-        // Map WS options into ProducerConfig
-        const heartbeatTimeoutMs = opts.heartbeatTimeout ?? 10000;
-        return new WsProducer(logger, {
+      useFactory: (opts: WsServerOptions) => {
+        const cfg: WsProducerConfig = {
           name: 'ws',
           maxMessageBytes: opts.maxMessageSize ?? 1024 * 1024,
           ackTimeoutMs: opts.connectionTimeout ?? 5000,
-          heartbeatMs: Math.max(500, Math.floor(heartbeatTimeoutMs / 2)),
-          heartbeatTimeoutMs,
+          heartbeatIntervalMs: Math.max(500, Math.floor((opts.heartbeatTimeout ?? 10000) / 2)),
+          heartbeatTimeoutMs: opts.heartbeatTimeout ?? 10000,
           token: opts.token,
-        });
+        };
+        const producer = new WsProducer(cfg);
+        producer.startHeartbeat();
+        return producer;
       },
-      inject: [AppLogger, 'WS_OPTIONS'],
+      inject: ['WS_OPTIONS'],
     },
     { provide: 'WS_PRODUCER', useExisting: WsProducer },
-
-    // server manager
+    {
+      provide: WsGateway,
+      useFactory: (queryBus: QueryBus, producer: WsProducer, opts: WsServerOptions) =>
+        new WsGateway(queryBus, producer, opts.token),
+      inject: [QueryBus, WsProducer, 'WS_OPTIONS'],
+    },
     WsServerManager,
   ],
   exports: ['WS_PRODUCER', 'WS_OPTIONS'],

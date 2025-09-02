@@ -124,6 +124,10 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async enqueue(block: T): Promise<void> {
     await this.mutex.runExclusive(async () => {
+      if (this.hashIndex.has((block as any).hash)) {
+        throw new Error('Duplicate block hash');
+      }
+
       // Use the calculated block size from Block interface
       const totalBlockSize = Number(block.size);
 
@@ -336,15 +340,13 @@ export class BlocksQueue<T extends Block = Block> {
    * Remove hex data from block and transactions to save memory
    */
   private cleanupBlockHexData(block: T): void {
-    if ('hex' in block) {
-      delete (block as any).hex;
-    }
-
-    if (Array.isArray(block.tx)) {
-      for (const tx of block.tx) {
-        if ('hex' in tx) {
-          delete (tx as any).hex;
-        }
+    const anyBlock = block as any;
+    anyBlock.hex = undefined;
+    const transactions = anyBlock.tx;
+    if (Array.isArray(transactions)) {
+      for (let i = 0, n = transactions.length; i < n; i++) {
+        const transaction = transactions[i];
+        if (transaction) transaction.hex = undefined;
       }
     }
   }

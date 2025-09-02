@@ -2,7 +2,7 @@ import { Subject } from 'rxjs';
 import { Injectable, Inject } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { DomainEvent, IEventPublisher, setEventMetadata } from '@easylayer/common/cqrs';
-import { ProducersManager } from '@easylayer/common/network-transport';
+import { OutboxStreamManager } from '@easylayer/common/network-transport';
 import { WireEventRecord } from './event-record.interface';
 
 @Injectable()
@@ -12,8 +12,8 @@ export class Publisher implements IEventPublisher<DomainEvent> {
   private systemModelNamesSet: Set<string>;
 
   constructor(
-    @Inject(ProducersManager)
-    private readonly producersManager: ProducersManager,
+    @Inject(OutboxStreamManager)
+    private readonly outboxStreamManager: OutboxStreamManager,
     private readonly log: AppLogger,
     @Inject('SYSTEM_MODEL_NAMES')
     systemModelNames: string[]
@@ -42,7 +42,7 @@ export class Publisher implements IEventPublisher<DomainEvent> {
     if (!events.length) return;
 
     // Stream with ACK to external transport
-    await this.producersManager.streamWireWithAck(events);
+    await this.outboxStreamManager.streamWireWithAck(events);
 
     // Emit system events locally after ACK
     queueMicrotask(() => {

@@ -1803,6 +1803,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@lerna-lite/profiler@npm:4.7.2":
+  version: 4.7.2
+  resolution: "@lerna-lite/profiler@npm:4.7.2"
+  dependencies:
+    "@lerna-lite/core": "npm:4.7.2"
+    "@lerna-lite/npmlog": "npm:4.7.1"
+    fs-extra: "npm:^11.3.1"
+    upath: "npm:^2.0.1"
+  checksum: 10/23769756c4031820e2a6fd9f23b91982768e06b67dfb65441400b31756056478b2fe4580364d0077639501d7c59f70738aa9b20a13bf52e2f82aeea438d2528d
+  languageName: node
+  linkType: hard
+
 "@lerna-lite/publish@npm:4.7.2":
   version: 4.7.2
   resolution: "@lerna-lite/publish@npm:4.7.2"
@@ -1832,6 +1844,21 @@ __metadata:
     tinyglobby: "npm:^0.2.14"
     tinyrainbow: "npm:^2.0.0"
   checksum: 10/eaeda26bf27da3d90e01f2be65576d70a9ea0cc036e36051e1fee136c7bd87ca08a81faf38b530b37ce48af6477b49f91894a5b4d358bd762c4df8c118e6ce92
+  languageName: node
+  linkType: hard
+
+"@lerna-lite/run@npm:4.7.2":
+  version: 4.7.2
+  resolution: "@lerna-lite/run@npm:4.7.2"
+  dependencies:
+    "@lerna-lite/cli": "npm:4.7.2"
+    "@lerna-lite/core": "npm:4.7.2"
+    "@lerna-lite/npmlog": "npm:4.7.1"
+    "@lerna-lite/profiler": "npm:4.7.2"
+    fs-extra: "npm:^11.3.1"
+    p-map: "npm:^7.0.3"
+    tinyrainbow: "npm:^2.0.0"
+  checksum: 10/a6ac76f8b1aa0f69b847646372a66bfda333cc2f55c0492659d2c3bffcf4551b446604bcc6df5fb4edd9defccb6503ca3c2833427d97d91b4c8d153154eaf619
   languageName: node
   linkType: hard
 
@@ -5787,6 +5814,7 @@ __metadata:
     "@eslint/js": "npm:9.26.0"
     "@lerna-lite/cli": "npm:4.7.2"
     "@lerna-lite/publish": "npm:4.7.2"
+    "@lerna-lite/run": "npm:4.7.2"
     "@lerna-lite/version": "npm:4.7.2"
     "@typescript-eslint/eslint-plugin": "npm:8.32.0"
     "@typescript-eslint/parser": "npm:8.32.0"
@@ -12618,6 +12646,13 @@ __metadata:
   version: 1.0.0
   resolution: "unpipe@npm:1.0.0"
   checksum: 10/4fa18d8d8d977c55cb09715385c203197105e10a6d220087ec819f50cb68870f02942244f1017565484237f1f8c5d3cd413631b1ae104d3096f24fdfde1b4aa2
+  languageName: node
+  linkType: hard
+
+"upath@npm:^2.0.1":
+  version: 2.0.1
+  resolution: "upath@npm:2.0.1"
+  checksum: 10/7b98a83559a295d59f87f7a8d615c7549d19e4aec4dd9d52be2bf1ba93e1d6ee7d8f2188cdecbf303a22cea3768abff4268b960350152a0264125f577d9ed79e
   languageName: node
   linkType: hard
 

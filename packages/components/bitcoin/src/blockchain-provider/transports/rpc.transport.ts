@@ -35,34 +35,32 @@ type BlockSubscriber = {
  * Example:
  * Input:  [req_A, req_B, req_C]
  * UUIDs:  [uuid1, uuid2, uuid3]
- * Server: [{id:uuid3,result:C}, {id:uuid1,result:A}] // B missing, wrong order
- * Output: [A, null, C] // Correct order, null for missing B
+ * Server: [{id:uuid3,result:C}, {id:uuid1,result:A}]
+ * Output: [A, null, C]
  */
 export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   readonly type = 'rpc';
+
+  private static sharedDispatcher: UndiciAgent | null = null;
 
   private baseUrl: string;
   private username?: string;
   private password?: string;
   private responseTimeout: number;
 
-  // Undici HTTP client dispatcher
-  private _dispatcher?: UndiciAgent;
+  private _dispatcher: UndiciAgent | null = null;
 
-  // ZMQ for subscriptions with reconnect
   private zmqEndpoint?: string;
   private zmqSocket?: zmq.Subscriber;
   private zmqRunning = false;
   private blockSubscriptions = new Set<BlockSubscriber>();
 
-  // Reconnect backoff
   private zmqReconnectAttempts = 0;
   private zmqReconnectTimer?: NodeJS.Timeout;
 
   constructor(options: RPCTransportOptions) {
     super(options);
 
-    // Parse URL for auth
     const url = new URL(options.baseUrl);
     this.username = url.username || undefined;
     this.password = url.password || undefined;
@@ -73,12 +71,14 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     this.responseTimeout = options.responseTimeout ?? 5000;
     this.zmqEndpoint = options.zmqEndpoint;
 
-    // Undici agent for keep-alive connection pooling
-    this._dispatcher = new UndiciAgent({
-      keepAliveTimeout: 10_000,
-      keepAliveMaxTimeout: 15_000,
-      connections: 8,
-    });
+    if (!RPCTransport.sharedDispatcher) {
+      RPCTransport.sharedDispatcher = new UndiciAgent({
+        keepAliveTimeout: 10_000,
+        keepAliveMaxTimeout: 15_000,
+        connections: 8,
+      });
+    }
+    this._dispatcher = RPCTransport.sharedDispatcher;
   }
 
   get connectionOptions(): RPCTransportOptions {
@@ -107,15 +107,19 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     }, 'connect');
   }
 
+  async disconnect(): Promise<void> {
+    await this.rateLimiter.stop();
+    this.cleanupZMQ();
+    this.isConnected = false;
+  }
+
   async healthcheck(): Promise<boolean> {
     try {
       const results = await this.rateLimiter.execute([{ method: 'getblockchaininfo', params: [] }], (calls) =>
         this.batchCall(calls)
       );
-
-      // Check if we got a valid response
       return results[0] !== null && results[0] !== undefined;
-    } catch (error) {
+    } catch {
       return false;
     }
   }
@@ -125,12 +129,10 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       const results = await this.rateLimiter.execute([{ method: 'getblockcount', params: [] }], (calls) =>
         this.batchCall(calls)
       );
-
       const height = results[0];
       if (height === null || height === undefined) {
         throw new Error('Failed to get block height: null response from RPC server');
       }
-
       return height;
     }, 'getBlockHeight');
   }
@@ -142,34 +144,23 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   async getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]> {
     return this.executeWithErrorHandling(async () => {
       const requests = heights.map((height) => ({ method: 'getblockhash', params: [height] }));
-
-      // RateLimiter + batchCall maintain order via UUID matching
       const results = await this.rateLimiter.execute(requests, (calls) => this.batchCall(calls));
-
-      // Ensure null conversion for failed requests
       return results.map((hash) => hash || null);
     }, 'getManyBlockHashesByHeights');
   }
 
   /**
    * ORDER GUARANTEE: results[i] corresponds to hashes[i]
-   * Throws error if any block is missing (no null tolerance)
+   * Missing/failed items return null at the same index
    */
-  async requestHexBlocks(hashes: string[]): Promise<Buffer[]> {
+  async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
     return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] }));
-
-      // RateLimiter + batchCall maintain order via UUID matching
-      const hexResults = await this.rateLimiter.execute(requests, (calls) => this.batchCall(calls));
-
-      const out: Buffer[] = new Array(hashes.length);
+      const hexResults = await this.rateLimiter.execute(requests, (calls) => this.batchCall<string>(calls));
+      const out: (Buffer | null)[] = new Array(hashes.length);
       for (let i = 0; i < hexResults.length; i++) {
         const hex = hexResults[i];
-        if (!hex) {
-          // keep a hole for the caller to map to null later or throw here if strict is needed
-          throw new Error(`Block not found for hash ${hashes[i]} at position ${i}`);
-        }
-        out[i] = Buffer.from(hex, 'hex');
+        out[i] = typeof hex === 'string' ? Buffer.from(hex, 'hex') : null;
       }
       return out;
     }, 'requestHexBlocks');
@@ -195,13 +186,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         headers.set('Authorization', `Basic ${auth}`);
       }
 
-      // STEP 1: Generate unique UUID for each request
       const callsWithIds = calls.map((call) => ({
         ...call,
         id: uuidv4(),
       }));
 
-      // STEP 2: Create JSON-RPC payload with UUIDs
       const payload = callsWithIds.map((call) => ({
         jsonrpc: '2.0',
         method: call.method,
@@ -209,7 +198,6 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         id: call.id,
       }));
 
-      // Proper timeout via AbortController; use Undici dispatcher
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), this.responseTimeout);
 
@@ -218,7 +206,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         headers,
         body: JSON.stringify(payload),
         signal: ac.signal,
-        dispatcher: this._dispatcher,
+        dispatcher: this._dispatcher!,
       };
 
       const response = await fetch(this.baseUrl, init as unknown as RequestInit).finally(() => clearTimeout(timer));
@@ -228,24 +216,25 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         throw new Error(`HTTP error! Status: ${response.status}, ${errorText}`);
       }
 
-      const rawResults = (await response.json()) as Array<{ id: string; result?: any; error?: any }>;
-      if (!Array.isArray(rawResults)) throw new Error('Invalid response structure: response data is not an array');
+      const raw = await response.json();
+      const array = Array.isArray(raw) ? raw : [raw];
 
       const responseMap = new Map<string, { result?: any; error?: any }>();
-      rawResults.forEach((r) => {
-        if (r.id !== undefined) responseMap.set(r.id, r);
-      });
+      for (const r of array) {
+        const id = r?.id;
+        if (typeof id === 'string' || typeof id === 'number') {
+          if (!responseMap.has(id as any)) responseMap.set(id as any, r);
+        }
+      }
 
       return callsWithIds.map((call) => {
         const r = responseMap.get(call.id);
-        if (!r) return null;
-        if (r.error) return null;
+        if (!r || r.error !== undefined) return null;
         return (r.result ?? null) as TResult | null;
       });
     }, 'batchCall');
   }
 
-  // Multiple-subscriber API with error propagation
   subscribeToNewBlocks(
     callback: (blockData: Buffer) => void,
     onError?: (err: Error) => void
@@ -255,7 +244,6 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
 
     if (this.blockSubscriptions.size === 1 && this.zmqEndpoint && !this.zmqRunning) {
       this.initializeZMQ().catch((err) => {
-        // notify subscribers about init error
         for (const s of this.blockSubscriptions) s.onError?.(err instanceof Error ? err : new Error(String(err)));
       });
     }
@@ -270,18 +258,6 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     };
   }
 
-  async disconnect(): Promise<void> {
-    await this.rateLimiter.stop();
-    this.cleanupZMQ();
-
-    // Close Undici dispatcher
-    await this._dispatcher?.close();
-    this._dispatcher = undefined;
-
-    this.isConnected = false;
-  }
-
-  // ===== ZMQ with reconnect/backoff =====
   private async initializeZMQ(): Promise<void> {
     if (!this.zmqEndpoint || this.zmqRunning) return;
 
@@ -303,26 +279,27 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     if (!this.zmqSocket) return;
 
     try {
-      for await (const [topic, message] of this.zmqSocket) {
+      for await (const frames of this.zmqSocket) {
         if (!this.zmqRunning) break;
 
-        const topicStr = topic?.toString();
+        const arr = Array.isArray(frames) ? frames : [frames];
+        const topicFrame = arr[0];
+        const topicStr =
+          typeof topicFrame === 'string' ? topicFrame : Buffer.isBuffer(topicFrame) ? topicFrame.toString() : '';
         if (topicStr === 'rawblock' && this.blockSubscriptions.size > 0) {
-          const blockBuffer = message as Buffer;
+          const blockFrame = arr[arr.length - 1]!;
+          const blockBuffer = Buffer.isBuffer(blockFrame) ? blockFrame : Buffer.from(blockFrame);
           for (const s of this.blockSubscriptions) {
             try {
               s.onData(blockBuffer);
             } catch (err) {
-              // propagate subscriber error
               s.onError?.(err instanceof Error ? err : new Error(String(err)));
             }
           }
         }
       }
-      // loop ended unexpectedly -> reconnect
-      if (this.zmqRunning) this.scheduleZMQReconnect(new Error('ZMQ loop ended'));
+      if (this.zmqRunning) this.scheduleZMQReconnect(new Error('ZMQ iterator ended'));
     } catch (error) {
-      // connection error -> notify and reconnect
       for (const s of this.blockSubscriptions) s.onError?.(error instanceof Error ? error : new Error(String(error)));
       if (this.zmqRunning) this.scheduleZMQReconnect(error);
     }
@@ -334,7 +311,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     if (!this.zmqEndpoint || this.blockSubscriptions.size === 0) return;
 
     const attempt = ++this.zmqReconnectAttempts;
-    const delay = Math.min(30_000, 500 * Math.pow(2, attempt)); // exponential backoff up to 30s
+    const delay = Math.min(30_000, 500 * Math.pow(2, attempt));
 
     this.zmqReconnectTimer && clearTimeout(this.zmqReconnectTimer);
     this.zmqReconnectTimer = setTimeout(() => {

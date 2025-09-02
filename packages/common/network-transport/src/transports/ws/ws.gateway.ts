@@ -1,97 +1,75 @@
+import { Injectable, Inject } from '@nestjs/common';
 import type { Server as SocketIOServer, Socket } from 'socket.io';
-import type { AppLogger } from '@easylayer/common/logger';
+import { QueryBus } from '@easylayer/common/cqrs';
 import type {
   Envelope,
   RegisterStreamConsumerPayload,
+  QueryRequestPayload,
+  QueryResponsePayload,
   OutboxStreamAckPayload,
-  RpcRequestPayload,
-  RpcResponsePayload,
+  PongPayload,
 } from '../../shared';
 import { Actions } from '../../shared';
-import type { WsProducer } from './ws.producer';
+import { WsProducer } from './ws.producer';
+import { BaseConsumer } from '../../core/base-consumer';
 
-/**
- * WsGateway (plain class, no Nest decorators here):
- * - setServer(server) is called by WsServerManager.
- * - handleMessage(raw, socket) is called by WsServerManager for each incoming "message".
- * - Stream ACK goes DIRECTLY to WsProducer.resolveAck(...) (no ProducersManager in-between).
- * - RPC replies go back to the same socket, preserving correlationId.
- */
-export class WsGateway {
+@Injectable()
+export class WsGateway extends BaseConsumer {
   private server: SocketIOServer | null = null;
 
   constructor(
-    private readonly logger: AppLogger,
-    private readonly producer: WsProducer
-  ) {}
+    private readonly queryBus: QueryBus,
+    private readonly producer: WsProducer,
+    private readonly token?: string
+  ) {
+    super();
+  }
 
-  public setServer(server: SocketIOServer) {
+  public setServer(server: SocketIOServer): void {
     this.server = server;
   }
 
   public async handleMessage(raw: any, client: Socket): Promise<void> {
-    let msg: Envelope<any>;
-    try {
-      msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch {
-      return;
-    }
+    const msg: Envelope<any> = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
     switch (msg.action) {
+      case Actions.Ping: {
+        const reply: Envelope = { action: Actions.Pong, payload: { ts: Date.now() }, timestamp: Date.now() };
+        client.emit('message', JSON.stringify(reply));
+        return;
+      }
+
       case Actions.Pong: {
-        // consider Pong only from the selected streaming client
-        if (client.id === (this.producer as any).streamingClientId) {
+        const p = (msg.payload || {}) as PongPayload;
+        const sid = p.sid || client.id;
+        const nonce = p.nonce || '';
+        const ts = typeof p.ts === 'number' ? p.ts : Date.now();
+        const proof = p.proof || '';
+
+        if (this.token && nonce && proof) {
+          if (this.producer.verifyProof(sid, nonce, ts, proof)) {
+            this.producer.setStreamingClient(client.id);
+            this.producer.onClientPong();
+          }
+        } else {
           this.producer.onClientPong();
         }
         return;
       }
 
       case Actions.RegisterStreamConsumer: {
-        // simple token check: keep it optional
-        const p = (msg.payload || {}) as RegisterStreamConsumerPayload;
-        const expected = (this.producer as any)['cfg']?.token;
-        if (expected && p.token !== expected) {
-          client.emit('message', JSON.stringify({ action: Actions.Error, payload: { err: 'unauthorized' } }));
-          client.disconnect(true);
-          return;
-        }
-        this.producer.setStreamingClient(client.id);
+        const _payload = msg.payload as RegisterStreamConsumerPayload | undefined;
+        return;
+      }
+
+      case Actions.QueryRequest: {
+        await this.handleQueryOverWs(msg as Envelope<QueryRequestPayload>, client);
         return;
       }
 
       case Actions.OutboxStreamAck: {
-        // Accept ACK only from the registered streaming client
-        if (client.id !== (this.producer as any).streamingClientId) return;
-        const payload = (msg.payload || {}) as OutboxStreamAckPayload;
-        if (typeof payload.allOk === 'boolean') {
-          // resolve BaseProducer.waitForAck(...) directly
-          this.producer.resolveAck(payload);
-        }
-        return;
-      }
-
-      case Actions.RpcRequest: {
-        const q = (msg.payload || {}) as RpcRequestPayload;
-        try {
-          const data = await this.dispatch(q.route, q.data, client);
-          const resp: Envelope<RpcResponsePayload> = {
-            action: Actions.RpcResponse,
-            payload: { route: q.route, data },
-            correlationId: msg.correlationId,
-            timestamp: Date.now(),
-            requestId: msg.requestId,
-          };
-          client.emit('message', JSON.stringify(resp));
-        } catch (e: any) {
-          const resp: Envelope<RpcResponsePayload> = {
-            action: Actions.RpcResponse,
-            payload: { route: q.route, err: String(e?.message ?? e) },
-            correlationId: msg.correlationId,
-            timestamp: Date.now(),
-            requestId: msg.requestId,
-          };
-          client.emit('message', JSON.stringify(resp));
-        }
+        const ack = (msg.payload || {}) as OutboxStreamAckPayload;
+        (this.producer as any).resolveAck(ack);
         return;
       }
 
@@ -100,13 +78,35 @@ export class WsGateway {
     }
   }
 
-  // App-specific RPC routing lives here; keep minimal stub.
-  private async dispatch(route: string, data: any, _client: Socket): Promise<any> {
-    switch (route) {
-      case 'health':
-        return { ok: true };
-      default:
-        return { ok: true, route, echo: data };
+  private async handleQueryOverWs(message: Envelope<QueryRequestPayload>, client: Socket): Promise<void> {
+    const name = message?.payload?.name ?? '';
+    const dto = message?.payload?.dto;
+    try {
+      const data = await this.executeQuery(this.queryBus, { name, dto });
+      const reply: Envelope<QueryResponsePayload> = {
+        action: Actions.QueryResponse,
+        payload: { name, data },
+        correlationId: message.correlationId,
+        requestId: message.requestId,
+        timestamp: Date.now(),
+      };
+      client.emit('message', JSON.stringify(reply));
+    } catch (e: any) {
+      const reply: Envelope<QueryResponsePayload> = {
+        action: Actions.QueryResponse,
+        payload: { name, err: String(e?.message ?? e) },
+        correlationId: message.correlationId,
+        requestId: message.requestId,
+        timestamp: Date.now(),
+      };
+      client.emit('message', JSON.stringify(reply));
     }
+  }
+
+  protected async handleBusinessMessage(): Promise<void> {
+    return;
+  }
+  protected async _send(): Promise<void> {
+    return;
   }
 }

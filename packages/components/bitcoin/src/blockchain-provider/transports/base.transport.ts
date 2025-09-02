@@ -42,7 +42,7 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
   abstract batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]>;
 
   // Block retrieval methods - must work with both RPC and P2P
-  abstract requestHexBlocks(hashes: string[]): Promise<Buffer[]>;
+  abstract requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]>;
   abstract getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]>;
   abstract getBlockHeight(): Promise<number>;
 

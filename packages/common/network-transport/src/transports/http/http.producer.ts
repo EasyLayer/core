@@ -1,88 +1,57 @@
-import type { AppLogger } from '@easylayer/common/logger';
-import type { ProducerConfig } from '../../core';
-import { BaseProducer, utf8Len } from '../../core';
-import type { Envelope, OutboxStreamAckPayload, OutboxStreamBatchPayload, WireEventRecord } from '../../shared';
-import { Actions, TRANSPORT_OVERHEAD_WIRE } from '../../shared';
+import { BaseProducer } from '../../core/base-producer';
+import type { OutboxStreamAckPayload } from '../../shared';
 
-/**
- * HTTP producer:
- * - For RPC or generic sendMessage: posts the serialized envelope and checks status.
- * - For outbox streaming: returns ACK from response body (no correlationId here).
- * Memory: one serialized string per request; complexity O(n) over payload size.
- */
-/* eslint-disable no-empty */
-async function httpPost(
-  url: string,
-  headers: Record<string, string>,
-  body: string
-): Promise<{ status: number; json: any }> {
-  const res = await fetch(url, { method: 'POST', headers, body });
-  let json: any = null;
-  try {
-    json = await res.json();
-  } catch {}
-  return { status: res.status, json };
-}
-/* eslint-enable no-empty */
+export type HttpProducerConfig = {
+  name: 'http';
+  endpoint: string;
+  maxMessageBytes: number;
+  ackTimeoutMs: number;
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
+  token?: string;
+};
 
-export class HttpWebhookProducer extends BaseProducer {
-  constructor(log: AppLogger, cfg: ProducerConfig & { endpoint: string }) {
-    super(log, cfg);
+export class HttpProducer extends BaseProducer {
+  private readonly endpoint: string;
+  private readonly token?: string;
+
+  constructor(cfg: HttpProducerConfig) {
+    super({
+      name: cfg.name,
+      maxMessageBytes: cfg.maxMessageBytes,
+      ackTimeoutMs: cfg.ackTimeoutMs,
+      heartbeatIntervalMs: cfg.heartbeatIntervalMs ?? 1000,
+      heartbeatTimeoutMs: cfg.heartbeatTimeoutMs ?? cfg.ackTimeoutMs,
+    });
+    this.endpoint = cfg.endpoint;
+    this.token = cfg.token;
+  }
+
+  public override startHeartbeat(): void {
+    /* no-op */
   }
 
   protected _isUnderlyingConnected(): boolean {
-    // Stateles HTTP: assume connectable; failures surface on request.
     return true;
   }
 
-  protected async _sendSerialized(serialized: string): Promise<void> {
-    const { status } = await httpPost(
-      (this.cfg as any).endpoint,
-      {
-        'Content-Type': 'application/json',
-        ...(this.cfg.token ? { 'X-Transport-Token': this.cfg.token } : {}),
-      },
-      serialized
-    );
+  protected async _sendRaw(serialized: string): Promise<void> {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.token) headers['X-Transport-Token'] = this.token;
 
-    if (status >= 400) throw new Error(`[http] response status ${status}`);
-  }
+    const res = await fetch(this.endpoint, { method: 'POST', headers, body: serialized });
 
-  /** HTTP path for outbox streaming: ACK comes in response body. */
-  public async sendOutboxBatchAndWaitAckHTTP(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
-    const env: Envelope<OutboxStreamBatchPayload> = {
-      action: Actions.OutboxStreamBatch,
-      payload: { events },
-      timestamp: Date.now(),
-    };
-    const serialized = JSON.stringify(env); // see BaseProducer TODO about payload re-escaping
-    const byteLen = utf8Len(serialized) + TRANSPORT_OVERHEAD_WIRE;
-    if (byteLen > this['cfg'].maxMessageBytes) {
-      throw new Error(`[http] message too large: ${byteLen} > ${this['cfg'].maxMessageBytes}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    let ack: any = null;
+    try {
+      ack = await res.json();
+    } catch {
+      throw new Error('HTTP webhook did not return JSON ACK');
     }
-
-    const { status, json } = await httpPost(
-      (this['cfg'] as any).endpoint,
-      {
-        'Content-Type': 'application/json',
-        ...(this['cfg'].token ? { 'X-Transport-Token': this['cfg'].token } : {}),
-        ...extractRequestIdsHeader(events),
-      },
-      serialized
-    );
-
-    if (status >= 400) throw new Error(`[http] response status ${status}`);
-    if (!json || typeof json.allOk !== 'boolean') throw new Error('[http] invalid ACK payload');
-    return json as OutboxStreamAckPayload;
-  }
-}
-
-function extractRequestIdsHeader(events: WireEventRecord[]): Record<string, string> {
-  try {
-    const ids = events.map((e) => e.requestId).filter(Boolean);
-    if (!ids.length) return {};
-    return { 'X-Event-Request-Ids': ids.join(',') };
-  } catch {
-    return {};
+    if (!ack || typeof ack.allOk !== 'boolean') {
+      throw new Error('HTTP webhook returned invalid ACK');
+    }
+    this.resolveAck(ack as OutboxStreamAckPayload);
   }
 }

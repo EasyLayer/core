@@ -93,4 +93,4 @@ If you encounter a bug or have a feature request related to the `core` repositor
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE).
+This project is licensed under the [License](./LICENSE).

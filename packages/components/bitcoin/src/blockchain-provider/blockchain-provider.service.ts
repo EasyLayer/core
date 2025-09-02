@@ -305,7 +305,7 @@ export class BlockchainProviderService {
    */
   public async getBasicBlockByHeight(height: string | number): Promise<Block | null> {
     return this.executeNetworkProviderMethod('getBasicBlockByHeight', async (provider) => {
-      const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], 1, false);
+      const rawBlocks = await provider.getManyBlocksByHeights([Number(height)], 1);
       const rawBlock = rawBlocks[0];
 
       if (!rawBlock) return null;
@@ -334,15 +334,11 @@ export class BlockchainProviderService {
       let universalBlocks: (UniversalBlock | null)[];
 
       if (useHex) {
-        universalBlocks = await provider.getManyBlocksHexByHeights(
-          heights.map((item) => Number(item)),
-          false
-        );
+        universalBlocks = await provider.getManyBlocksHexByHeights(heights.map((item) => Number(item)));
       } else {
         universalBlocks = await provider.getManyBlocksByHeights(
           heights.map((item) => Number(item)),
-          verbosity,
-          false
+          verbosity
         );
       }
 
@@ -371,7 +367,7 @@ export class BlockchainProviderService {
       let universalBlocks: (UniversalBlock | null)[];
 
       if (useHex) {
-        universalBlocks = await provider.getManyBlocksHexByHashes(hashes, false);
+        universalBlocks = await provider.getManyBlocksHexByHashes(hashes);
 
         const validHashes = hashes.filter((_, index) => universalBlocks[index] !== null);
         if (validHashes.length === 0) return [];
@@ -394,7 +390,7 @@ export class BlockchainProviderService {
 
         return this.processAndValidateBlocks(completeBlocks, verifyMerkle);
       } else {
-        universalBlocks = await provider.getManyBlocksByHashes(hashes, verbosity, false);
+        universalBlocks = await provider.getManyBlocksByHashes(hashes, verbosity);
         return this.processAndValidateBlocks(universalBlocks, verifyMerkle);
       }
     });

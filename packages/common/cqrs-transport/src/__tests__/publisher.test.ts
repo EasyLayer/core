@@ -10,7 +10,7 @@ jest.mock("@easylayer/common/cqrs", () => ({
 }));
 
 jest.mock("@easylayer/common/network-transport", () => ({
-  ProducersManager: class {
+  OutboxStreamManager: class {
     calls: any[] = [];
     async streamWireWithAck(events: any[]) {
       this.calls.push(events);
@@ -20,10 +20,10 @@ jest.mock("@easylayer/common/network-transport", () => ({
 
 describe("Publisher", () => {
   it("streams to transport then emits only system events locally with correct constructor name", async () => {
-    const { ProducersManager } = require("@easylayer/common/network-transport");
+    const { OutboxStreamManager } = require("@easylayer/common/network-transport");
     const { AppLogger } = require("@easylayer/common/logger");
 
-    const pm = new ProducersManager();
+    const pm = new OutboxStreamManager();
     const logger = new AppLogger();
     const system = ["sys-model"];
     const pub = new Publisher(pm as any, logger as any, system);

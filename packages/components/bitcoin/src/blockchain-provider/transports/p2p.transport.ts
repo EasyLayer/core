@@ -15,7 +15,7 @@ import { BaseTransport } from './base.transport';
  *
  * Order Guarantees:
  * - getManyBlockHashesByHeights: results[i] corresponds to heights[i], null for missing
- * - requestHexBlocks: results[i] corresponds to hashes[i], throws on missing blocks
+ * - requestHexBlocks: results[i] corresponds to hashes[i], null for missing blocks
  * - ChainTracker.getManyHashes: uses map() to preserve input order
  *
  * Memory usage: ~72 bytes per block for height->hash mapping
@@ -29,6 +29,7 @@ export interface P2PTransportOptions extends BaseTransportOptions {
   maxHeight?: number;
   headerSyncEnabled?: boolean;
   headerSyncBatchSize?: number;
+  checkpoint?: { hash: string; height: number };
 }
 
 /**
@@ -61,7 +62,6 @@ class ChainTracker {
   }
 
   private handleReorg(conflictHeight: number, newHash: string): void {
-    // remove forward range
     for (let h = conflictHeight; h <= this.tipHeight; h++) {
       const oldHash = this.heightToHash.get(h);
       if (oldHash) this.hashToHeight.delete(oldHash);
@@ -73,7 +73,7 @@ class ChainTracker {
   }
 
   getHeight(hash: string): number | undefined {
-    return this.hashToHeight.get(hash); // O(1)
+    return this.hashToHeight.get(hash);
   }
 
   getHash(height: number): string | undefined {
@@ -81,14 +81,7 @@ class ChainTracker {
   }
 
   getTipHeight(): number {
-    return selfOrZero(this.tipHeight);
-    function selfOrZero(h: number) {
-      return h;
-    }
-  }
-
-  hasHeight(height: number): boolean {
-    return this.heightToHash.has(height);
+    return this.tipHeight;
   }
 
   getManyHashes(heights: number[]): (string | null)[] {
@@ -103,11 +96,6 @@ class ChainTracker {
     this.heightToHash.clear();
     this.hashToHeight.clear();
     this.tipHeight = -1;
-  }
-
-  getSyncProgress(currentTipHeight: number): number {
-    if (currentTipHeight === 0) return 100;
-    return Math.min(100, (this.tipHeight / currentTipHeight) * 100);
   }
 }
 
@@ -129,13 +117,8 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   private chainTracker: ChainTracker;
   private headerSyncComplete = false;
 
-  // multiple subscribers + error propagation
   private blockSubscribers = new Set<BlockSubscriber>();
 
-  private pendingRequests = new Map<
-    string,
-    { resolve: (data: any) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }
-  >();
   private headerSyncPromise: Promise<void> | null = null;
 
   constructor(options: P2PTransportOptions) {
@@ -147,6 +130,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     this.headerSyncBatchSize = options.headerSyncBatchSize ?? 2000;
 
     this.chainTracker = new ChainTracker(options.maxHeight);
+    if (options.checkpoint) this.chainTracker.addHeader(options.checkpoint.hash, options.checkpoint.height);
 
     const bitcoreNetwork = this.createBitcoreNetworkConfig();
     this.pool = new Pool({
@@ -183,11 +167,9 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('P2P connection timeout')), this.connectionTimeout);
-
-        // set activePeer right here to avoid race
         this.pool.once('peerready', (peer: Peer) => {
           clearTimeout(timeout);
-          this.activePeer = peer; // <— set here
+          this.activePeer = peer;
           this.setupPeerEventHandlers(peer);
           this.isConnected = true;
           resolve();
@@ -198,6 +180,20 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
         this.headerSyncPromise = this.initializeHeaderSync();
       }
     }, 'connect');
+  }
+
+  async disconnect(): Promise<void> {
+    await this.rateLimiter.stop();
+
+    this.blockSubscribers.clear();
+
+    this.chainTracker.clear();
+    this.headerSyncComplete = false;
+    this.headerSyncPromise = null;
+
+    this.pool.disconnect();
+    this.activePeer = null;
+    this.isConnected = false;
   }
 
   async healthcheck(): Promise<boolean> {
@@ -221,84 +217,37 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
    * ORDER GUARANTEE: results[i] corresponds to heights[i]
    * Uses ChainTracker.getManyHashes which preserves order via map()
    */
+  /* eslint-disable no-empty */
   async getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]> {
     return this.executeWithErrorHandling(async () => {
       if (!this.headerSyncComplete && this.headerSyncPromise) {
         try {
           await Promise.race([this.headerSyncPromise, new Promise((resolve) => setTimeout(resolve, 5000))]);
-        } catch {
-          // Continue with partial data
-        }
+        } catch {}
       }
-
-      // ChainTracker guarantees order preservation
       return this.chainTracker.getManyHashes(heights);
     }, 'getManyBlockHashesByHeights');
   }
+  /* eslint-enable no-empty */
 
   /**
    * ORDER GUARANTEE: results[i] corresponds to hashes[i]
-   * Uses hash-to-position mapping to rebuild correct order
+   * Missing/failed items return null at the same index
    */
-  async requestHexBlocks(hashes: string[]): Promise<Buffer[]> {
+  async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
     return this.executeWithErrorHandling(async () => {
-      if (!this.activePeer) throw new Error('No active peer connection');
+      if (!this.activePeer) return hashes.map(() => null);
 
-      return new Promise<Buffer[]>((resolve, reject) => {
-        const hashToPosition = new Map<string, number>();
-        hashes.forEach((hash, i) => hashToPosition.set(hash, i));
-
-        const expected = new Set(hashes);
-        const received = new Map<string, Buffer>();
-        const timeoutMs = Math.min(120_000, 10_000 + hashes.length * 500);
-
-        const cleanup = () => this.activePeer?.removeListener('block', onBlock);
-        const timeoutHandle = setTimeout(() => {
-          cleanup();
-          reject(new Error(`Block request timeout after ${timeoutMs}ms for ${hashes.length} blocks`));
-        }, timeoutMs);
-
-        const onBlock = (message: any) => {
-          if (!message?.block?.hash || !message?.block?.toBuffer) return;
-
-          const blockHash = message.block.hash.toString('hex');
-          if (!expected.has(blockHash)) return;
-
-          const blockBuffer = message.block.toBuffer();
-          received.set(blockHash, blockBuffer);
-          expected.delete(blockHash);
-
-          if (expected.size === 0) {
-            clearTimeout(timeoutHandle);
-            cleanup();
-
-            const ordered: Buffer[] = new Array(hashes.length);
-            for (const [h, buf] of received) {
-              const pos = hashToPosition.get(h);
-              if (pos !== undefined) ordered[pos] = buf;
-            }
-            for (let i = 0; i < ordered.length; i++) {
-              if (!ordered[i]) {
-                reject(new Error(`Missing block at position ${i} for hash ${hashes[i]}`));
-                return;
-              }
-            }
-            resolve(ordered);
-          }
-        };
-
-        this.activePeer!.on('block', onBlock);
-
-        try {
-          const inventory = hashes.map((hash) => ({ type: 2, hash: Buffer.from(hash, 'hex').reverse() }));
-          const getDataMessage = new Messages.GetData(inventory);
-          this.activePeer!.sendMessage(getDataMessage);
-        } catch (error) {
-          clearTimeout(timeoutHandle);
-          cleanup();
-          reject(new Error(`Failed to send block request: ${error}`));
+      const batchSize = 128;
+      const out: (Buffer | null)[] = new Array(hashes.length);
+      for (let i = 0; i < hashes.length; i += batchSize) {
+        const slice = hashes.slice(i, i + batchSize);
+        const got = await this.requestHexBlocksBatch(slice);
+        for (let j = 0; j < slice.length; j++) {
+          out[i + j] = got[j]!;
         }
-      });
+      }
+      return out;
     }, 'requestHexBlocks');
   }
 
@@ -335,7 +284,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           const tipHeight = this.chainTracker.getTipHeight();
           results[i] = (tipHeight >= 0 ? tipHeight : null) as TResult | null;
         } else {
-          throw new Error(`Unsupported P2P method: ${call.method}`);
+          results[i] = null;
         }
       } catch {
         results[i] = null;
@@ -358,57 +307,26 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     };
   }
 
-  async disconnect(): Promise<void> {
-    await this.rateLimiter.stop();
-
-    for (const [, req] of this.pendingRequests) {
-      clearTimeout(req.timeout);
-      req.reject(new Error('Transport disconnecting'));
-    }
-    this.pendingRequests.clear();
-    this.blockSubscribers.clear();
-
-    this.chainTracker.clear();
-    this.headerSyncComplete = false;
-    this.headerSyncPromise = null;
-
-    this.pool.disconnect();
-    this.activePeer = null;
-    this.isConnected = false;
-  }
-
+  /* eslint-disable no-empty */
   private async initializeHeaderSync(): Promise<void> {
     if (!this.activePeer) throw new Error('No active peer for header sync');
     try {
       await this.syncAllHeadersFromTrustedPeer();
       this.headerSyncComplete = true;
-    } catch {
-      // keep working without full header sync
-    }
+    } catch {}
   }
+  /* eslint-enable no-empty */
 
   private async syncAllHeadersFromTrustedPeer(): Promise<void> {
     if (!this.activePeer) throw new Error('No active peer for header sync');
-    let currentHeight = 0;
-
     while (true) {
-      try {
-        const headers = await this.requestHeadersBatch();
-        if (!headers || headers.length === 0) break;
-
-        for (let i = 0; i < headers.length; i++) {
-          const header = headers[i];
-          if (!header) continue;
-          const height = currentHeight + i;
-          if (this.chainTracker['maxHeight'] !== undefined && height > this.chainTracker['maxHeight']) return;
-          this.chainTracker.addHeader(header.hash, height);
-        }
-
-        currentHeight += headers.length;
-        if (headers.length < 2000) break;
-      } catch {
-        break;
+      const headers = await this.requestHeadersBatch();
+      if (!headers || headers.length === 0) break;
+      for (const header of headers) {
+        const prevHeight = this.chainTracker.getHeight(header.previousblockhash);
+        if (typeof prevHeight === 'number') this.chainTracker.addHeader(header.hash, prevHeight + 1);
       }
+      if (headers.length < this.headerSyncBatchSize) break;
     }
   }
 
@@ -418,7 +336,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     return new Promise<Array<{ hash: string; previousblockhash: string }> | null>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Header batch request timeout')), 30000);
 
-      const locator = this.buildLocator(); // <— improved locator
+      const locator = this.buildLocator();
       const getHeadersMessage = new Messages.GetHeaders({ starts: locator, stop: Buffer.alloc(32) });
 
       const onHeaders = (message: any) => {
@@ -446,7 +364,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     });
   }
 
-  // Exponential back-off block locator (BIP37 style)
   private buildLocator(): Buffer[] {
     const loc: Buffer[] = [];
     let step = 1;
@@ -456,7 +373,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       if (loc.length >= 10) step *= 2;
       if (loc.length >= 32) break;
     }
-    if (!loc.length) loc.push(Buffer.alloc(32)); // genesis fallback
+    if (!loc.length) loc.push(Buffer.alloc(32));
     return loc;
   }
 
@@ -475,7 +392,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     const bits = headerBuffer.slice(72, 76).toString('hex');
     const nonce = headerBuffer.readUInt32LE(76);
 
-    // double-SHA256 of header
     const hash1 = crypto.createHash('sha256').update(headerBuffer).digest();
     const hash2 = crypto.createHash('sha256').update(hash1).digest();
     const hash = hash2.reverse().toString('hex');
@@ -498,7 +414,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   private setupPoolEventHandlers(): void {
     this.pool.on('peerready', (peer: Peer) => {
-      // activePeer is already set in connect() once('peerready'), but keep fallback:
       if (!this.activePeer) {
         this.activePeer = peer;
         this.setupPeerEventHandlers(peer);
@@ -508,18 +423,18 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     this.pool.on('peerdisconnect', (peer: Peer) => {
       if (this.activePeer === peer) {
         this.activePeer = null;
-        // avoid private fields of pool; try first available peer if event emitted elsewhere
-        // (left as-is due to external library constraints)
       }
     });
+
+    this.pool.on('error', () => {});
   }
 
+  /* eslint-disable no-empty */
   private setupPeerEventHandlers(peer: Peer): void {
     peer.on('block', (message: any) => {
       if (!message?.block?.toBuffer) return;
       const blockBuffer = message.block.toBuffer();
 
-      // notify subscribers
       for (const s of this.blockSubscribers) {
         try {
           s.onData(blockBuffer);
@@ -537,13 +452,9 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           if (prevHeight !== undefined) {
             const newHeight = prevHeight + 1;
             this.chainTracker.addHeader(blockHash, newHeight);
-          } else {
-            this.tryToAddBlockWithCalculatedHeight(blockHash, blockBuffer);
           }
         }
-      } catch {
-        // ignore chain tracking errors for live blocks
-      }
+      } catch {}
     });
 
     peer.on('headers', (message: any) => {
@@ -556,9 +467,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
               const height = prevHeight + 1;
               this.chainTracker.addHeader(header.hash, height);
             }
-          } catch {
-            // ignore header processing errors
-          }
+          } catch {}
         });
       }
     });
@@ -567,21 +476,62 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       if (message?.nonce) peer.sendMessage(new Messages.Pong(message.nonce));
     });
   }
+  /* eslint-enable no-empty */
 
-  private tryToAddBlockWithCalculatedHeight(blockHash: string, blockBuffer: Buffer): void {
-    try {
-      const timestamp = blockBuffer.readUInt32LE(68);
-      const currentTime = Math.floor(Date.now() / 1000);
-      if (timestamp > 0 && timestamp <= currentTime) {
-        const currentTip = this.chainTracker.getTipHeight();
-        if (currentTip >= 0) {
-          const estimatedHeight = currentTip + 1;
-          this.chainTracker.addHeader(blockHash, estimatedHeight);
-        }
+  private requestHexBlocksBatch(hashes: string[]): Promise<(Buffer | null)[]> {
+    return new Promise<(Buffer | null)[]>((resolve) => {
+      if (!this.activePeer) {
+        resolve(hashes.map(() => null));
+        return;
       }
-    } catch {
-      // ignore
-    }
+
+      const hashToPosition = new Map<string, number>();
+      hashes.forEach((h, idx) => hashToPosition.set(h, idx));
+
+      const expected = new Set(hashes);
+      const received = new Map<string, Buffer>();
+      const timeoutMs = Math.min(60_000, 10_000 + hashes.length * 300);
+
+      const onBlock = (message: any) => {
+        const h = message?.block?.hash?.toString?.('hex');
+        if (!h || !expected.has(h)) return;
+
+        const buf = message.block.toBuffer();
+        received.set(h, buf);
+        expected.delete(h);
+
+        if (expected.size === 0) done();
+      };
+
+      const done = () => {
+        clearTimeout(timer);
+        this.activePeer?.removeListener('block', onBlock);
+
+        const ordered: (Buffer | null)[] = new Array(hashes.length).fill(null);
+        for (const [h, buf] of received) {
+          const pos = hashToPosition.get(h);
+          if (pos !== undefined) ordered[pos] = buf;
+        }
+        resolve(ordered);
+      };
+
+      const timer = setTimeout(() => {
+        this.activePeer?.removeListener('block', onBlock);
+        done();
+      }, timeoutMs);
+
+      this.activePeer.on('block', onBlock);
+
+      try {
+        const inventory = hashes.map((h) => ({ type: 2, hash: Buffer.from(h, 'hex').reverse() }));
+        const getDataMessage = new Messages.GetData(inventory);
+        this.activePeer.sendMessage(getDataMessage);
+      } catch {
+        clearTimeout(timer);
+        this.activePeer?.removeListener('block', onBlock);
+        resolve(hashes.map(() => null));
+      }
+    });
   }
 
   private extractPreviousBlockHash(blockBuffer: Buffer): string | null {
@@ -591,29 +541,5 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     } catch {
       return null;
     }
-  }
-
-  isHeaderSyncComplete(): boolean {
-    return this.headerSyncComplete;
-  }
-
-  async getHeaderSyncProgress(): Promise<{ synced: number; total: number; percentage: number }> {
-    const synced = this.chainTracker.getMappingCount();
-    const tipHeight = this.chainTracker.getTipHeight();
-    return {
-      synced,
-      total: Math.max(synced, tipHeight + 1),
-      percentage: tipHeight > 0 ? (synced / (tipHeight + 1)) * 100 : 100,
-    };
-  }
-
-  async waitForHeaderSync(timeoutMs: number = 300000): Promise<void> {
-    if (this.headerSyncComplete) return;
-    if (!this.headerSyncPromise) throw new Error('Header sync not initiated');
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Header sync timeout')), timeoutMs)
-    );
-    await Promise.race([this.headerSyncPromise, timeoutPromise]);
   }
 }

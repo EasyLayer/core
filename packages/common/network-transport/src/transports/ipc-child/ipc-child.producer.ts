@@ -1,150 +1,83 @@
-import type { ProducerConfig } from '../../core';
-import { BaseProducer, utf8Len } from '../../core';
-import type { AppLogger } from '@easylayer/common/logger';
-import type { Envelope, OutboxStreamAckPayload, OutboxStreamBatchPayload, WireEventRecord } from '../../shared';
-import { Actions, TRANSPORT_OVERHEAD_WIRE } from '../../shared';
+import { BaseProducer } from '../../core/base-producer';
+import type { Envelope, OutboxStreamAckPayload } from '../../shared';
+import { Actions } from '../../shared';
+import { randomBytes, createHmac } from 'node:crypto';
 
-type Defer<T> = { p: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void };
-function defer<T>(): Defer<T> {
-  let resolve!: (v: T) => void, reject!: (e: unknown) => void;
-  const p = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { p, resolve, reject };
-}
+export type IpcProducerConfig = {
+  name: 'ipc';
+  maxMessageBytes: number;
+  ackTimeoutMs: number;
+  heartbeatIntervalMs: number;
+  heartbeatTimeoutMs: number;
+  heartbeatBackoffMultiplier?: number;
+  heartbeatMaxIntervalMs?: number;
+  token?: string;
+};
 
-function uuid(): string {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-/**
- * IPC child producer:
- * - Strict correlationId for OutboxStream ACK and RPC.
- * - Maintains pending map keyed by correlationId.
- * Memory: pending map per in-flight request; serialized string per send.
- */
 export class IpcChildProducer extends BaseProducer {
-  private readonly pending = new Map<string, Defer<any>>();
+  private readonly token?: string;
+  private readonly nonces: Map<string, number> = new Map(); // nonce -> ts
 
-  constructor(log: AppLogger, cfg: ProducerConfig) {
-    super(log, cfg);
-
-    process.on('message', (raw: any) => {
-      if (typeof raw !== 'string') return;
-      let msg: Envelope<any>;
-      try {
-        msg = JSON.parse(raw);
-      } catch {
-        return;
-      }
-
-      if (msg.action === Actions.Pong) {
-        this.onPong(Date.now());
-        return;
-      }
-
-      // Strict ACK by correlationId for outbox
-      if (msg.action === Actions.OutboxStreamAck && msg.correlationId) {
-        const d = this.pending.get(msg.correlationId);
-        if (d) {
-          this.pending.delete(msg.correlationId);
-          d.resolve(msg.payload);
-        }
-        return;
-      }
-
-      // RPC response by correlationId
-      if (msg.action === Actions.RpcResponse && msg.correlationId) {
-        const d = this.pending.get(msg.correlationId);
-        if (d) {
-          this.pending.delete(msg.correlationId);
-          d.resolve(msg.payload);
-        }
-        return;
-      }
+  constructor(cfg: IpcProducerConfig) {
+    super({
+      name: cfg.name,
+      maxMessageBytes: cfg.maxMessageBytes,
+      ackTimeoutMs: cfg.ackTimeoutMs,
+      heartbeatIntervalMs: cfg.heartbeatIntervalMs,
+      heartbeatTimeoutMs: cfg.heartbeatTimeoutMs,
+      heartbeatBackoffMultiplier: cfg.heartbeatBackoffMultiplier,
+      heartbeatMaxIntervalMs: cfg.heartbeatMaxIntervalMs,
     });
-
-    this.startRetryTimerIfNeeded();
+    this.token = cfg.token;
+    process.on('message', (m: any) => this.onProcessMessage(m));
   }
 
   protected _isUnderlyingConnected(): boolean {
-    return !!process?.send;
+    return !!process.connected && typeof process.send === 'function';
   }
 
-  protected async _sendSerialized(serialized: string): Promise<void> {
-    if (!process.send) throw new Error('[ipc-child] IPC channel is not available');
-    process.send(serialized);
+  protected override buildPingEnvelope(): Envelope<{ ts: number; nonce?: string }> {
+    const ts = Date.now();
+    const nonce = randomBytes(16).toString('hex');
+    this.nonces.set(nonce, ts);
+    return { action: Actions.Ping, payload: { ts, nonce }, timestamp: ts };
   }
 
-  /** Strict IPC outbox flow: send with correlationId and await exact OutboxStreamAck back. */
-  public async sendOutboxBatchAndWaitAckIPC(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
-    const correlationId = uuid();
-    const env: Envelope<OutboxStreamBatchPayload> = {
-      action: Actions.OutboxStreamBatch,
-      payload: { events },
-      timestamp: Date.now(),
-      correlationId,
-    };
+  public consumeNonce(nonce: string, maxAgeMs: number): boolean {
+    const ts = this.nonces.get(nonce);
+    if (typeof ts !== 'number') return false;
+    this.nonces.delete(nonce);
+    if (Date.now() - ts > maxAgeMs) return false;
+    return true;
+  }
 
-    // Size check here because we bypass generic waitForAck/sendMessage
-    const serialized = JSON.stringify(env); // TODO(perf): see BaseProducer comment re: payload re-escaping
-    const byteLen = utf8Len(serialized) + TRANSPORT_OVERHEAD_WIRE;
-    if (byteLen > this['cfg'].maxMessageBytes) {
-      throw new Error(`[ipc-child] message too large: ${byteLen} > ${this['cfg'].maxMessageBytes}`);
-    }
-    if (!(await this.isConnected())) {
-      throw new Error('[ipc-child] not connected');
-    }
+  public verifyProof(nonce: string, ts: number, proof: string): boolean {
+    if (!this.token) return false;
+    const windowMs = Math.min(30000, (this as any).configuration.heartbeatTimeoutMs || 8000);
+    if (!this.consumeNonce(nonce, windowMs)) return false;
+    const expected = createHmac('sha256', this.token).update(`${nonce}|${ts}`).digest('hex');
+    return expected === proof;
+  }
 
-    const d = defer<OutboxStreamAckPayload>();
-    this.pending.set(correlationId, d);
+  protected async _sendRaw(serialized: string): Promise<void> {
+    if (process.send) process.send(serialized);
+  }
 
-    const to = setTimeout(() => {
-      if (this.pending.delete(correlationId)) d.reject(new Error('[ipc-child] ACK timeout'));
-    }, this['cfg'].ackTimeoutMs);
-
+  /* eslint-disable no-empty */
+  private onProcessMessage(message: any): void {
     try {
-      await this._sendSerialized(serialized);
-      return await d.p;
-    } finally {
-      clearTimeout(to);
-      this.pending.delete(correlationId);
-    }
+      const envelope: Envelope<any> = typeof message === 'string' ? JSON.parse(message) : message;
+      if (!envelope || typeof envelope !== 'object') return;
+
+      if (envelope.action === Actions.Pong) {
+        this.onPong();
+        return;
+      }
+      if (envelope.action === Actions.OutboxStreamAck) {
+        this.resolveAck((envelope.payload || {}) as OutboxStreamAckPayload);
+        return;
+      }
+    } catch {}
   }
-
-  /** RPC request with correlationId */
-  public async request<TReq = unknown, TRes = unknown>(route: string, data?: TReq): Promise<TRes> {
-    const correlationId = uuid();
-    const env: Envelope = {
-      action: Actions.RpcRequest,
-      correlationId,
-      payload: { route, data },
-      timestamp: Date.now(),
-    };
-
-    const serialized = JSON.stringify(env);
-    const byteLen = utf8Len(serialized) + TRANSPORT_OVERHEAD_WIRE;
-    if (byteLen > this['cfg'].maxMessageBytes) {
-      throw new Error(`[ipc-child] message too large: ${byteLen} > ${this['cfg'].maxMessageBytes}`);
-    }
-    if (!(await this.isConnected())) {
-      throw new Error('[ipc-child] not connected');
-    }
-
-    const d = defer<TRes>();
-    this.pending.set(correlationId, d);
-
-    const to = setTimeout(() => {
-      if (this.pending.delete(correlationId)) d.reject(new Error(`[ipc-child] RPC timeout for ${route}`));
-    }, this['cfg'].ackTimeoutMs);
-
-    try {
-      await this._sendSerialized(serialized);
-      return await d.p;
-    } finally {
-      clearTimeout(to);
-      this.pending.delete(correlationId);
-    }
-  }
+  /* eslint-enable no-empty */
 }

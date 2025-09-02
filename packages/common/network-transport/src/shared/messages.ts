@@ -1,53 +1,55 @@
-export const TRANSPORT_OVERHEAD_WIRE = 256; // keep as MAX envelope overhead across transports
+export const TRANSPORT_OVERHEAD_WIRE = 256;
 
-// Generic envelope
 export interface Envelope<T = unknown> {
   action: string;
   payload?: T;
-  requestId?: string; // per-event idempotency (your current contract)
-  correlationId?: string; // request/response pairing (IPC strict ACK / RPC)
-  timestamp?: number; // producer time (ms)
+  requestId?: string;
+  correlationId?: string;
+  timestamp?: number;
 }
 
-// Ping/Pong
-export type PingPayload = { ts: number };
-export type PongPayload = { ts: number };
+export type PingPayload = {
+  ts: number;
+  nonce?: string;
+  sid?: string;
+};
+export type PongPayload = {
+  ts: number;
+  nonce?: string;
+  proof?: string;
+  sid?: string;
+};
 
-// Stream registration
 export type RegisterStreamConsumerPayload = { token?: string };
 
-// Outbox streaming
 export interface WireEventRecord {
   modelName: string;
   eventType: string;
   eventVersion: number;
   requestId: string;
   blockHeight: number | null;
-  payload: string; // decompressed JSON string (current contract)
+  payload: string;
   timestamp: number;
 }
 
 export interface OutboxStreamBatchPayload {
   events: WireEventRecord[];
 }
-
 export interface OutboxStreamAckPayload {
   allOk: boolean;
   okIndices?: number[];
 }
 
-// RPC
-export interface RpcRequestPayload {
-  route: string;
-  data?: any;
+export interface QueryRequestPayload {
+  name: string;
+  dto?: any;
 }
-export interface RpcResponsePayload {
-  route: string;
+export interface QueryResponsePayload {
+  name: string;
   data?: any;
   err?: string;
 }
 
-// Actions
 export const Actions = {
   Ping: 'ping',
   Pong: 'pong',
@@ -57,8 +59,8 @@ export const Actions = {
   OutboxStreamBatch: 'outboxStreamBatch',
   OutboxStreamAck: 'outboxStreamAck',
 
-  RpcRequest: 'rpc.request',
-  RpcResponse: 'rpc.response',
+  QueryRequest: 'query.request',
+  QueryResponse: 'query.response',
 
   Error: 'error',
 } as const;
