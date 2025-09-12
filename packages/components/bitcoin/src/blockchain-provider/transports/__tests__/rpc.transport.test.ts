@@ -89,8 +89,8 @@ describe('RPCTransport stability', () => {
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
       return [
-        { id: calls[2].id, result: 'C' },
-        { id: calls[0].id, result: 'A' },
+        { id: calls[2].id, result: 'C', error: null },
+        { id: calls[0].id, result: 'A', error: null },
       ];
     };
     const out = await a.batchCall([
@@ -105,7 +105,11 @@ describe('RPCTransport stability', () => {
     const a = makeTransport();
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
-      return calls.map((c: any, i: number) => ({ id: c.id, result: i === 1 ? null : 'abcd' }));
+      return calls.map((c: any, i: number) =>
+        i === 1
+          ? { id: c.id, result: null, error: null }
+          : { id: c.id, result: 'abcd', error: null }
+      );
     };
     const hashes = ['h1', 'h2', 'h3', 'h4'];
     const res = await a.requestHexBlocks(hashes);
@@ -119,7 +123,11 @@ describe('RPCTransport stability', () => {
     const a = makeTransport();
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
-      return calls.map((c: any, i: number) => ({ id: c.id, result: i === 2 ? null : `hash-${i}` }));
+      return calls.map((c: any, i: number) =>
+        i === 2
+          ? { id: c.id, result: null, error: null }
+          : { id: c.id, result: `hash-${i}`, error: null }
+      );
     };
     const out = await a.getManyBlockHashesByHeights([0, 1, 2, 3]);
     expect(out).toEqual(['hash-0', 'hash-1', null, 'hash-3']);

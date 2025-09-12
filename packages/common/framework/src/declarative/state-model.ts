@@ -6,7 +6,7 @@ export abstract class StateModel<State> extends Model {
   /** Optional default adapters at class level (can be overridden per instance in options). */
   static snapshotFieldAdapters?: Record<string, { toJSON(v: any): any; fromJSON(raw: any): any }>;
 
-  constructor(aggregateId: string, lastBlockHeight = -1, options?: any) {
+  constructor(aggregateId: string, lastBlockHeight: number, options?: any) {
     super(aggregateId, lastBlockHeight, {
       ...options,
       snapshotAdapters: {

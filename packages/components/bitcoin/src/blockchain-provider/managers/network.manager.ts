@@ -3,156 +3,147 @@ import { BaseConnectionManager } from './base.manager';
 
 export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvider> {
   private activeProviderName!: string;
+  private failedProviders: Set<string> = new Set();
+  private reconnectionAttempts: Map<string, number> = new Map();
+  private readonly maxReconnectionAttempts = 3;
+  private p2pInitialized: Set<string> = new Set();
 
+  /**
+   * Single-active strategy with automatic failover.
+   * 1) Connect all providers (idempotent).
+   * 2) Prefer healthy P2P, then healthy non-P2P.
+   * 3) Initialize P2P once per provider.
+   */
   async initialize(): Promise<void> {
-    await super.initialize();
-
-    // Initialize P2P providers first (they may need header sync)
-    const p2pProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type === 'p2p');
-    const otherProviders = Array.from(this.providers.values()).filter((p) => p.transport?.type !== 'p2p');
-
-    // Try P2P providers first
-    for (const provider of p2pProviders) {
-      try {
-        if (await provider.healthcheck()) {
-          // Initialize P2P-specific functionality
-          await provider.initializeP2P({
-            waitForHeaderSync: false, // Don't block initialization
-            headerSyncTimeout: 60000,
-          });
-
-          this.activeProviderName = provider.uniqName;
-          this.logger.info(`Set active P2P provider: ${provider.uniqName}`);
-          return;
-        }
-      } catch (error) {
-        this.logger.warn(`P2P provider ${provider.uniqName} failed to initialize`, { args: { error } });
-      }
+    const { connected } = await this.ensureConnectedAll();
+    if (connected.length === 0) {
+      throw new Error('Unable to connect to any providers');
     }
 
-    // Fallback to other providers
-    for (const provider of otherProviders) {
-      try {
-        if (await provider.healthcheck()) {
-          this.activeProviderName = provider.uniqName;
-          this.logger.info(`Set active provider: ${provider.uniqName}`);
-          return;
-        }
-      } catch (error) {
-        this.logger.warn(`Provider ${provider.uniqName} failed to initialize`, { args: { error } });
-      }
+    const p2p = connected.filter((p) => p.transport?.type === 'p2p');
+    for (const provider of p2p) {
+      const healthy = await provider.healthcheck().catch(() => false);
+      if (!healthy) continue;
+      await this.ensureP2PInitialized(provider);
+      this.activeProviderName = provider.uniqName;
+      this.logger.info(`Set active P2P provider: ${provider.uniqName}`);
+      return;
+    }
+
+    const others = connected.filter((p) => p.transport?.type !== 'p2p');
+    for (const provider of others) {
+      const healthy = await provider.healthcheck().catch(() => false);
+      if (!healthy) continue;
+      this.activeProviderName = provider.uniqName;
+      this.logger.info(`Set active provider: ${provider.uniqName}`);
+      return;
     }
 
     throw new Error('No healthy providers available for node operations');
   }
 
-  /**
-   * Manually switch to a specific provider
-   */
   async switchProvider(name: string): Promise<void> {
-    const provider = this.providers.get(name);
-    if (!provider) {
-      throw new Error(`Provider with name ${name} not found`);
+    const provider = await this.getProviderByName(name);
+    const ok = await this.ensureConnected(provider);
+    if (!ok) throw new Error(`Failed to connect to provider ${name}`);
+
+    if (provider.transport?.type === 'p2p') {
+      await this.ensureP2PInitialized(provider);
     }
 
-    if (await this.tryConnectProvider(provider)) {
-      this.activeProviderName = name;
+    this.failedProviders.delete(name);
+    this.reconnectionAttempts.delete(name);
+    this.activeProviderName = name;
 
-      // Reset failure state for manually selected provider
-      this.failedProviders.delete(name);
-      this.reconnectionAttempts.delete(name);
-
-      this.logger.info(`Manually switched to provider: ${(provider as any).constructor.name}`, {
-        args: { name },
-      });
-    } else {
-      throw new Error(`Failed to connect to provider ${name}`);
-    }
+    this.logger.info(`Manually switched to provider: ${(provider as any)?.constructor?.name}`, {
+      args: { name },
+    });
   }
 
-  /**
-   * Get P2P status from all providers
-   */
-  async getP2PStatus(): Promise<
-    Array<{
-      providerName: string;
-      status: any;
-    }>
-  > {
-    const results = [];
-
-    for (const [name, provider] of this.providers) {
-      try {
-        const status = await provider.getP2PStatus();
-        results.push({
-          providerName: name,
-          status,
-        });
-      } catch (error) {
-        results.push({
-          providerName: name,
-          status: { isP2P: false, error: (error as any)?.message },
-        });
-      }
-    }
-
-    return results;
-  }
-
-  // Existing methods remain the same...
   async getActiveProvider(): Promise<NetworkProvider> {
     const provider = this.providers.get(this.activeProviderName);
-    if (!provider) {
-      throw new Error(`Active provider ${this.activeProviderName} not found`);
-    }
+    if (!provider) throw new Error(`Active provider ${this.activeProviderName} not found`);
     return provider;
   }
 
-  protected async handleProviderSwitching(failedProvider: NetworkProvider): Promise<NetworkProvider> {
-    return await this.switchToNextAvailableProvider();
-  }
+  /* eslint-disable no-empty */
+  async handleProviderFailure(providerName: string, error: unknown, methodName: string): Promise<NetworkProvider> {
+    this.logger.warn('Provider operation failed, attempting recovery', {
+      args: { providerName, methodName, error: (error as any)?.message ?? 'Unknown error' },
+    });
 
-  private async switchToNextAvailableProvider(): Promise<NetworkProvider> {
-    const allProviders = Array.from(this.providers.values());
-    const currentIndex = allProviders.findIndex((p) => p.uniqName === this.activeProviderName);
+    const failedProvider = await this.getProviderByName(providerName);
+    this.failedProviders.add(providerName);
 
-    for (let i = 1; i <= allProviders.length; i++) {
-      const nextIndex = (currentIndex + i) % allProviders.length;
-      const nextProvider = allProviders[nextIndex];
+    const attempts = this.reconnectionAttempts.get(providerName) ?? 0;
+    this.reconnectionAttempts.set(providerName, attempts + 1);
 
-      if (!nextProvider) continue;
-
-      if (this.failedProviders.has(nextProvider.uniqName) && this.failedProviders.size < allProviders.length) {
-        continue;
-      }
-
+    if (attempts < this.maxReconnectionAttempts) {
       try {
-        if (await this.tryConnectProvider(nextProvider)) {
-          const oldProvider = this.activeProviderName;
-          this.activeProviderName = nextProvider.uniqName;
+        await failedProvider.disconnect();
+      } catch {}
+      this.connected.delete(providerName);
 
-          // Initialize P2P if needed
-          if (nextProvider.transport?.type === 'p2p') {
-            await nextProvider.initializeP2P({ waitForHeaderSync: false });
-          }
-
-          this.failedProviders.delete(nextProvider.uniqName);
-          this.reconnectionAttempts.delete(nextProvider.uniqName);
-
-          this.logger.info('Successfully switched to backup provider', {
-            args: { oldProvider, newProvider: this.activeProviderName },
-          });
-
-          return nextProvider;
+      const ok = await this.ensureConnected(failedProvider);
+      if (ok) {
+        if (failedProvider.transport?.type === 'p2p') {
+          await this.ensureP2PInitialized(failedProvider);
         }
-      } catch (error) {
-        this.logger.warn('Failed to switch to provider', {
-          args: { providerName: nextProvider.uniqName, error },
-        });
-        this.failedProviders.add(nextProvider.uniqName);
+        this.failedProviders.delete(providerName);
+        this.reconnectionAttempts.delete(providerName);
+        this.activeProviderName = providerName;
+        this.logger.info('Provider reconnection successful', { args: { providerName } });
+        return failedProvider;
       }
     }
 
+    return await this.switchToNextAvailableProvider();
+  }
+  /* eslint-enable no-empty */
+
+  private async switchToNextAvailableProvider(): Promise<NetworkProvider> {
+    const all = this.allProviders;
+    if (!this.activeProviderName) {
+      throw new Error('Active provider is not set');
+    }
+
+    const currentIndex = all.findIndex((p) => p.uniqName === this.activeProviderName);
+    for (let step = 1; step <= all.length; step++) {
+      const next = all[(currentIndex + step) % all.length];
+      if (!next) continue;
+
+      if (this.failedProviders.has(next.uniqName) && this.failedProviders.size < all.length) {
+        continue;
+      }
+
+      const ok = await this.ensureConnected(next);
+      if (!ok) {
+        this.failedProviders.add(next.uniqName);
+        continue;
+      }
+
+      if (next.transport?.type === 'p2p') {
+        await this.ensureP2PInitialized(next);
+      }
+
+      const old = this.activeProviderName;
+      this.activeProviderName = next.uniqName;
+      this.failedProviders.delete(next.uniqName);
+      this.reconnectionAttempts.delete(next.uniqName);
+
+      this.logger.info('Successfully switched to backup provider', {
+        args: { oldProvider: old, newProvider: this.activeProviderName },
+      });
+
+      return next;
+    }
+
     throw new Error('No working providers available');
+  }
+
+  private async ensureP2PInitialized(provider: NetworkProvider): Promise<void> {
+    if (this.p2pInitialized.has(provider.uniqName)) return;
+    await provider.initializeP2P({ waitForHeaderSync: false, headerSyncTimeout: 60000 });
+    this.p2pInitialized.add(provider.uniqName);
   }
 }

@@ -44,6 +44,7 @@ jest.mock('../declarative/state-model-compiler', () => {
 });
 
 class ConcreteModel {
+  constructor() {}
   async processBlock(): Promise<void> {}
 }
 
@@ -69,7 +70,7 @@ describe('normalizeModels', () => {
     };
     const walker = async () => {};
     const [Ctor] = normalizeModels([declarative as any], walker as any);
-    const instance = new (Ctor as any)('agg-1', 0);
+    const instance = new (Ctor as any)();
 
     expect(typeof (Ctor as any).modelName).toBe('string');
     expect((Ctor as any).modelName).toBe('Counter');
@@ -100,7 +101,7 @@ describe('normalizeModels', () => {
     expect(typeof result[1]).toBe('function');
     expect(result[2]).toBe(ConcreteModel);
 
-    const compiled = new (result[1] as any)('a', 1);
+    const compiled = new (result[1] as any)();
     expect((compiled as any).state).toEqual({ ok: true });
     expect(typeof (compiled as any).processBlock).toBe('function');
   });

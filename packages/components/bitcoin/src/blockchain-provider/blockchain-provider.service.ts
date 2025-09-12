@@ -651,20 +651,6 @@ export class BlockchainProviderService {
     );
   }
 
-  /**
-   * Get mempool statistics from all providers
-   */
-  public getMempoolProviderStats() {
-    return this.mempoolConnectionManager.getProviderStats();
-  }
-
-  /**
-   * Reset mempool provider failure state
-   */
-  public resetMempoolProviderFailures(): void {
-    this.mempoolConnectionManager.resetFailureState();
-  }
-
   // ===== UTILITY METHODS =====
 
   /**

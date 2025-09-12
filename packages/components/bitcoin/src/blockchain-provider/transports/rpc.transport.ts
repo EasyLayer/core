@@ -186,11 +186,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         headers.set('Authorization', `Basic ${auth}`);
       }
 
-      const callsWithIds = calls.map((call) => ({
-        ...call,
-        id: uuidv4(),
-      }));
-
+      const callsWithIds = calls.map((call) => ({ ...call, id: uuidv4() }));
       const payload = callsWithIds.map((call) => ({
         jsonrpc: '2.0',
         method: call.method,
@@ -201,37 +197,45 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), this.responseTimeout);
 
-      const init: UndiciRequestInit = {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: ac.signal,
-        dispatcher: this._dispatcher!,
-      };
+      try {
+        const init: UndiciRequestInit = {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: ac.signal,
+          dispatcher: this._dispatcher!,
+        };
 
-      const response = await fetch(this.baseUrl, init as unknown as RequestInit).finally(() => clearTimeout(timer));
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => '');
-        throw new Error(`HTTP error! Status: ${response.status}, ${errorText}`);
-      }
-
-      const raw = await response.json();
-      const array = Array.isArray(raw) ? raw : [raw];
-
-      const responseMap = new Map<string, { result?: any; error?: any }>();
-      for (const r of array) {
-        const id = r?.id;
-        if (typeof id === 'string' || typeof id === 'number') {
-          if (!responseMap.has(id as any)) responseMap.set(id as any, r);
+        const response = await fetch(this.baseUrl, init as unknown as RequestInit);
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          throw new Error(`HTTP ${response.status}: ${errorText}`);
         }
-      }
 
-      return callsWithIds.map((call) => {
-        const r = responseMap.get(call.id);
-        if (!r || r.error !== undefined) return null;
-        return (r.result ?? null) as TResult | null;
-      });
+        const raw = await response.json();
+        const array = Array.isArray(raw) ? raw : [raw];
+
+        const responseMap = new Map<string, { result?: any; error?: any }>();
+        for (const r of array) {
+          const id = r?.id;
+          if (typeof id === 'string' || typeof id === 'number') {
+            if (!responseMap.has(id as any)) responseMap.set(id as any, r);
+          }
+        }
+
+        return callsWithIds.map((call) => {
+          const r = responseMap.get(call.id);
+          if (!r || r.error !== null) return null;
+          return (r.result ?? null) as TResult | null;
+        });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          throw new Error(`RPC timeout after ${this.responseTimeout}ms at ${this.baseUrl}`);
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+      }
     }, 'batchCall');
   }
 

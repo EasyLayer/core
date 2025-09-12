@@ -1,13 +1,8 @@
 import { StateModel } from './state-model';
 import type { DeclarativeModel, ExecutionContext, SourceSpec } from '../types';
-import type { Model } from '../model';
+import type { Model, ZeroArgModelCtor } from '../model';
 
-/** Compiled (declarative) model constructor: instance IS a Model, plus `.state`. */
-export type CompiledModelClass<State, T extends Model = Model> = {
-  new (aggregateId: string, lastBlockHeight: number, override?: { options?: any }): T & { state: State };
-  modelName: string;
-};
-
+export type CompiledModelClass<State, T extends Model = Model> = ZeroArgModelCtor<T & { state: State }>;
 export type Walker = (from: string, block: any, fn: (ctx: any) => void | Promise<void>) => Promise<void>;
 
 /** Normalizes initial state descriptor to a factory function. */
@@ -23,12 +18,9 @@ export function compileStateModel<State>(
   const makeState = asFactory(state);
 
   class Compiled extends StateModel<State> {
-    static modelName = modelName;
-
-    constructor(aggregateId: string = modelName, lastBlockHeight: number = -1, override?: { options?: any }) {
-      const mergedOptions = { ...(options ?? {}), ...(override?.options ?? {}) };
-      super(aggregateId, lastBlockHeight, { ...mergedOptions, initialState: makeState });
-
+    constructor() {
+      const mergedOptions = { ...(options ?? {}), initialState: makeState };
+      super(modelName, -1, mergedOptions);
       for (const [eventName, reducer] of Object.entries(reducers ?? {})) {
         const bound = (e: any) => (reducer as any).call(this, e);
         Object.defineProperty(this, `on${eventName}`, {
@@ -49,13 +41,10 @@ export function compileStateModel<State>(
     public async processBlock(ctx: ExecutionContext): Promise<void> {
       const { block } = ctx ?? {};
       if (!block) return;
-
       const boundApplyEvent = this.applyEvent.bind(this);
-
       const baseCtx = Object.create(ctx);
       Object.defineProperty(baseCtx, 'state', { value: this.state, writable: false, enumerable: false });
       Object.defineProperty(baseCtx, 'applyEvent', { value: boundApplyEvent, writable: false, enumerable: false });
-
       const list = Object.values(sources ?? {}) as SourceSpec<State>[];
       for (const src of list) {
         await walker(src.from, block, (subctx: any) => {
@@ -67,6 +56,5 @@ export function compileStateModel<State>(
   }
 
   Object.defineProperty(Compiled, 'name', { value: `${modelName}Model` });
-
   return Compiled as unknown as CompiledModelClass<State, Model>;
 }

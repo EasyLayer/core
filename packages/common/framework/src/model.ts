@@ -1,14 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import { AggregateRoot, type AggregateOptions } from '@easylayer/common/cqrs';
+import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { ExecutionContext } from './types';
 import { makeNamedEventCtor } from './event';
 
-/** Class-based model constructor */
-export type ModelCtor<T extends Model = Model> = new (
-  aggregateId: string,
-  lastBlockHeight: number,
-  override?: { options?: any }
-) => T;
+export type AnyModelCtor<T extends Model = Model> = new (...args: any[]) => T;
+export type ZeroArgModelCtor<T extends Model = Model> = new () => T;
 
 export abstract class Model extends AggregateRoot {
   // Internal flag: true only while rehydrating from event history.

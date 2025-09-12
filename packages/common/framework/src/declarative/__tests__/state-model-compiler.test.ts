@@ -46,7 +46,7 @@ describe('compileStateModel', () => {
     jest.clearAllMocks();
   });
 
-  it('produces a named constructor and sets static modelName', () => {
+  it('produces a named constructor', () => {
     const declarative = {
       name: 'Counter',
       state: () => ({ count: 0 }),
@@ -58,7 +58,6 @@ describe('compileStateModel', () => {
     const Compiled = compileStateModel(declarative as any, walker as any);
     expect(typeof Compiled).toBe('function');
     expect((Compiled as any).name).toBe('CounterModel');
-    expect((Compiled as any).modelName).toBe('Counter');
   });
 
   it('initializes state from factory and allows reducers to mutate state', () => {
@@ -75,7 +74,7 @@ describe('compileStateModel', () => {
     };
     const walker = async () => {};
     const Compiled = compileStateModel(declarative as any, walker as any);
-    const instance = new (Compiled as any)('agg-1', 0);
+    const instance = new (Compiled as any)();
     expect(instance).toBeInstanceOf(Model);
     expect(instance.state).toEqual({ value: 1 });
     instance['onIncrement']({ delta: 3 });
@@ -120,8 +119,7 @@ describe('compileStateModel', () => {
     };
 
     const Compiled = compileStateModel(declarative as any, walker as any);
-    const aggregateId = 'agg-w';
-    const instance = new (Compiled as any)(aggregateId, 10);
+    const instance = new (Compiled as any)();
 
     const inputContext = { block: { height: 123 }, foo: 'bar' };
     await instance.processBlock(inputContext as any);
@@ -131,11 +129,11 @@ describe('compileStateModel', () => {
     const recorded = (instance as any).getUncommittedEvents();
     expect(Array.isArray(recorded)).toBe(true);
     expect(recorded.length).toBe(2);
-    expect(recorded[0].aggregateId).toBe(aggregateId);
+    expect(recorded[0].aggregateId).toBe('WalkerModel');
     expect(recorded[0].requestId).toBe('fixed-request-id');
     expect(recorded[0].blockHeight).toBe(123);
     expect(recorded[0].payload).toBe(payloadReference);
-    expect(recorded[1].aggregateId).toBe(aggregateId);
+    expect(recorded[1].aggregateId).toBe('WalkerModel');
     expect(recorded[1].blockHeight).toBe(123);
     expect(recorded[1].payload).toBe(payloadReference);
 
@@ -144,7 +142,7 @@ describe('compileStateModel', () => {
     expect(inputContext).toEqual({ block: { height: 123 }, foo: 'bar' });
   });
 
-  it('constructor merges options and supports default aggregateId and lastBlockHeight values', () => {
+  it('uses default aggregateId and lastBlockHeight in zero-args constructor', () => {
     const declarative = {
       name: 'DefaultsModel',
       state: { ok: true },
@@ -154,7 +152,7 @@ describe('compileStateModel', () => {
     };
     const walker = async () => {};
     const Compiled = compileStateModel(declarative as any, walker as any);
-    const instance = new (Compiled as any)(undefined as any, undefined as any, { options: { b: 2 } });
+    const instance = new (Compiled as any)();
     expect(instance.aggregateId).toBe('DefaultsModel');
     expect(instance.lastBlockHeight).toBe(-1);
   });

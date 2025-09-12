@@ -5,6 +5,13 @@ export interface BaseConnectionManagerOptions<T> {
   logger: AppLogger;
 }
 
+/**
+ * A minimal base that knows how to:
+ * - register providers
+ * - perform idempotent connects
+ * - disconnect and cleanup
+ * It does NOT define initialization or failover policies.
+ */
 export abstract class BaseConnectionManager<
   T extends {
     uniqName: string;
@@ -15,26 +22,21 @@ export abstract class BaseConnectionManager<
 > {
   protected providers: Map<string, T> = new Map();
   protected logger: AppLogger;
-
-  // Track failed providers for round-robin retry
-  protected failedProviders: Set<string> = new Set();
-  protected reconnectionAttempts: Map<string, number> = new Map();
-  protected readonly maxReconnectionAttempts = 3;
+  protected connected: Set<string> = new Set();
 
   constructor(options: BaseConnectionManagerOptions<T>) {
     this.logger = options.logger;
 
-    options.providers.forEach((provider) => {
+    for (const provider of options.providers) {
       const name = provider.uniqName;
       if (this.providers.has(name)) {
         throw new Error(`A provider with the name "${name}" has already been added.`);
       }
       this.providers.set(name, provider);
-
       this.logger.debug('Provider registered', {
-        args: { providerName: name, providerType: (provider as any).type },
+        args: { providerName: name, providerType: (provider as any)?.type },
       });
-    });
+    }
   }
 
   get allProviders(): T[] {
@@ -42,171 +44,74 @@ export abstract class BaseConnectionManager<
   }
 
   /**
-   * Initialize all providers - try to connect at least one
+   * Idempotent connect for a single provider.
    */
-  async initialize(): Promise<void> {
-    const allProviders = Array.from(this.providers.values());
-
-    let connectedCount = 0;
-    for (const provider of allProviders) {
-      try {
-        if (await this.tryConnectProvider(provider)) {
-          connectedCount++;
-          this.logger.info(`Connected to provider: ${(provider as any).constructor.name}`, {
-            args: { providerName: provider.uniqName, providerType: (provider as any).type },
-          });
-        }
-      } catch (error: any) {
-        this.logger.warn('Provider connection failed', {
-          args: {
-            providerName: provider.uniqName,
-            error: error.message || 'Unknown error',
-          },
-        });
-      }
+  protected async ensureConnected(provider: T): Promise<boolean> {
+    if (this.connected.has(provider.uniqName)) return true;
+    try {
+      await provider.connect();
+      this.connected.add(provider.uniqName);
+      return true;
+    } catch {
+      return false;
     }
-
-    if (connectedCount === 0) {
-      throw new Error('Unable to connect to any providers');
-    }
-
-    this.logger.info(`Connection manager initialized with ${connectedCount}/${allProviders.length} providers`);
   }
 
   /**
-   * Cleanup all providers
+   * Idempotent connect for all providers; subclasses decide how to interpret failures.
+   */
+  protected async ensureConnectedAll(): Promise<{ connected: T[]; failed: T[] }> {
+    const connected: T[] = [];
+    const failed: T[] = [];
+    for (const provider of this.providers.values()) {
+      const ok = await this.ensureConnected(provider);
+      if (ok) connected.push(provider);
+      else failed.push(provider);
+    }
+    return { connected, failed };
+  }
+
+  /**
+   * Full cleanup of all providers.
    */
   async destroy(): Promise<void> {
     for (const provider of this.providers.values()) {
-      this.logger.debug('Disconnecting provider', {
-        args: { providerName: provider.uniqName },
-      });
+      this.logger.debug('Disconnecting provider', { args: { providerName: provider.uniqName } });
       try {
         await provider.disconnect();
       } catch (error) {
         this.logger.warn('Error disconnecting provider during cleanup', {
           args: { error, providerName: provider.uniqName },
         });
+      } finally {
+        this.connected.delete(provider.uniqName);
       }
     }
   }
 
-  /**
-   * Handle provider failure and attempt recovery
-   */
-  async handleProviderFailure(providerName: string, error: any, methodName: string): Promise<T> {
-    this.logger.warn('Provider operation failed, attempting recovery', {
-      args: {
-        providerName,
-        methodName,
-        error: error.message || 'Unknown error',
-      },
-    });
-
-    const failedProvider = this.providers.get(providerName);
-    if (!failedProvider) {
-      throw new Error(`Provider ${providerName} not found`);
-    }
-
-    // Mark provider as failed
-    this.failedProviders.add(providerName);
-
-    // Increment reconnection attempts
-    const attempts = this.reconnectionAttempts.get(providerName) || 0;
-    this.reconnectionAttempts.set(providerName, attempts + 1);
-
-    // Try to reconnect current provider first
-    if (attempts < this.maxReconnectionAttempts) {
-      this.logger.debug('Attempting to reconnect current provider', {
-        args: { providerName, attempt: attempts + 1 },
-      });
-
-      try {
-        await failedProvider.disconnect();
-        if (await this.tryConnectProvider(failedProvider)) {
-          this.logger.info('Provider reconnection successful', {
-            args: { providerName },
-          });
-
-          // Reset failure state on successful reconnection
-          this.failedProviders.delete(providerName);
-          this.reconnectionAttempts.delete(providerName);
-          return failedProvider;
-        }
-      } catch (reconnectError) {
-        this.logger.warn('Provider reconnection failed', {
-          args: {
-            providerName,
-            attempt: attempts + 1,
-            error: reconnectError,
-          },
-        });
-      }
-    }
-
-    // Let specific implementations handle provider switching
-    return await this.handleProviderSwitching(failedProvider);
-  }
-
-  /**
-   * Abstract method for provider switching strategy
-   */
-  protected abstract handleProviderSwitching(failedProvider: T): Promise<T>;
-
-  /**
-   * Try to connect to a provider
-   */
-  protected async tryConnectProvider(provider: T): Promise<boolean> {
-    try {
-      await provider.connect();
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  /**
-   * Get provider by name
-   */
   async getProviderByName(name: string): Promise<T> {
     const provider = this.providers.get(name);
-    if (!provider) {
-      throw new Error(`Provider with name ${name} not found`);
-    }
+    if (!provider) throw new Error(`Provider with name ${name} not found`);
     return provider;
   }
 
-  /**
-   * Remove a provider
-   */
   async removeProvider(name: string): Promise<boolean> {
-    if (!this.providers.has(name)) {
-      throw new Error(`Provider with name ${name} not found`);
-    }
-
-    const provider = this.providers.get(name)!;
+    const provider = this.providers.get(name);
+    if (!provider) throw new Error(`Provider with name ${name} not found`);
     try {
       await provider.disconnect();
     } catch (error) {
-      this.logger.error('Error disconnecting provider during removal', {
-        args: { error, name },
-      });
+      this.logger.error('Error disconnecting provider during removal', { args: { error, name } });
+    } finally {
+      this.connected.delete(name);
     }
-
-    // Clean up failure tracking
-    this.failedProviders.delete(name);
-    this.reconnectionAttempts.delete(name);
-
     return this.providers.delete(name);
   }
 
-  /**
-   * Get connection options for all providers
-   */
   getConnectionOptionsForAllProviders(): any[] {
     const options: any[] = [];
     for (const provider of this.providers.values()) {
-      options.push((provider as any).connectionOptions);
+      options.push((provider as any)?.connectionOptions);
     }
     return options;
   }

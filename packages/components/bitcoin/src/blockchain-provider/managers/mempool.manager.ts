@@ -5,44 +5,36 @@ export type MempoolRequestStrategy = 'parallel' | 'round-robin' | 'fastest' | 's
 
 export interface MempoolRequestOptions {
   strategy?: MempoolRequestStrategy;
-  providerName?: string; // For 'single' strategy
+  providerName?: string;
   timeout?: number;
 }
 
+/**
+ * Multi-provider strategy:
+ * - Connect all providers
+ * - No automatic switching inside manager; strategies drive usage
+ * - Recovery delegates to per-call handling
+ */
 export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvider> {
   private currentProviderIndex = 0;
 
-  /**
-   * Handle provider switching for multiple provider strategy
-   */
-  protected async handleProviderSwitching(failedProvider: MempoolProvider): Promise<MempoolProvider> {
-    // For mempool, we don't switch - we return the failed provider
-    // The service layer will handle retries and strategies
-    throw new Error(`Provider ${failedProvider.uniqName} failed and requires service-level handling`);
-  }
-
-  /**
-   * Get all healthy providers
-   */
-  async getHealthyProviders(): Promise<MempoolProvider[]> {
-    const healthyProviders: MempoolProvider[] = [];
-
-    for (const provider of this.providers.values()) {
-      try {
-        if (await provider.healthcheck()) {
-          healthyProviders.push(provider);
-        }
-      } catch (error) {
-        // Provider not healthy, skip
-      }
+  async initialize(): Promise<void> {
+    const { connected } = await this.ensureConnectedAll();
+    if (connected.length === 0) {
+      throw new Error('Unable to connect to any mempool providers');
     }
-
-    return healthyProviders;
+    this.logger.info(`Mempool connected providers: ${connected.map((p) => p.uniqName).join(', ')}`);
   }
 
-  /**
-   * Execute operation with specified strategy
-   */
+  protected async getHealthyProviders(): Promise<MempoolProvider[]> {
+    const result: MempoolProvider[] = [];
+    for (const provider of this.providers.values()) {
+      const healthy = await provider.healthcheck().catch(() => false);
+      if (healthy) result.push(provider);
+    }
+    return result;
+  }
+
   async executeWithStrategy<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
     options: MempoolRequestOptions = {}
@@ -52,182 +44,102 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     switch (strategy) {
       case 'single':
         return await this.executeSingle(operation, providerName);
-
       case 'parallel':
         return await this.executeParallel(operation, timeout);
-
       case 'fastest':
         return await this.executeFastest(operation, timeout);
-
       case 'round-robin':
       default:
         return await this.executeRoundRobin(operation);
     }
   }
 
-  /**
-   * Execute on single specified provider
-   */
   private async executeSingle<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
     providerName?: string
   ): Promise<T> {
-    if (!providerName) {
-      throw new Error('Provider name is required for single strategy');
-    }
-
-    const provider = this.providers.get(providerName);
-    if (!provider) {
-      throw new Error(`Provider ${providerName} not found`);
-    }
-
+    if (!providerName) throw new Error('Provider name is required for single strategy');
+    const provider = await this.getProviderByName(providerName);
     try {
       return await operation(provider);
     } catch (error) {
-      // Attempt recovery through base class
-      const recoveredProvider = await this.handleProviderFailure(providerName, error, 'executeSingle');
-      return await operation(recoveredProvider);
+      throw new Error(`Provider ${provider.uniqName} failed: ${(error as any)?.message ?? error}`);
     }
   }
 
-  /**
-   * Execute on all providers in parallel, return first successful result
-   */
   private async executeParallel<T>(operation: (provider: MempoolProvider) => Promise<T>, timeout: number): Promise<T> {
-    const healthyProviders = await this.getHealthyProviders();
+    const healthy = await this.getHealthyProviders();
+    if (healthy.length === 0) throw new Error('No healthy providers available for parallel execution');
 
-    if (healthyProviders.length === 0) {
-      throw new Error('No healthy providers available for parallel execution');
-    }
-
-    const promises = healthyProviders.map(async (provider) => {
-      try {
-        return await Promise.race([
-          operation(provider),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeout)),
-        ]);
-      } catch (error) {
-        throw new Error(`Provider ${provider.uniqName} failed: ${error}`);
-      }
-    });
+    const tasks = healthy.map((provider) =>
+      Promise.race([
+        operation(provider),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeout)),
+      ])
+    );
 
     try {
-      return await Promise.any(promises);
-    } catch (error) {
+      return await Promise.any(tasks);
+    } catch {
       throw new Error('All parallel operations failed');
     }
   }
 
-  /**
-   * Execute on all providers, return fastest successful result
-   */
   private async executeFastest<T>(operation: (provider: MempoolProvider) => Promise<T>, timeout: number): Promise<T> {
-    const healthyProviders = await this.getHealthyProviders();
-
-    if (healthyProviders.length === 0) {
-      throw new Error('No healthy providers available for fastest execution');
-    }
-
-    // Same as parallel for now, but could be enhanced with provider performance tracking
-    return await this.executeParallel(operation, timeout);
+    return this.executeParallel(operation, timeout);
   }
 
-  /**
-   * Execute using round-robin provider selection
-   */
   private async executeRoundRobin<T>(operation: (provider: MempoolProvider) => Promise<T>): Promise<T> {
-    const healthyProviders = await this.getHealthyProviders();
+    const healthy = await this.getHealthyProviders();
+    if (healthy.length === 0) throw new Error('No healthy providers available for round-robin execution');
 
-    if (healthyProviders.length === 0) {
-      throw new Error('No healthy providers available for round-robin execution');
-    }
-
-    // Select next provider in round-robin fashion
-    const provider = healthyProviders[this.currentProviderIndex % healthyProviders.length]!;
-    this.currentProviderIndex = (this.currentProviderIndex + 1) % healthyProviders.length;
+    const first = healthy[this.currentProviderIndex % healthy.length]!;
+    this.currentProviderIndex = (this.currentProviderIndex + 1) % healthy.length;
 
     try {
-      return await operation(provider);
-    } catch (error) {
-      // Try next provider in round-robin
-      const nextProvider = healthyProviders[this.currentProviderIndex % healthyProviders.length]!;
-      this.currentProviderIndex = (this.currentProviderIndex + 1) % healthyProviders.length;
-
-      try {
-        return await operation(nextProvider);
-      } catch (secondError) {
-        // If second attempt also fails, attempt recovery
-        try {
-          const recoveredProvider = await this.handleProviderFailure(provider.uniqName, error, 'executeRoundRobin');
-          return await operation(recoveredProvider);
-        } catch (recoveryError) {
-          throw new Error('Round-robin execution failed on all attempts');
-        }
-      }
+      return await operation(first);
+    } catch {
+      const second = healthy[this.currentProviderIndex % healthy.length]!;
+      this.currentProviderIndex = (this.currentProviderIndex + 1) % healthy.length;
+      return await operation(second);
     }
   }
 
-  /**
-   * Execute operation on multiple providers and combine results
-   */
   async executeOnMultiple<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
     options: MempoolRequestOptions = {}
   ): Promise<T[]> {
     const { timeout = 30000 } = options;
-    const healthyProviders = await this.getHealthyProviders();
+    const healthy = await this.getHealthyProviders();
+    if (healthy.length === 0) throw new Error('No healthy providers available for multiple execution');
 
-    if (healthyProviders.length === 0) {
-      throw new Error('No healthy providers available for multiple execution');
-    }
-
-    const promises = healthyProviders.map(async (provider): Promise<T | null> => {
-      try {
-        const result = await Promise.race([
+    const results = await Promise.allSettled(
+      healthy.map((provider) =>
+        Promise.race([
           operation(provider),
           new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeout)),
-        ]);
-        return result;
-      } catch (error) {
-        this.logger.warn('Provider operation failed in multiple execution', {
-          args: { providerName: provider.uniqName, error: (error as any)?.message },
-        });
-        return null; // Return null for failed operations
-      }
-    });
+        ])
+          .then((v) => ({ ok: true as const, v }))
+          .catch((e) => {
+            this.logger.warn('Provider operation failed in multiple execution', {
+              args: { providerName: provider.uniqName, error: (e as any)?.message },
+            });
+            return { ok: false as const };
+          })
+      )
+    );
 
-    const results = await Promise.allSettled(promises);
-    const successfulResults: T[] = [];
-
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value !== null) {
-        successfulResults.push(result.value);
-      }
+    const values: T[] = [];
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.ok) values.push(r.value.v as T);
     }
-
-    if (successfulResults.length === 0) {
-      throw new Error('All providers failed in multiple execution');
-    }
-
-    return successfulResults;
+    if (values.length === 0) throw new Error('All providers failed in multiple execution');
+    return values;
   }
 
-  /**
-   * Get provider statistics
-   */
   getProviderStats(): { total: number; healthy: number; failed: number } {
     const total = this.providers.size;
-    const failed = this.failedProviders.size;
-    const healthy = total - failed;
-
-    return { total, healthy, failed };
-  }
-
-  /**
-   * Reset provider failure state
-   */
-  resetFailureState(): void {
-    this.failedProviders.clear();
-    this.reconnectionAttempts.clear();
+    // No global failed tracking here; health is dynamic per-request
+    return { total, healthy: total, failed: 0 };
   }
 }
