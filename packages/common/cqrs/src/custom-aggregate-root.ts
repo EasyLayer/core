@@ -465,31 +465,10 @@ export abstract class CustomAggregateRoot<E extends DomainEvent = DomainEvent> {
     return constructor.name as string;
   }
 
-  private setEventMetadata<T extends E>(event: T): void {
+  protected setEventMetadata<T extends E>(event: T): void {
     const eventName = this.getEventName(event);
     if (!Reflect.hasOwnMetadata(EVENT_METADATA, event.constructor)) {
       Reflect.defineMetadata(EVENT_METADATA, { id: eventName }, event.constructor);
     }
-  }
-
-  private getCircularReplacer() {
-    const seen = new WeakSet();
-    return function (key: any, value: any) {
-      // Check is used to ensure that the current value is an object but not null (since typeof null === 'object).
-      if (typeof value === 'object' && value !== null) {
-        if (seen.has(value)) {
-          // If the object has already been processed (i.e. it is in a WeakSet),
-          // this means that a circular reference has been found and the function returns undefined instead,
-          // (which prevents the circular reference from being serialized).
-          // Skip cyclic references
-          return;
-        }
-        // If the object has not yet been seen,
-        // it is added to the WeakSet using seen.add(value)
-        // to keep track of which objects have already been processed.
-        seen.add(value);
-      }
-      return value;
-    };
   }
 }

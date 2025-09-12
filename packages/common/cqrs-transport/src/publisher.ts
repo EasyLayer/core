@@ -83,41 +83,24 @@ export class Publisher implements IEventPublisher<DomainEvent> {
     return this.systemModelNamesSet.has(wireEvent.modelName);
   }
 
-  /**
-   * Create a DomainEvent instance from a wire record.
-   *
-   * Important bits:
-   * - We create a tiny "constructor" object whose name equals the event type (class name).
-   * - We **stamp NestJS EVENT_METADATA** on that constructor: { id: <type-name> }.
-   *   This makes the event discoverable by Nest CQRS internals & by our CustomEventBus.
-   * - This happens **only** for whitelisted (system) events.
-   */
   private createDomainEventFromWire(wireEvent: WireEventRecord): DomainEvent {
     const body = JSON.parse(wireEvent.payload);
 
-    // Synthetic constructor “holder” whose name matches the wire event type.
-    // We attach EVENT_METADATA to it so CQRS filtering by id keeps working.
-    const ctor: any = { name: wireEvent.eventType };
-    setEventMetadata(ctor as any);
+    const EventCtor: any = function () {};
+    Object.defineProperty(EventCtor, 'name', { value: wireEvent.eventType, configurable: true });
+    setEventMetadata(EventCtor as any);
 
-    // Build a plain event object with OWN 'payload' property (no prototype tricks).
     const event: DomainEvent = {
       aggregateId: wireEvent.modelName,
       requestId: wireEvent.requestId,
       blockHeight: wireEvent.blockHeight,
       timestamp: wireEvent.timestamp,
-      payload: body, // parsed JSON body as a normal field
+      payload: body,
     };
 
-    // Ensure event.constructor.name === wireEvent.eventType for ofType()/metadata routes,
-    // but do NOT put payload on the prototype. Make it non-enumerable to avoid leaking in JSON.
-    Object.defineProperty(event, 'constructor', {
-      value: ctor,
-      writable: false,
-      enumerable: false,
-      configurable: true,
-    });
+    const instance = Object.assign(Object.create(EventCtor.prototype), event);
+    Object.defineProperty(instance, 'constructor', { value: EventCtor, writable: false, enumerable: false });
 
-    return event;
+    return instance;
   }
 }
