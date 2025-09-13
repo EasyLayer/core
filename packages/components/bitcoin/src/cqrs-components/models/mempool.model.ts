@@ -403,9 +403,9 @@ export class Mempool extends AggregateRoot {
 
     const allTxidsFromNode = Array.from(aggregatedTxids);
 
-    if (allTxidsFromNode.length === 0) {
-      throw new MempoolSizeMismatchError();
-    }
+    // if (allTxidsFromNode.length === 0) {
+    //   throw new MempoolSizeMismatchError();
+    // }
 
     // Filter metadata by fee rate criteria - only include txids that meet minimum fee rate
     const filteredMetadata = new Map<string, MempoolTransaction>();
@@ -461,7 +461,7 @@ export class Mempool extends AggregateRoot {
       const loadedCount = this.loadedTxids.size;
       const loadedPercent = totalMetadataExpected > 0 ? loadedCount / totalMetadataExpected : 0;
 
-      if (loadedPercent >= this.syncThresholdPercent) {
+      if (loadedPercent === 0 || loadedPercent >= this.syncThresholdPercent) {
         this.apply(
           new BitcoinMempoolSynchronizedEvent(
             {
@@ -598,11 +598,11 @@ export class Mempool extends AggregateRoot {
    */
   public async processReorganisation({
     requestId,
-    blocks,
+    reorgHeight,
     service,
   }: {
     requestId: string;
-    blocks: Array<{ height: number; hash: string; tx?: string[] }>;
+    reorgHeight: number;
     service: BlockchainProviderService;
   }) {
     // Get fresh mempool data after reorganization
@@ -611,9 +611,9 @@ export class Mempool extends AggregateRoot {
       service.getRawMempoolFromAll(true),
     ]);
 
-    if (allRawMempoolsTxids.length === 0) {
-      throw new MempoolSizeMismatchError();
-    }
+    // if (allRawMempoolsTxids.length === 0) {
+    //   throw new MempoolSizeMismatchError();
+    // }
 
     // Aggregate fresh txids and metadata
     const aggregatedTxids = new Set<string>();
@@ -649,7 +649,6 @@ export class Mempool extends AggregateRoot {
     }
 
     const allTxidsFromNode = Array.from(aggregatedTxids);
-    const reorgBlockHeight = blocks.length > 0 ? blocks[0]?.height || this.lastBlockHeight : this.lastBlockHeight;
 
     // Filter metadata by fee rate criteria
     const filteredMetadata = new Map<string, MempoolTransaction>();
@@ -666,7 +665,7 @@ export class Mempool extends AggregateRoot {
         {
           aggregateId: this.aggregateId,
           requestId,
-          blockHeight: reorgBlockHeight,
+          blockHeight: reorgHeight,
         },
         {
           allTxidsFromNode,
