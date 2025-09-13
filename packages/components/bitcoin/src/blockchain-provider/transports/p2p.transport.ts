@@ -4,6 +4,8 @@ import { Pool, Peer, Messages } from 'bitcore-p2p';
 import type { BaseTransportOptions } from './base.transport';
 import { BaseTransport } from './base.transport';
 
+const isNodeLike = typeof process !== 'undefined' && !!process.versions?.node;
+
 /**
  * P2P Transport with guaranteed request-response order via position mapping
  *
@@ -123,6 +125,10 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   constructor(options: P2PTransportOptions) {
     super(options);
+
+    if (!isNodeLike) {
+      throw new Error('P2PTransport requires Node/Electron main. Use RPCTransport in browser.');
+    }
 
     this.peers = options.peers;
     this.connectionTimeout = options.connectionTimeout ?? 30000;

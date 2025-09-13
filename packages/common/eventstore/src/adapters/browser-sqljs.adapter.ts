@@ -574,10 +574,12 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
     const table = model.aggregateId!;
     const rows = (await this.dataSource.query(
       `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-       FROM "${table}"
-       WHERE "blockHeight" IS NOT NULL AND "blockHeight" > ? AND "blockHeight" <= ?
-       ORDER BY "version" ASC`,
-      [snap.blockHeight, blockHeight]
+      FROM "${table}"
+      WHERE "blockHeight" IS NOT NULL
+        AND "version" > ?
+        AND "blockHeight" <= ?
+      ORDER BY "version" ASC`,
+      [snap.version, blockHeight]
     )) as Array<{
       type: string;
       requestId: string;

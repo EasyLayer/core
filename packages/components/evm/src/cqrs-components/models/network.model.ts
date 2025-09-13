@@ -43,11 +43,6 @@ export class Network extends AggregateRoot {
 
   // ===== GETTERS =====
 
-  // Getter for current block height in the chain
-  public get currentBlockHeight(): number | undefined {
-    return this.chain.lastBlockHeight;
-  }
-
   /**
    * Gets the last block in chain
    * Complexity: O(1)

@@ -62,14 +62,6 @@ export class Network extends AggregateRoot {
   // ===== GETTERS =====
 
   /**
-   * Getter for current block height in the chain
-   * Time complexity: O(1)
-   */
-  public get currentBlockHeight(): number | undefined {
-    return this.chain.lastBlockHeight;
-  }
-
-  /**
    * Gets the last block in chain
    * Time complexity: O(1)
    */
@@ -237,7 +229,7 @@ export class Network extends AggregateRoot {
         {
           aggregateId: this.aggregateId,
           requestId,
-          blockHeight: blocks[blocks.length - 1]?.height || -1,
+          blockHeight: blocks[blocks.length - 1]?.height ?? -1,
         },
         { blocks }
       )

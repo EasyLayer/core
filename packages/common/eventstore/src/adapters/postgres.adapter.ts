@@ -552,10 +552,12 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     const table = model.aggregateId!;
     const rows = (await this.dataSource.query(
       `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-       FROM "${table}"
-       WHERE "blockHeight" IS NOT NULL AND "blockHeight" > $1 AND "blockHeight" <= $2
-       ORDER BY "version" ASC`,
-      [snap.blockHeight, blockHeight]
+      FROM "${table}"
+      WHERE "blockHeight" IS NOT NULL
+        AND "version" > $1
+        AND "blockHeight" <= $2
+      ORDER BY "version" ASC`,
+      [snap.version, blockHeight]
     )) as Array<{
       type: string;
       requestId: string;

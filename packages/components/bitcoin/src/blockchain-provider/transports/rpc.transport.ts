@@ -1,6 +1,3 @@
-import { Agent as UndiciAgent } from 'undici';
-import type { RequestInit as UndiciRequestInit } from 'undici';
-import * as zmq from 'zeromq';
 import { v4 as uuidv4 } from 'uuid';
 import type { BaseTransportOptions } from './base.transport';
 import { BaseTransport } from './base.transport';
@@ -11,10 +8,65 @@ export interface RPCTransportOptions extends BaseTransportOptions {
   zmqEndpoint?: string;
 }
 
+type Bytes = Buffer | Uint8Array;
+
 type BlockSubscriber = {
-  onData: (blockData: Buffer) => void;
+  onData: (blockData: Bytes) => void;
   onError?: (err: Error) => void;
 };
+
+const isNodeLike = typeof process !== 'undefined' && !!process.versions?.node;
+const isPureBrowser = !isNodeLike;
+
+function toBase64(str: string): string {
+  // Node: Buffer is; Browser: btoa
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(str).toString('base64');
+  }
+  if (typeof btoa !== 'undefined') {
+    return btoa(str);
+  }
+  return (globalThis as any).btoa?.(str) ?? '';
+}
+
+function uuid(): string {
+  try {
+    return uuidv4();
+  } catch {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+      // @ts-ignore
+      return crypto.randomUUID();
+    }
+    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+}
+
+/** Returns true when Node/Electron Buffer API is available at runtime. */
+function hasNodeBuffer(): boolean {
+  return typeof Buffer !== 'undefined' && typeof Buffer.from === 'function';
+}
+
+/** Hex → Uint8Array (browser-safe) */
+function hexToU8(hex: string): Uint8Array {
+  const clean = hex.length % 2 === 0 ? hex : '0' + hex;
+  const len = clean.length / 2;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    // faster than parseInt on hot paths
+    const byte = Number('0x' + clean.substr(i * 2, 2));
+    out[i] = byte;
+  }
+  return out;
+}
+
+/**
+ * Convert arbitrary byte-like data to a Buffer at runtime when Buffer exists.
+ * In the browser we keep Uint8Array but type-cast to Buffer to satisfy BaseTransport's signature.
+ * Consumers should treat it as read-only bytes and not call Buffer-specific APIs in the browser.
+ */
+function toBufferLike(u8: Uint8Array): Buffer {
+  return hasNodeBuffer() ? Buffer.from(u8) : (u8 as unknown as Buffer);
+}
 
 /**
  * RPC Transport with guaranteed request-response order via UUID matching
@@ -41,22 +93,19 @@ type BlockSubscriber = {
 export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   readonly type = 'rpc';
 
-  private static sharedDispatcher: UndiciAgent | null = null;
-
   private baseUrl: string;
   private username?: string;
   private password?: string;
   private responseTimeout: number;
 
-  private _dispatcher: UndiciAgent | null = null;
-
+  // ZMQ (Node only; not used in browser)
   private zmqEndpoint?: string;
-  private zmqSocket?: zmq.Subscriber;
+  private zmqSocket?: any;
   private zmqRunning = false;
   private blockSubscriptions = new Set<BlockSubscriber>();
 
   private zmqReconnectAttempts = 0;
-  private zmqReconnectTimer?: NodeJS.Timeout;
+  private zmqReconnectTimer?: any;
 
   constructor(options: RPCTransportOptions) {
     super(options);
@@ -70,15 +119,6 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
 
     this.responseTimeout = options.responseTimeout ?? 5000;
     this.zmqEndpoint = options.zmqEndpoint;
-
-    if (!RPCTransport.sharedDispatcher) {
-      RPCTransport.sharedDispatcher = new UndiciAgent({
-        keepAliveTimeout: 10_000,
-        keepAliveMaxTimeout: 15_000,
-        connections: 8,
-      });
-    }
-    this._dispatcher = RPCTransport.sharedDispatcher;
   }
 
   get connectionOptions(): RPCTransportOptions {
@@ -99,7 +139,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         throw new Error('Cannot connect to RPC node');
       }
 
-      if (this.zmqEndpoint) {
+      if (isNodeLike && this.zmqEndpoint) {
         await this.initializeZMQ();
       }
 
@@ -153,28 +193,38 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
    * ORDER GUARANTEE: results[i] corresponds to hashes[i]
    * Missing/failed items return null at the same index
    */
-  async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
+  public async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
     return this.executeWithErrorHandling(async () => {
       const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] }));
       const hexResults = await this.rateLimiter.execute(requests, (calls) => this.batchCall<string>(calls));
+
       const out: (Buffer | null)[] = new Array(hashes.length);
       for (let i = 0; i < hexResults.length; i++) {
         const hex = hexResults[i];
-        out[i] = typeof hex === 'string' ? Buffer.from(hex, 'hex') : null;
+        if (typeof hex !== 'string') {
+          out[i] = null;
+          continue;
+        }
+
+        // Node/Electron: real Buffer; Browser: Uint8Array casted as Buffer (type-only)
+        if (hasNodeBuffer()) {
+          out[i] = Buffer.from(hex, 'hex');
+        } else {
+          const u8 = hexToU8(hex);
+          out[i] = toBufferLike(u8);
+        }
       }
       return out;
     }, 'requestHexBlocks');
   }
 
   /**
-   * Core batch RPC with UUID matching for order guarantee
-   *
-   * Process:
-   * 1. Generate unique UUID for each request
-   * 2. Send JSON-RPC batch with UUIDs
-   * 3. Match responses by UUID (ignore server order)
-   * 4. Build result array in original request order
-   * 5. Fill missing responses with null
+   * Core batch RPC with order guarantee via UUID mapping
+   * 1) generate UUID for each request
+   * 2) send JSON-RPC batch
+   * 3) map responses by UUID (ignore server order)
+   * 4) collect results in original order
+   * 5) fill gaps with null
    */
   async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
     return this.executeWithErrorHandling(async () => {
@@ -182,11 +232,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       headers.set('Content-Type', 'application/json');
 
       if (this.username && this.password) {
-        const auth = Buffer.from(`${this.username}:${this.password}`).toString('base64');
+        const auth = toBase64(`${this.username}:${this.password}`);
         headers.set('Authorization', `Basic ${auth}`);
       }
 
-      const callsWithIds = calls.map((call) => ({ ...call, id: uuidv4() }));
+      const callsWithIds = calls.map((call) => ({ ...call, id: uuid() }));
       const payload = callsWithIds.map((call) => ({
         jsonrpc: '2.0',
         method: call.method,
@@ -198,15 +248,15 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       const timer = setTimeout(() => ac.abort(), this.responseTimeout);
 
       try {
-        const init: UndiciRequestInit = {
+        const init: RequestInit = {
           method: 'POST',
           headers,
           body: JSON.stringify(payload),
           signal: ac.signal,
-          dispatcher: this._dispatcher!,
         };
 
-        const response = await fetch(this.baseUrl, init as unknown as RequestInit);
+        // In Node and in the browser we use global fetch
+        const response = await fetch(this.baseUrl, init);
         if (!response.ok) {
           const errorText = await response.text().catch(() => '');
           throw new Error(`HTTP ${response.status}: ${errorText}`);
@@ -215,17 +265,17 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         const raw = await response.json();
         const array = Array.isArray(raw) ? raw : [raw];
 
-        const responseMap = new Map<string, { result?: any; error?: any }>();
+        const responseMap = new Map<string | number, { result?: any; error?: any }>();
         for (const r of array) {
           const id = r?.id;
           if (typeof id === 'string' || typeof id === 'number') {
-            if (!responseMap.has(id as any)) responseMap.set(id as any, r);
+            if (!responseMap.has(id)) responseMap.set(id, r);
           }
         }
 
         return callsWithIds.map((call) => {
           const r = responseMap.get(call.id);
-          if (!r || r.error !== null) return null;
+          if (!r || r.error != null) return null;
           return (r.result ?? null) as TResult | null;
         });
       } catch (err: any) {
@@ -239,11 +289,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     }, 'batchCall');
   }
 
-  subscribeToNewBlocks(
+  public subscribeToNewBlocks(
     callback: (blockData: Buffer) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
-    const sub: BlockSubscriber = { onData: callback, onError };
+    const sub: BlockSubscriber = { onData: (b) => callback(b as unknown as Buffer), onError };
     this.blockSubscriptions.add(sub);
 
     if (this.blockSubscriptions.size === 1 && this.zmqEndpoint && !this.zmqRunning) {
@@ -255,18 +305,18 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     return {
       unsubscribe: () => {
         this.blockSubscriptions.delete(sub);
-        if (this.blockSubscriptions.size === 0) {
-          this.cleanupZMQ();
-        }
+        if (this.blockSubscriptions.size === 0) this.cleanupZMQ();
       },
     };
   }
 
   private async initializeZMQ(): Promise<void> {
-    if (!this.zmqEndpoint || this.zmqRunning) return;
+    if (isPureBrowser || !this.zmqEndpoint || this.zmqRunning) return;
 
     try {
-      this.zmqSocket = new zmq.Subscriber();
+      const zmq = await import('zeromq');
+      const { Subscriber } = zmq as any;
+      this.zmqSocket = new Subscriber();
       this.zmqSocket.connect(this.zmqEndpoint);
       this.zmqSocket.subscribe('rawblock');
       this.zmqRunning = true;
@@ -289,10 +339,23 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         const arr = Array.isArray(frames) ? frames : [frames];
         const topicFrame = arr[0];
         const topicStr =
-          typeof topicFrame === 'string' ? topicFrame : Buffer.isBuffer(topicFrame) ? topicFrame.toString() : '';
+          typeof topicFrame === 'string'
+            ? topicFrame
+            : typeof Buffer !== 'undefined' && (topicFrame as any)?.byteLength !== undefined
+              ? Buffer.isBuffer(topicFrame)
+                ? (topicFrame as Buffer).toString()
+                : Buffer.from(topicFrame).toString()
+              : String(topicFrame);
+
         if (topicStr === 'rawblock' && this.blockSubscriptions.size > 0) {
           const blockFrame = arr[arr.length - 1]!;
-          const blockBuffer = Buffer.isBuffer(blockFrame) ? blockFrame : Buffer.from(blockFrame);
+          const blockBuffer: Bytes =
+            typeof Buffer !== 'undefined' && (Buffer as any).isBuffer?.(blockFrame)
+              ? (blockFrame as Buffer)
+              : typeof Buffer !== 'undefined'
+                ? Buffer.from(blockFrame)
+                : new Uint8Array(blockFrame);
+
           for (const s of this.blockSubscriptions) {
             try {
               s.onData(blockBuffer);
@@ -309,10 +372,10 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     }
   }
 
-  private scheduleZMQReconnect(cause: unknown): void {
+  private scheduleZMQReconnect(_cause: unknown): void {
     this.cleanupZMQ();
 
-    if (!this.zmqEndpoint || this.blockSubscriptions.size === 0) return;
+    if (isPureBrowser || !this.zmqEndpoint || this.blockSubscriptions.size === 0) return;
 
     const attempt = ++this.zmqReconnectAttempts;
     const delay = Math.min(30_000, 500 * Math.pow(2, attempt));

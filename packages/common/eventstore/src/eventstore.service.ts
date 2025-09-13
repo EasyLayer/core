@@ -173,18 +173,21 @@ export class EventStoreService<T extends AggregateRoot = AggregateRoot> implemen
     blockHeight: number;
     modelsToSave?: T[];
   }): Promise<void> {
-    const aggIds = modelsToRollback.map((m) => m.aggregateId).filter(Boolean) as string[];
-    if (aggIds.length === 0) {
+    const ids = modelsToRollback.map((m) => m.aggregateId).filter(Boolean) as string[];
+    if (ids.length === 0) {
       return;
     }
 
-    for (const id of aggIds) {
+    for (const id of ids) {
       this.cache.del(id);
     }
 
-    await this.adapter.rollbackAggregates(aggIds, blockHeight);
+    await this.adapter.rollbackAggregates(ids, blockHeight);
 
     for (const m of modelsToRollback) {
+      if (modelsToSave && modelsToSave.some((s) => s.aggregateId === m.aggregateId)) {
+        continue;
+      }
       await this.adapter.rehydrateAtHeight(m, blockHeight);
       if (m.aggregateId) {
         this.cache.set(m.aggregateId, m);
