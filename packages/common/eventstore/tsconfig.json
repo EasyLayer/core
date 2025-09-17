@@ -1,12 +1,11 @@
 {
   "extends": "../../../tsconfig.json",
-  "references": [
-    { "path": "../cqrs/tsconfig.cjs.json" },
-    { "path": "../cqrs-transport/tsconfig.cjs.json" },
-    { "path": "../logger/tsconfig.cjs.json" },
-    { "path": "../context/tsconfig.cjs.json" },
-    { "path": "../exponential-interval-async/tsconfig.cjs.json" }
-  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": true,
+    "sourceMap": false,
+    "declarationMap": false
+  },
   "include": ["src"],
   "exclude": [
     "dist",

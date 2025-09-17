@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { ConnectionManager } from './connection-manager';
 import type { Hash, NetworkConfig, UniversalBlock, UniversalTransactionReceipt } from './node-providers';
@@ -14,10 +14,10 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
 
 @Injectable()
 export class BlockchainProviderService {
+  log = new Logger(BlockchainProviderService.name);
   private readonly normalizer: BlockchainNormalizer;
 
   constructor(
-    private readonly log: AppLogger,
     private readonly _connectionManager: ConnectionManager,
     private readonly networkConfig: NetworkConfig
   ) {
@@ -52,7 +52,7 @@ export class BlockchainProviderService {
         // Retry with recovered/switched provider
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        this.log.error('Provider recovery failed', {
+        this.log.warn('Provider recovery failed', {
           args: { methodName, originalError: error, recoveryError },
         });
         throw recoveryError;
@@ -100,7 +100,7 @@ export class BlockchainProviderService {
                 callback(blockWithReceipts);
               }
             } catch (error) {
-              this.log.error('Error fetching block in subscription', {
+              this.log.debug('Error fetching block in subscription', {
                 args: { blockNumber, error },
                 methodName: 'subscribeToNewBlocks()',
               });
@@ -117,7 +117,7 @@ export class BlockchainProviderService {
         }
       })
       .catch((error) => {
-        this.log.error('Failed to get provider', {
+        this.log.debug('Failed to get provider', {
           args: { error },
           methodName: 'subscribeToNewBlocks()',
         });
@@ -229,7 +229,7 @@ export class BlockchainProviderService {
 
       return blocks;
     } catch (error) {
-      this.log.error('Failed to merge receipts into blocks', {
+      this.log.debug('Failed to merge receipts into blocks', {
         args: { blockCount: blocks.length, receiptsCount: receipts.length, error },
         methodName: 'mergeReceiptsIntoBlocks()',
       });
@@ -339,7 +339,7 @@ export class BlockchainProviderService {
 
       // If blockNumber is missing, we need to get it from the provider
       if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
-        this.log.warn('Block retrieved by hash missing blockNumber field, fetching current height', {
+        this.log.debug('Block retrieved by hash missing blockNumber field, fetching current height', {
           args: { hash },
           methodName: 'getOneBlockByHash()',
         });
@@ -370,7 +370,7 @@ export class BlockchainProviderService {
         if (rawBlock) {
           if (rawBlock.blockNumber === undefined || rawBlock.blockNumber === null) {
             blocksNeedingHeight.push(index);
-            this.log.warn('Block retrieved by hash missing blockNumber field', {
+            this.log.debug('Block retrieved by hash missing blockNumber field', {
               args: { hash: rawBlock.hash },
               methodName: 'getManyBlocksByHashes()',
             });

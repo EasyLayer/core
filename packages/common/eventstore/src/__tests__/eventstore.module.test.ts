@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { EventStoreModule } from '../eventstore.module';
+import { EventStoreModule } from '../node/eventstore.module';
 
 describe('EventStoreModule', () => {
   let eventStoreModule: EventStoreModule;

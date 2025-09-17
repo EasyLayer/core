@@ -1,6 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Module, DynamicModule } from '@nestjs/common';
-import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { ConnectionManager } from './connection-manager';
 import { EtherJSUtil, Web3Util } from './utils';
@@ -35,24 +34,24 @@ export class BlockchainProviderModule {
 
     const connectionManager = {
       provide: ConnectionManager,
-      useFactory: async (logger: AppLogger) => {
+      useFactory: async () => {
         const adapters = await Promise.all(providersInstance);
-        return new ConnectionManager(adapters, logger);
+        return new ConnectionManager(adapters);
       },
-      inject: [AppLogger],
+      inject: [],
     };
 
     return {
       module: BlockchainProviderModule,
       global: isGlobal || false,
-      imports: [LoggerModule.forRoot({ componentName: BlockchainProviderModule.name })],
+      imports: [],
       providers: [
         {
           provide: BlockchainProviderService,
-          useFactory: (logger, connectionManager) => {
-            return new BlockchainProviderService(logger, connectionManager, network);
+          useFactory: (connectionManager) => {
+            return new BlockchainProviderService(connectionManager, network);
           },
-          inject: [AppLogger, ConnectionManager],
+          inject: [ConnectionManager],
         },
         connectionManager,
         EtherJSUtil,

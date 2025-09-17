@@ -4,11 +4,8 @@
     "noEmit": false,
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
     "incremental": true,
     "composite": true,
-    "sourceMap": false,
-    "declarationMap": false,
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
     "plugins": [
       {
@@ -25,6 +22,7 @@
   ],
   "include": ["src"],
   "exclude": [
+    "src/browser",
     "dist",
     "**/*.test.ts",
     "**/__tests__",

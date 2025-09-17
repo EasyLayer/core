@@ -1,6 +1,5 @@
+import type { Logger } from '@nestjs/common';
 import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
-import type { AppLogger } from '@easylayer/common/logger';
-import { RuntimeTracker } from '@easylayer/common/logger';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
@@ -28,7 +27,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @param config - Configuration object containing maxRequestBlocksBatchSize.
    */
   constructor(
-    private readonly log: AppLogger,
+    private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: {
@@ -108,7 +107,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @throws {Error} If any returned block stat is missing a hash or height.
    * @returns A promise that resolves once all stats have been enqueued.
    */
-  // @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
     // Dynamic adjustment based on timing comparison with previous loadAndEnqueue
     if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
@@ -211,7 +209,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @returns Array of fetched blocks.
    * @throws Will throw an error if fetching blocks fails after maximum retries.
    */
-  // @RuntimeTracker({ warningThresholdMs: 3000, errorThresholdMs: 10000 })
   private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
     let attempt = 0;
     while (attempt < maxRetries) {
@@ -228,7 +225,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
-          this.log.debug('Exceeded max retries for fetching blocks batch.', {
+          this.log.verbose('Exceeded max retries for fetching blocks batch.', {
             methodName: 'loadBlocks',
             args: { batchLength: infos.length },
           });
@@ -253,7 +250,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       if (block) {
         if (block.height <= this.queue.lastHeight) {
           // The situation is when somehow we still have old blocks, we just skip them
-          this.log.debug('Skipping block with height less than or equal to lastHeight', {
+          this.log.verbose('Skipping block with height less than or equal to lastHeight', {
             args: {
               blockHeight: block.height,
               lastHeight: this.queue.lastHeight,

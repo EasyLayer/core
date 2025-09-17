@@ -1,5 +1,4 @@
 import { Module, DynamicModule } from '@nestjs/common';
-import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from './blockchain-provider.service';
 import { NetworkConnectionManager, MempoolConnectionManager } from './managers';
 import { ConnectionManagerFactory, ModuleProviderConfig } from './factories';
@@ -61,17 +60,14 @@ export class BlockchainProviderModule {
     // Handles single active provider with automatic failover
     providers.push({
       provide: NetworkConnectionManager,
-      useFactory: async (logger: AppLogger) => {
+      useFactory: async () => {
         const hasConns = (networkProviders?.connections?.length ?? 0) > 0;
 
         const networkProviderInstances = hasConns
           ? ConnectionManagerFactory.createNetworkProvidersFromConfig(networkProviders, network, rateLimits)
           : [];
 
-        const connectionManager = ConnectionManagerFactory.createNetworkConnectionManager(
-          networkProviderInstances,
-          logger
-        );
+        const connectionManager = ConnectionManagerFactory.createNetworkConnectionManager(networkProviderInstances);
 
         // Initialize if providers are available
         // P2P providers will start header sync in background
@@ -81,24 +77,21 @@ export class BlockchainProviderModule {
 
         return connectionManager;
       },
-      inject: [AppLogger],
+      inject: [],
     });
 
     // Mempool Connection Manager (always created, even with empty providers array)
     // Handles multiple providers with configurable strategies (parallel, round-robin, fastest)
     providers.push({
       provide: MempoolConnectionManager,
-      useFactory: async (logger: AppLogger) => {
+      useFactory: async () => {
         const hasConns = (mempoolProviders?.connections?.length ?? 0) > 0;
 
         const mempoolProviderInstances = hasConns
           ? ConnectionManagerFactory.createMempoolProvidersFromConfig(mempoolProviders, network, rateLimits)
           : [];
 
-        const connectionManager = ConnectionManagerFactory.createMempoolConnectionManager(
-          mempoolProviderInstances,
-          logger
-        );
+        const connectionManager = ConnectionManagerFactory.createMempoolConnectionManager(mempoolProviderInstances);
 
         // Initialize all mempool providers in parallel
         if (mempoolProviderInstances.length > 0) {
@@ -107,7 +100,7 @@ export class BlockchainProviderModule {
 
         return connectionManager;
       },
-      inject: [AppLogger],
+      inject: [],
     });
 
     // Main Blockchain Provider Service (always created)
@@ -115,13 +108,12 @@ export class BlockchainProviderModule {
     providers.push({
       provide: BlockchainProviderService,
       useFactory: (
-        logger: AppLogger,
         networkConnectionManager: NetworkConnectionManager,
         mempoolConnectionManager: MempoolConnectionManager
       ) => {
-        return new BlockchainProviderService(logger, networkConnectionManager, mempoolConnectionManager, network);
+        return new BlockchainProviderService(networkConnectionManager, mempoolConnectionManager, network);
       },
-      inject: [AppLogger, NetworkConnectionManager, MempoolConnectionManager],
+      inject: [NetworkConnectionManager, MempoolConnectionManager],
     });
 
     // Utility Services for wallet operations, key management, etc.
@@ -133,7 +125,7 @@ export class BlockchainProviderModule {
     return {
       module: BlockchainProviderModule,
       global: isGlobal || false,
-      imports: [LoggerModule.forRoot({ componentName: BlockchainProviderModule.name })],
+      imports: [],
       providers,
       exports,
     };

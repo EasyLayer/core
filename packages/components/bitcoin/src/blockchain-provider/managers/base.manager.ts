@@ -1,8 +1,8 @@
-import type { AppLogger } from '@easylayer/common/logger';
+import type { Logger } from '@nestjs/common';
 
 export interface BaseConnectionManagerOptions<T> {
   providers: T[];
-  logger: AppLogger;
+  logger: Logger;
 }
 
 /**
@@ -21,7 +21,7 @@ export abstract class BaseConnectionManager<
   },
 > {
   protected providers: Map<string, T> = new Map();
-  protected logger: AppLogger;
+  protected logger: Logger;
   protected connected: Set<string> = new Set();
 
   constructor(options: BaseConnectionManagerOptions<T>) {

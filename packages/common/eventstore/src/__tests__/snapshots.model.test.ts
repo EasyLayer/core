@@ -1,6 +1,6 @@
 import "reflect-metadata";
-import { createSnapshotsEntity, deserializeSnapshot, serializeSnapshot } from "../snapshots.model";
-import { CompressionUtils } from "../compression";
+import { createSnapshotsEntity, deserializeSnapshot, serializeSnapshot } from "../core/snapshots.model";
+import { CompressionUtils } from "../node/compression";
 
 jest.mock("../compression", () => ({
   CompressionUtils: {

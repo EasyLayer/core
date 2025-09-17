@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import { EventStoreService } from "../eventstore.service";
+import { EventStoreService } from "../core/eventstore.service";
 import { Publisher } from "@easylayer/common/cqrs-transport";
 
 jest.mock("@easylayer/common/exponential-interval-async", () => {

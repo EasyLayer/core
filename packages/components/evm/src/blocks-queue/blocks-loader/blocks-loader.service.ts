@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
@@ -13,6 +13,7 @@ import {
 
 @Injectable()
 export class BlocksQueueLoaderService implements OnModuleDestroy {
+  log = new Logger(BlocksQueueLoaderService.name);
   private _isLoading: boolean = false;
   private _timer: ExponentialTimer | null = null;
   private _currentStrategy: BlocksLoadingStrategy | null = null;
@@ -20,7 +21,6 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   private readonly _strategies: Map<StrategyNames, BlocksLoadingStrategy> = new Map();
 
   constructor(
-    private readonly log: AppLogger,
     private readonly blockchainProviderService: BlockchainProviderService,
     private readonly config: any
   ) {
@@ -60,7 +60,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     // Create strategies with queue
     this.createStrategies(queue);
 
-    this.log.info('Loading strategy created', {
+    this.log.debug('Loading strategy created', {
       args: { strategy: this.config.queueLoaderStrategyName },
     });
 

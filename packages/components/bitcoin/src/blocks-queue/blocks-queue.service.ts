@@ -1,5 +1,4 @@
-import { Injectable } from '@nestjs/common';
-import { AppLogger } from '@easylayer/common/logger';
+import { Injectable, Logger } from '@nestjs/common';
 import { Block } from '../blockchain-provider';
 import { BlocksQueue } from './blocks-queue';
 import { BlocksQueueIteratorService } from './blocks-iterator';
@@ -7,10 +6,10 @@ import { BlocksQueueLoaderService } from './blocks-loader';
 
 @Injectable()
 export class BlocksQueueService {
+  logger = new Logger(BlocksQueueService.name);
   private _queue!: BlocksQueue<Block>;
 
   constructor(
-    private readonly log: AppLogger,
     private readonly blocksQueueIterator: BlocksQueueIteratorService,
     private readonly blocksQueueLoader: BlocksQueueLoaderService,
     private readonly config: any
@@ -25,7 +24,7 @@ export class BlocksQueueService {
     this.blocksQueueLoader.startBlocksLoading(this._queue);
     this.blocksQueueIterator.startQueueIterating(this._queue);
 
-    this.log.info('Blocks queue service started');
+    this.logger.verbose('Blocks queue service started');
   }
 
   private initQueue(indexedHeight: string | number) {
@@ -36,7 +35,7 @@ export class BlocksQueueService {
       blockSize: this.config.blockSize,
     });
 
-    this.log.info('Queue initialized', {
+    this.logger.debug('Queue initialized', {
       args: {
         indexedHeight,
         maxQueueSize: this.config.maxQueueSize,
@@ -47,7 +46,7 @@ export class BlocksQueueService {
   }
 
   public async reorganizeBlocks(newStartHeight: string | number): Promise<void> {
-    this.log.info('Reorganizing blocks', { args: { newStartHeight } });
+    this.logger.verbose('Reorganizing blocks', { args: { newStartHeight } });
 
     // NOTE: We clear the entire queue
     // because if a reorganization has occurred, this means that all the blocks in the queue
@@ -56,20 +55,20 @@ export class BlocksQueueService {
 
     this.blocksQueueIterator.resolveNextBatch();
 
-    this.log.info('Queue cleared to height', {
+    this.logger.verbose('Queue cleared to height', {
       args: { clearedTo: newStartHeight },
     });
   }
 
   async confirmProcessedBatch(blockHashes: string[]): Promise<Block | Block[]> {
-    this.log.debug('Confirming processed batch', {
+    this.logger.verbose('Confirming processed batch', {
       args: { count: blockHashes.length },
     });
 
     const confirmedBlocks = await this._queue.dequeue(blockHashes);
     this.blocksQueueIterator.resolveNextBatch();
 
-    this.log.debug('Batch has been confirmed', {
+    this.logger.verbose('Batch has been confirmed', {
       args: { count: Array.isArray(confirmedBlocks) ? confirmedBlocks.length : 0 },
     });
 

@@ -1,6 +1,6 @@
 import "reflect-metadata";
-import { createOutboxEntity, deserializeToOutboxRaw } from "../outbox.model";
-import { CompressionUtils } from "../compression";
+import { createOutboxEntity, deserializeToOutboxRaw } from "../core/outbox.model";
+import { CompressionUtils } from "../node/compression";
 
 jest.mock("../compression", () => ({
   CompressionUtils: {

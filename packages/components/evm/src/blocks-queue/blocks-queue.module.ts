@@ -1,6 +1,5 @@
 import { DynamicModule, Module, Type } from '@nestjs/common';
 import { BlockchainProviderService } from '../blockchain-provider';
-import { LoggerModule, AppLogger } from '@easylayer/common/logger';
 import { BlocksQueueService } from './blocks-queue.service';
 import { BlocksQueueIteratorService } from './blocks-iterator';
 import { BlocksQueueLoaderService } from './blocks-loader';
@@ -26,7 +25,7 @@ export class BlocksQueueModule {
     return {
       module: BlocksQueueModule,
       controllers: [],
-      imports: [LoggerModule.forRoot({ componentName: BlocksQueueModule.name })],
+      imports: [],
       providers: [
         {
           // IMPORTANT: BlocksCommandExecutor is a type, so we provide token string 'BlocksCommandExecutor'
@@ -35,21 +34,21 @@ export class BlocksQueueModule {
         },
         {
           provide: BlocksQueueService,
-          useFactory: (logger, iterator, loader) => new BlocksQueueService(logger, iterator, loader, { ...restConfig }),
-          inject: [AppLogger, BlocksQueueIteratorService, BlocksQueueLoaderService],
+          useFactory: (iterator, loader) => new BlocksQueueService(iterator, loader, { ...restConfig }),
+          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService],
         },
         {
           provide: BlocksQueueLoaderService,
-          useFactory: (logger, blockchainProvider) =>
-            new BlocksQueueLoaderService(logger, blockchainProvider, {
+          useFactory: (blockchainProvider) =>
+            new BlocksQueueLoaderService(blockchainProvider, {
               ...restConfig,
             }),
-          inject: [AppLogger, BlockchainProviderService],
+          inject: [BlockchainProviderService],
         },
         {
           provide: BlocksQueueIteratorService,
-          useFactory: (logger, executor) => new BlocksQueueIteratorService(logger, executor, { ...restConfig }),
-          inject: [AppLogger, 'BlocksCommandExecutor'],
+          useFactory: (executor) => new BlocksQueueIteratorService(executor, { ...restConfig }),
+          inject: ['BlocksCommandExecutor'],
         },
       ],
       exports: [BlocksQueueService],

@@ -1,7 +1,7 @@
 import type { QueryBus, IQuery } from '@easylayer/common/cqrs';
 import { setQueryMetadata } from '@easylayer/common/cqrs';
-import type { Envelope, QueryRequestPayload, QueryResponsePayload } from '../shared';
-import { Actions } from '../shared';
+import type { Envelope, QueryRequestPayload, QueryResponsePayload } from './messages';
+import { Actions } from './messages';
 
 export abstract class BaseConsumer {
   protected constructor() {}

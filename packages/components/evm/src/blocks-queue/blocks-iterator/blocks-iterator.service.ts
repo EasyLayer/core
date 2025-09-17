@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Inject, OnModuleDestroy, Logger } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import { AppLogger } from '@easylayer/common/logger';
 import { Block } from '../../blockchain-provider';
@@ -8,6 +8,7 @@ import type { BlocksCommandExecutor } from '../interfaces';
 
 @Injectable()
 export class BlocksQueueIteratorService implements OnModuleDestroy {
+  log = new Logger(BlocksQueueIteratorService.name);
   private _queue!: BlocksQueue<Block>;
   private _isIterating: boolean = false;
   private batchProcessedPromise!: Promise<void>;
@@ -17,7 +18,6 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   private readonly _monitoringInterval: number;
 
   constructor(
-    private readonly log: AppLogger,
     @Inject('BlocksCommandExecutor')
     private readonly blocksCommandExecutor: BlocksCommandExecutor,
     private readonly config: any

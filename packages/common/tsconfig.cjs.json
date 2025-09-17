@@ -13,13 +13,10 @@
     {"path": "./cqrs-transport/tsconfig.cjs.json"},
     {"path": "./network-transport/tsconfig.cjs.json"},
     {"path": "./eventstore/tsconfig.cjs.json"},
-    {"path": "./secure-storage/tsconfig.cjs.json"},
-    {"path": "./context/tsconfig.cjs.json"},
     {"path": "./framework/tsconfig.cjs.json"}
   ],
   "include": ["."],
   "exclude": [
-    "build-esm-all.sh",
     "dist",
     "**/*.test.ts",
     "**/__tests__",

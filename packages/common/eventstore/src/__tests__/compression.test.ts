@@ -1,5 +1,5 @@
 import "reflect-metadata";
-import { CompressionUtils } from "../compression";
+import { CompressionUtils } from "../node/compression";
 
 describe("CompressionUtils", () => {
   it("compress/decompress roundtrip works and reports sizes", async () => {

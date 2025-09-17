@@ -1,5 +1,4 @@
-import { Injectable } from '@nestjs/common';
-import { AppLogger } from '@easylayer/common/logger';
+import { Injectable, Logger } from '@nestjs/common';
 import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequestOptions } from './managers';
 import type { NetworkProvider, MempoolProvider } from './providers';
 import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
@@ -32,10 +31,10 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
  */
 @Injectable()
 export class BlockchainProviderService {
+  logger = new Logger(BlockchainProviderService.name);
   private readonly normalizer: BitcoinNormalizer;
 
   constructor(
-    private readonly log: AppLogger,
     private readonly networkConnectionManager: NetworkConnectionManager,
     private readonly mempoolConnectionManager: MempoolConnectionManager,
     private readonly networkConfig: NetworkConfig
@@ -169,7 +168,7 @@ export class BlockchainProviderService {
                   ? BitcoinMerkleVerifier.verifyGenesisMerkleRoot(uBlock)
                   : BitcoinMerkleVerifier.verifyBlockMerkleRoot(uBlock, this.networkConfig.hasSegWit);
               if (!isValid) {
-                this.log.warn('Merkle root verification failed for subscribed block', {
+                this.logger.warn('Merkle root verification failed for subscribed block', {
                   args: { blockHash: uBlock.hash, height: uBlock.height },
                 });
                 return;
@@ -177,13 +176,13 @@ export class BlockchainProviderService {
               const normalized = this.normalizer.normalizeBlock(uBlock);
               callback(normalized);
             } catch (err) {
-              this.log.warn('Failed to process block in subscription', { args: { error: err } });
+              this.logger.warn('Failed to process block in subscription', { args: { error: err } });
               onError?.(err as Error);
             }
           },
           (err) => {
             // bubble transport errors
-            this.log.warn('Subscription transport error', { args: { error: err } });
+            this.logger.warn('Subscription transport error', { args: { error: err } });
             onError?.(err);
           }
         );
@@ -194,7 +193,7 @@ export class BlockchainProviderService {
         };
       })
       .catch((error) => {
-        this.log.error('Failed to get provider for subscription', {
+        this.logger.error('Failed to get provider for subscription', {
           args: { error },
           methodName: 'subscribeToNewBlocks()',
         });
@@ -224,7 +223,7 @@ export class BlockchainProviderService {
       const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
-      this.log.warn('Network provider operation failed, attempting recovery', {
+      this.logger.warn('Network provider operation failed, attempting recovery', {
         args: { methodName, error: error || 'Unknown error' },
       });
 
@@ -238,7 +237,7 @@ export class BlockchainProviderService {
 
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        this.log.error('Network provider recovery failed', {
+        this.logger.error('Network provider recovery failed', {
           args: { methodName, originalError: error, recoveryError },
         });
         throw recoveryError;

@@ -1,5 +1,11 @@
 {
   "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": true,
+    "sourceMap": false,
+    "declarationMap": false
+  },
   "references": [
     { "path": "../cqrs/tsconfig.cjs.json" },
     { "path": "../logger/tsconfig.cjs.json" },

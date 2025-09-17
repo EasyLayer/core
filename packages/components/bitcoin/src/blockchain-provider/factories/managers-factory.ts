@@ -1,4 +1,4 @@
-import type { AppLogger } from '@easylayer/common/logger';
+import { Logger } from '@nestjs/common';
 import type { NetworkProvider, MempoolProvider } from '../providers';
 import { NetworkConnectionManager, MempoolConnectionManager } from '../managers';
 import { ProviderFactory } from './providers-factory';
@@ -81,37 +81,33 @@ export class ConnectionManagerFactory {
   /**
    * Create network connection manager with single active provider strategy
    */
-  static createNetworkConnectionManager(providers: NetworkProvider[], logger: AppLogger): NetworkConnectionManager {
+  static createNetworkConnectionManager(providers: NetworkProvider[]): NetworkConnectionManager {
+    const logger = new Logger('NetworkConnectionManager');
     return new NetworkConnectionManager({ providers, logger });
   }
 
   /**
    * Create mempool connection manager with multiple provider strategy
    */
-  static createMempoolConnectionManager(providers: MempoolProvider[], logger: AppLogger): MempoolConnectionManager {
+  static createMempoolConnectionManager(providers: MempoolProvider[]): MempoolConnectionManager {
+    const logger = new Logger('MempoolConnectionManager');
     return new MempoolConnectionManager({ providers, logger });
   }
 
   /**
    * Create network connection manager from transport configurations
    */
-  static createNetworkConnectionManagerFromConfigs(
-    configs: TransportConfig[],
-    logger: AppLogger
-  ): NetworkConnectionManager {
+  static createNetworkConnectionManagerFromConfigs(configs: TransportConfig[]): NetworkConnectionManager {
     const providers = ProviderFactory.createNetworkProviders(configs);
-    return this.createNetworkConnectionManager(providers, logger);
+    return this.createNetworkConnectionManager(providers);
   }
 
   /**
    * Create mempool connection manager from transport configurations
    */
-  static createMempoolConnectionManagerFromConfigs(
-    configs: TransportConfig[],
-    logger: AppLogger
-  ): MempoolConnectionManager {
+  static createMempoolConnectionManagerFromConfigs(configs: TransportConfig[]): MempoolConnectionManager {
     const providers = ProviderFactory.createMempoolProviders(configs);
-    return this.createMempoolConnectionManager(providers, logger);
+    return this.createMempoolConnectionManager(providers);
   }
 
   /**
@@ -148,11 +144,10 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       responseTimeout?: number;
       zmqEndpoint?: string;
-    },
-    logger: AppLogger
+    }
   ): NetworkConnectionManager {
     const providers = ProviderFactory.createNetworkProvidersFromRPCUrls(urls, options);
-    return this.createNetworkConnectionManager(providers, logger);
+    return this.createNetworkConnectionManager(providers);
   }
 
   /**
@@ -165,11 +160,10 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       responseTimeout?: number;
       zmqEndpoint?: string;
-    },
-    logger: AppLogger
+    }
   ): MempoolConnectionManager {
     const providers = ProviderFactory.createMempoolProvidersFromRPCUrls(urls, options);
-    return this.createMempoolConnectionManager(providers, logger);
+    return this.createMempoolConnectionManager(providers);
   }
 
   /**
@@ -182,11 +176,10 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-    },
-    logger: AppLogger
+    }
   ): NetworkConnectionManager {
     const providers = ProviderFactory.createNetworkProvidersFromP2PPeers(peersArray, options);
-    return this.createNetworkConnectionManager(providers, logger);
+    return this.createNetworkConnectionManager(providers);
   }
 
   /**
@@ -199,11 +192,10 @@ export class ConnectionManagerFactory {
       rateLimits: RateLimits;
       maxPeers?: number;
       connectionTimeout?: number;
-    },
-    logger: AppLogger
+    }
   ): MempoolConnectionManager {
     const providers = ProviderFactory.createMempoolProvidersFromP2PPeers(peersArray, options);
-    return this.createMempoolConnectionManager(providers, logger);
+    return this.createMempoolConnectionManager(providers);
   }
 
   /**

@@ -1,6 +1,6 @@
 import "reflect-metadata";
-import { createEventDataEntity, serializeEventRow, deserializeToDomainEvent } from "../event-data.model";
-import { CompressionUtils } from "../compression";
+import { createEventDataEntity, serializeEventRow, deserializeToDomainEvent } from "../core/event-data.model";
+import { CompressionUtils } from "../node/compression";
 
 jest.mock("../compression", () => ({
   CompressionUtils: {

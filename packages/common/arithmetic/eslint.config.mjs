@@ -3,7 +3,7 @@ import baseConfig from '../../../eslint.config.mjs';
 export default [
   ...baseConfig,
   {
-    files: ['**/bn.service.ts', '**/bignumber.service.ts'],
+    files: ['**/money.bignumber.ts', '**/money.bn.ts'],
     rules: {
       'no-restricted-syntax': 'off',
     },

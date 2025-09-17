@@ -17,7 +17,7 @@
     "allowSyntheticDefaultImports": true,
     "baseUrl": ".",
     "paths": {
-      "@easylayer/common/*": ["packages/common/*/src"]
+      "@easylayer/common/*": ["packages/common/*/dist"]
     }
   }
 }

@@ -9,6 +9,20 @@ export interface MempoolRequestOptions {
   timeout?: number;
 }
 
+function firstFulfilled<T>(promises: Promise<T>[]): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let pending = promises.length;
+    if (pending === 0) return reject(new Error('No promises'));
+    let rejected = 0;
+    for (const p of promises) {
+      p.then(resolve, () => {
+        rejected++;
+        if (rejected === pending) reject(new Error('All parallel operations failed'));
+      });
+    }
+  });
+}
+
 /**
  * Multi-provider strategy:
  * - Connect all providers
@@ -23,7 +37,7 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     if (connected.length === 0) {
       throw new Error('Unable to connect to any mempool providers');
     }
-    this.logger.info(`Mempool connected providers: ${connected.map((p) => p.uniqName).join(', ')}`);
+    this.logger.log(`Mempool connected providers: ${connected.map((p) => p.uniqName).join(', ')}`);
   }
 
   protected async getHealthyProviders(): Promise<MempoolProvider[]> {
@@ -79,7 +93,7 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     );
 
     try {
-      return await Promise.any(tasks);
+      return await firstFulfilled(tasks);
     } catch {
       throw new Error('All parallel operations failed');
     }

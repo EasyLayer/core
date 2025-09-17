@@ -5,7 +5,5 @@ export * from './eventstore/dist/index';
 export * from './exponential-interval-async/dist/index';
 export * from './logger/dist/index';
 export * from './network-transport/dist/index';
-export * from './secure-storage/dist/index';
 export * from './shared-interfaces/dist/index';
-export * from './context/dist/index';
 export * from './famework/dist/index';

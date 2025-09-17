@@ -1,6 +1,6 @@
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
-import type { Envelope } from '../shared';
-import { TRANSPORT_OVERHEAD_WIRE, Actions } from '../shared';
+import type { Envelope } from './messages';
+import { TRANSPORT_OVERHEAD_WIRE, Actions } from './messages';
 
 export type ProducerConfig = {
   name: string;

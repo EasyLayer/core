@@ -4,11 +4,8 @@
     "noEmit": false,
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
     "incremental": true,
     "composite": true,
-    "sourceMap": false,
-    "declarationMap": false,
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
     "plugins": [
       {
@@ -24,11 +21,11 @@
     { "path": "../cqrs/tsconfig.cjs.json" },
     { "path": "../cqrs-transport/tsconfig.cjs.json" },
     { "path": "../logger/tsconfig.cjs.json" },
-    { "path": "../context/tsconfig.cjs.json" },
     { "path": "../exponential-interval-async/tsconfig.cjs.json" }
   ],
   "include": ["src"],
   "exclude": [
+    "src/browser",
     "dist",
     "**/*.test.ts",
     "**/__tests__",

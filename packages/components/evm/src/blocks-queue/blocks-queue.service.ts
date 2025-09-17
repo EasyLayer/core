@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { Block } from '../blockchain-provider';
 import { BlocksQueue } from './blocks-queue';
@@ -7,10 +7,10 @@ import { BlocksQueueLoaderService } from './blocks-loader';
 
 @Injectable()
 export class BlocksQueueService {
+  log = new Logger(BlocksQueueService.name);
   private _queue!: BlocksQueue<Block>;
 
   constructor(
-    private readonly log: AppLogger,
     private readonly blocksQueueIterator: BlocksQueueIteratorService,
     private readonly blocksQueueLoader: BlocksQueueLoaderService,
     private readonly config: any
@@ -25,7 +25,7 @@ export class BlocksQueueService {
     this.blocksQueueLoader.startBlocksLoading(this._queue);
     this.blocksQueueIterator.startQueueIterating(this._queue);
 
-    this.log.info('Blocks queue service started');
+    this.log.debug('Blocks queue service started');
   }
 
   private initQueue(indexedHeight: string | number) {
@@ -36,7 +36,7 @@ export class BlocksQueueService {
       blockSize: this.config.blockSize,
     });
 
-    this.log.info('Queue initialized', {
+    this.log.debug('Queue initialized', {
       args: {
         indexedHeight,
         maxQueueSize: this.config.maxQueueSize,
@@ -47,7 +47,7 @@ export class BlocksQueueService {
   }
 
   public async reorganizeBlocks(newStartHeight: string | number): Promise<void> {
-    this.log.info('Reorganizing blocks', { args: { newStartHeight } });
+    this.log.log('Reorganizing blocks', { args: { newStartHeight } });
 
     // NOTE: We clear the entire queue
     // because if a reorganization has occurred, this means that all the blocks in the queue
@@ -56,7 +56,7 @@ export class BlocksQueueService {
 
     this.blocksQueueIterator.resolveNextBatch();
 
-    this.log.info('Queue cleared to height', {
+    this.log.debug('Queue cleared to height', {
       args: { clearedTo: newStartHeight },
     });
   }

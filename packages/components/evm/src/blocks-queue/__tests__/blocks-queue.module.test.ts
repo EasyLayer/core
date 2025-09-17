@@ -1,6 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { Type } from '@nestjs/common';
-import { LoggerModule } from '@easylayer/common/logger';
 import { BlockchainProviderModule } from '../../blockchain-provider';
 import { BlocksQueueModule, BlocksQueueModuleOptions } from '../blocks-queue.module';
 import { BlocksQueueService } from '../blocks-queue.service';
@@ -52,6 +51,5 @@ describe('BlocksQueueModule', () => {
     expect(module.get(BlocksQueueService)).toBeInstanceOf(BlocksQueueService);
     expect(module.get(BlocksQueueIteratorService)).toBeInstanceOf(BlocksQueueIteratorService);
     expect(module.get(BlocksQueueLoaderService)).toBeInstanceOf(BlocksQueueLoaderService);
-    expect(module.get(LoggerModule)).toBeDefined();
   });
 });

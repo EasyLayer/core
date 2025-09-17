@@ -4,27 +4,13 @@
     "noEmit": false,
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
     "incremental": true,
     "composite": true,
-    "sourceMap": false,
-    "declarationMap": false,
-    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
-    "plugins": [
-      {
-        "transform": "typescript-transform-paths"
-      },
-      {
-        "transform": "typescript-transform-paths",
-        "afterDeclarations": true
-      }
-    ]
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
-  "references": [
-    { "path": "../context/tsconfig.cjs.json" },
-  ],
   "include": ["src"],
   "exclude": [
+    "src/browser",
     "dist",
     "**/*.test.ts",
     "**/__tests__",

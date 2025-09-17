@@ -26,7 +26,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       if (!healthy) continue;
       await this.ensureP2PInitialized(provider);
       this.activeProviderName = provider.uniqName;
-      this.logger.info(`Set active P2P provider: ${provider.uniqName}`);
+      this.logger.debug(`Set active P2P provider: ${provider.uniqName}`);
       return;
     }
 
@@ -35,7 +35,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       const healthy = await provider.healthcheck().catch(() => false);
       if (!healthy) continue;
       this.activeProviderName = provider.uniqName;
-      this.logger.info(`Set active provider: ${provider.uniqName}`);
+      this.logger.debug(`Set active provider: ${provider.uniqName}`);
       return;
     }
 
@@ -55,7 +55,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
     this.reconnectionAttempts.delete(name);
     this.activeProviderName = name;
 
-    this.logger.info(`Manually switched to provider: ${(provider as any)?.constructor?.name}`, {
+    this.logger.debug(`Manually switched to provider: ${(provider as any)?.constructor?.name}`, {
       args: { name },
     });
   }
@@ -92,7 +92,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
         this.failedProviders.delete(providerName);
         this.reconnectionAttempts.delete(providerName);
         this.activeProviderName = providerName;
-        this.logger.info('Provider reconnection successful', { args: { providerName } });
+        this.logger.log('Provider reconnection successful', { args: { providerName } });
         return failedProvider;
       }
     }
@@ -131,7 +131,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       this.failedProviders.delete(next.uniqName);
       this.reconnectionAttempts.delete(next.uniqName);
 
-      this.logger.info('Successfully switched to backup provider', {
+      this.logger.debug('Successfully switched to backup provider', {
         args: { oldProvider: old, newProvider: this.activeProviderName },
       });
 

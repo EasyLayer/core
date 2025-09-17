@@ -187,16 +187,15 @@ describe('exponentialIntervalAsync', () => {
 
   it('should call asyncFunction immediately upon creation', async () => {
     const asyncFunc = jest.fn().mockResolvedValue(undefined);
-    const options = { interval: 100, multiplier: 2, maxInterval: 1000, maxAttempts: 3 };
-  
+    const options = { interval: 100, multiplier: 2, maxInterval: 1000, maxAttempts: 3, immediate: true };
+
     const timer = exponentialIntervalAsync(asyncFunc, options);
-  
-    // We wait for microtasks for the promise from the first call to be fulfilled
+
+    // Wait a microtask turn to allow the immediate async call to resolve
     await Promise.resolve();
-  
-    // Check that asyncFunc was called immediately
+
     expect(asyncFunc).toHaveBeenCalledTimes(1);
-  
+
     timer.destroy();
   });
 });

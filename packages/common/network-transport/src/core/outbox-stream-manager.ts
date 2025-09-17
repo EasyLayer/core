@@ -1,15 +1,11 @@
-import type { AppLogger } from '@easylayer/common/logger';
+import { Logger } from '@nestjs/common';
 import type { BaseProducer } from './base-producer';
-import type { Envelope, OutboxStreamBatchPayload, OutboxStreamAckPayload, WireEventRecord } from '../shared';
-import { Actions } from '../shared';
+import type { Envelope, OutboxStreamBatchPayload, OutboxStreamAckPayload, WireEventRecord } from './messages';
+import { Actions } from './messages';
 
 export class OutboxStreamManager {
-  private readonly log: AppLogger;
+  private logger = new Logger(OutboxStreamManager.name);
   private producer: BaseProducer | null = null;
-
-  constructor(log: AppLogger) {
-    this.log = log;
-  }
 
   public setProducer(producer: BaseProducer | null): void {
     this.producer = producer ?? null;

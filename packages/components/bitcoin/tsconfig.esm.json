@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist/esm",
+    "module": "ESNext",
+    "target": "ES2020",
+    "moduleResolution": "Bundler"
+  },
+  "references": [
+    { "path": "../../common/cqrs/tsconfig.esm.json" },
+    { "path": "../../common/logger/tsconfig.esm.json" },
+    { "path": "../../common/exponential-interval-async/tsconfig.esm.json" },
+    { "path": "../../common/shared-interfaces/tsconfig.esm.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

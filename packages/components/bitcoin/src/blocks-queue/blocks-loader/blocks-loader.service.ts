@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
@@ -13,6 +13,7 @@ import {
 
 @Injectable()
 export class BlocksQueueLoaderService implements OnModuleDestroy {
+  logger = new Logger(BlocksQueueLoaderService.name);
   private _isLoading: boolean = false;
   private _timer: ExponentialTimer | null = null;
   private _currentStrategy: BlocksLoadingStrategy | null = null;
@@ -20,7 +21,6 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   private readonly _strategies: Map<StrategyNames, BlocksLoadingStrategy> = new Map();
 
   constructor(
-    private readonly log: AppLogger,
     private readonly blockchainProviderService: BlockchainProviderService,
     private readonly config: any
   ) {
@@ -34,7 +34,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    this.log.debug('Blocks queue loader service is shutting down');
+    this.logger.verbose('Blocks queue loader service is shutting down');
     await this._currentStrategy?.stop();
     this._timer?.destroy();
     this._timer = null;
@@ -44,14 +44,14 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   }
 
   public async startBlocksLoading(queue: BlocksQueue<Block>): Promise<void> {
-    this.log.debug('Start blocks loading from height', {
+    this.logger.verbose('Start blocks loading from height', {
       args: { initialLastHeight: queue.lastHeight },
     });
 
     // NOTE: We use this to make sure that
     // method startBlocksLoading() is executed only once in its entire life.
     if (this._isLoading) {
-      this.log.debug('Blocks loading skipped: already loading');
+      this.logger.verbose('Blocks loading skipped: already loading');
       return;
     }
 
@@ -60,7 +60,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     // Create strategies with queue
     this.createStrategies(queue);
 
-    this.log.info('Loading strategy created', {
+    this.logger.debug('Loading strategy created', {
       args: { strategy: this.config.queueLoaderStrategyName },
     });
 
@@ -69,14 +69,14 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
         try {
           // IMPORTANT: every exponential tick we fetch current blockchain network height
           const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeightFromNetwork();
-          this.log.debug('Current blockchain network height fetched', {
+          this.logger.debug('Current blockchain network height fetched', {
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
 
           // Get the strategy that should work now
           this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
 
-          this.log.debug('Loading strategy created', {
+          this.logger.verbose('Loading strategy created', {
             args: { strategy: this._currentStrategy?.name },
           });
 
@@ -86,7 +86,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
           // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
-          this.log.debug('Loading blocks on pause, reason: ', {
+          this.logger.verbose('Loading blocks on pause, reason: ', {
             args: { error },
           });
           await this._currentStrategy?.stop();
@@ -104,7 +104,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       }
     );
 
-    this.log.debug('Loader exponential timer started');
+    this.logger.verbose('Loader exponential timer started');
   }
 
   // Factory method to create strategies
@@ -116,12 +116,12 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
 
     this._strategies.set(
       StrategyNames.RPC_PULL,
-      new PullRpcProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+      new PullRpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
 
     this._strategies.set(
       StrategyNames.P2P_PROCESS,
-      new ProcessP2PProviderStrategy(this.log, this.blockchainProviderService, queue, strategyOptions)
+      new ProcessP2PProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
   }
 

@@ -1,8 +1,9 @@
-import { AppLogger, RuntimeTracker } from '@easylayer/common/logger';
-import { BlockchainProviderService } from '../../../blockchain-provider';
+import type { Logger } from '@nestjs/common';
+import type { BlockchainProviderService } from '../../../blockchain-provider';
 import type { Block } from '../../../blockchain-provider';
-import { BlocksLoadingStrategy, StrategyNames } from './load-strategy.interface';
-import { BlocksQueue } from '../../blocks-queue';
+import type { BlocksLoadingStrategy } from './load-strategy.interface';
+import { StrategyNames } from './load-strategy.interface';
+import type { BlocksQueue } from '../../blocks-queue';
 
 export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.RPC_PULL;
@@ -14,7 +15,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   private _previousLoadReceiptsDuration = 0;
 
   constructor(
-    private readonly log: AppLogger,
+    private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: {
@@ -85,7 +86,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @throws {Error} If the blockchain provider fails to fetch blocks
    * @returns A promise that resolves once all blocks with transactions are preloaded
    */
-  // @RuntimeTracker({ warningThresholdMs: 1000, errorThresholdMs: 8000 })
   private async preloadBlocksWithTransactions(currentNetworkHeight: number): Promise<void> {
     // Dynamic adjustment based on timing comparison with previous loadReceipts
     if (this._previousLoadReceiptsDuration > 0 && this._lastLoadReceiptsDuration > 0) {
@@ -271,7 +271,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @throws {Error} If receipt loading fails after all retry attempts
    * @returns Promise resolving to array of blocks with receipts attached
    */
-  @RuntimeTracker({ warningThresholdMs: 3000, errorThresholdMs: 10000 })
   private async loadBlocks(blocks: Block[], maxRetries: number): Promise<Block[]> {
     let attempt = 0;
 
