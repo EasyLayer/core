@@ -7,8 +7,8 @@
   "module": "./dist/index.mjs",
   "exports": {
     ".": {
-      "browser": "./dist/esm/index.mjs",
-      "module": "./dist/esm/index.mjs",
+      "browser": "./dist/esm/index.js",
+      "module": "./dist/esm/index.js",
       "default": "./dist/index.js"
     },
     "./dist/*": {
@@ -37,9 +37,11 @@
   "license": "",
   "packageManager": "yarn@4.5.0",
   "dependencies": {
+    "@bitcoinerlab/secp256k1": "1.2.0",
     "@easylayer/common": "0.9.5",
     "@nestjs/common": "10.2.10",
     "@nestjs/swagger": "7.1.17",
+    "@noble/secp256k1": "3.0.0",
     "async-mutex": "0.5.0",
     "bip32": "4.0.0",
     "bip39": "3.1.0",
@@ -50,12 +52,8 @@
     "class-validator-jsonschema": "5.0.0",
     "ecpair": "2.1.0",
     "lodash": "4.17.21",
-    "piscina": "4.1.0",
     "reflect-metadata": "0.1.14",
     "rxjs": "7.8.1",
-    "stream-json": "1.8.0",
-    "tiny-secp256k1": "2.2.3",
-    "undici": "7.15.0",
     "uuid": "9.0.1",
     "zeromq": "6.5.0"
   },
@@ -68,10 +66,9 @@
     "@types/jest": "29.5.11",
     "@types/lodash": "4.17.7",
     "@types/node": "20.10.4",
-    "@types/stream-json": "1.7.7",
-    "@types/tiny-secp256k1": "2.0.1",
     "@types/uuid": "9.0.7",
     "@types/zeromq": "6.0.0",
+    "fast-sha256": "1.3.0",
     "jest": "29.7.0",
     "ts-jest": "29.1.1",
     "ts-node": "10.9.2",
