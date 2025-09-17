@@ -1,9 +1,9 @@
 import type { LoggerService } from '@nestjs/common';
-import { getRootConsole, configureRootConsole } from './app-logger.service';
+import { getRootConsole, configureRootConsole, deerrorize } from './app-logger.service';
 import { getGlobalContext } from './context';
 import type { LogLevel, RootLoggerOptions } from '../core';
 
-export type NestLoggerOptions = Partial<RootLoggerOptions>;
+export type NestLoggerOptions = RootLoggerOptions;
 
 /**
  * Nest LoggerService adapter to bunyan.
@@ -12,15 +12,15 @@ export type NestLoggerOptions = Partial<RootLoggerOptions>;
  * - Maps .error(message, trace, context) -> bunyan.fatal, attaches trace to meta.
  */
 export class NestLogger implements LoggerService {
+  private opts: NestLoggerOptions;
   constructor(opts: NestLoggerOptions) {
-    if (opts) {
-      configureRootConsole({
-        name: opts.name,
-        level: opts.level,
-        enabled: opts.enabled,
-        filePath: opts.filePath,
-      });
-    }
+    this.opts = opts;
+    configureRootConsole({
+      name: opts.name,
+      level: opts.level,
+      enabled: opts.enabled,
+      filePath: opts.filePath,
+    });
     getGlobalContext();
   }
 
@@ -55,7 +55,7 @@ export class NestLogger implements LoggerService {
     const root = getRootConsole();
     const base = {
       serviceName: context,
-      ...(meta ? { args: normalizeMeta(meta) } : {}),
+      ...(meta ? { args: deerrorize(meta) } : {}),
       ...this.payload(withCtx),
     };
     // @ts-ignore bunyan dynamic level

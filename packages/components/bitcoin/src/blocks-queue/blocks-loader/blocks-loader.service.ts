@@ -1,5 +1,4 @@
 import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
-import { AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import type { Block } from '../../blockchain-provider';

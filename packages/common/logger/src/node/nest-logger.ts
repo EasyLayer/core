@@ -3,7 +3,7 @@ import { getRootBunyan, configureRootBunyan, deerrorize } from './bunyan-service
 import { getGlobalContext } from './context';
 import type { LogLevel, RootLoggerOptions } from '../core';
 
-export type NestLoggerOptions = Partial<RootLoggerOptions>;
+export type NestLoggerOptions = RootLoggerOptions;
 
 /**
  * Nest LoggerService adapter to bunyan.
@@ -12,15 +12,15 @@ export type NestLoggerOptions = Partial<RootLoggerOptions>;
  * - Maps .error(message, trace, context) -> bunyan.fatal, attaches trace to meta.
  */
 export class NestLogger implements LoggerService {
+  private opts!: NestLoggerOptions;
   constructor(opts: NestLoggerOptions) {
-    if (opts) {
-      configureRootBunyan({
-        name: opts.name,
-        level: opts.level,
-        enabled: opts.enabled,
-        filePath: opts.filePath,
-      });
-    }
+    this.opts = opts;
+    configureRootBunyan({
+      name: opts.name,
+      level: opts.level,
+      enabled: opts.enabled,
+      filePath: opts.filePath,
+    });
     getGlobalContext();
   }
 
@@ -52,7 +52,7 @@ export class NestLogger implements LoggerService {
   }
 
   private write(level: LogLevel, message: any, context?: string, withCtx?: boolean, meta?: any) {
-    const root = getRootBunyan();
+    const root = getRootBunyan(this.opts);
     const base = {
       serviceName: context,
       ...(meta ? { args: deerrorize(meta) } : {}),

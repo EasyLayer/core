@@ -8,13 +8,18 @@ import { ContextService } from './context';
 @Injectable()
 export class AppLogger implements IAppLogger {
   private logger: BunyanInstance;
+  private opts!: RootLoggerOptions;
 
-  constructor(private readonly ctx: ContextService) {
-    this.logger = getRootBunyan();
+  constructor(
+    private readonly ctx: ContextService,
+    opts: RootLoggerOptions
+  ) {
+    this.opts = opts;
+    this.logger = getRootBunyan(opts);
   }
 
   /** Programmatic root initialization (safe to call once at bootstrap). */
-  static configureRoot(opts?: RootLoggerOptions) {
+  static configureRoot(opts: RootLoggerOptions) {
     configureRootBunyan(opts);
   }
 

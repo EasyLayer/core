@@ -1,3 +1,4 @@
+import { Mutex } from 'async-mutex';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
@@ -19,6 +20,8 @@ import { serializeSnapshot, deserializeSnapshot } from './snapshot.serialize';
  * - Chunk sizing for delivery is computed locally from transport cap.
  */
 export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
+  private writeLock = new Mutex();
+  private deliverLock = new Mutex();
   // Delivery watermark: last delivered outbox id (strictly increasing).
   private lastSeenId = 0n;
 
@@ -87,163 +90,167 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     rawEvents: WireEventRecord[];
     avgUncompressedBytes?: number;
   }> {
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE'); // short IMMEDIATE tx to avoid writer contention
+    return this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE'); // short IMMEDIATE tx to avoid writer contention
 
-    const outboxIds: string[] = [];
-    const rawEvents: WireEventRecord[] = [];
+      const outboxIds: string[] = [];
+      const rawEvents: WireEventRecord[] = [];
 
-    let firstIdBn: bigint | null = null;
-    let lastIdBn: bigint | null = null;
+      let firstIdBn: bigint | null = null;
+      let lastIdBn: bigint | null = null;
 
-    // We keep first/last timestamp just for compatibility with older service code.
-    let firstTs = Number.MAX_SAFE_INTEGER;
-    let lastTs = 0;
+      // We keep first/last timestamp just for compatibility with older service code.
+      let firstTs = Number.MAX_SAFE_INTEGER;
+      let lastTs = 0;
 
-    try {
-      for (const agg of aggregates) {
-        const table = agg.aggregateId;
-        if (!table) {
-          throw new Error('Aggregate has no aggregateId');
+      try {
+        for (const agg of aggregates) {
+          const table = agg.aggregateId;
+          if (!table) {
+            throw new Error('Aggregate has no aggregateId');
+          }
+
+          const unsaved: DomainEvent[] = agg.getUnsavedEvents();
+          if (unsaved.length === 0) {
+            continue;
+          }
+
+          // First version for these unsaved events = agg.version - unsaved.length + 1
+          const startVersion = agg.version - unsaved.length + 1;
+
+          for (let i = 0; i < unsaved.length; i++) {
+            const ev = unsaved[i] as DomainEvent;
+            const version = startVersion + i;
+
+            const row = await serializeEventRow(ev, version, 'sqlite');
+
+            // Generate monotonic outbox id (uses event.timestamp in microseconds).
+            const newId = this.idGen.next(ev.timestamp!);
+
+            // (1) Insert into per-aggregate table (payload is BLOB).
+            await qr.manager.query(
+              `INSERT OR IGNORE INTO "${table}"
+                ("version","requestId","type","payload","blockHeight","isCompressed","timestamp")
+              VALUES (?,?,?,?,?,?,?)`,
+              [
+                row.version,
+                row.requestId,
+                row.type,
+                row.payload,
+                row.blockHeight,
+                row.isCompressed ? 1 : 0,
+                row.timestamp,
+              ]
+            );
+
+            // (2) Insert into outbox with our monotonic id.
+            await qr.manager.query(
+              `INSERT OR IGNORE INTO "outbox"
+                ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+              VALUES (?,?,?,?,?,?,?,?,?,?)`,
+              [
+                newId.toString(), // bind as string; SQLite will store as INTEGER
+                table,
+                row.type,
+                row.version,
+                row.requestId,
+                row.blockHeight,
+                row.payload,
+                row.isCompressed ? 1 : 0,
+                row.timestamp,
+                row.payloadUncompressedBytes,
+              ]
+            );
+
+            // Track id bounds (for compatibility return & diagnostics).
+            if (firstIdBn === null || newId < firstIdBn) {
+              firstIdBn = newId;
+            }
+            if (lastIdBn === null || newId > lastIdBn) {
+              lastIdBn = newId;
+            }
+
+            // Track min/max timestamp only for compatibility (service no longer relies on it).
+            if (ev.timestamp! < firstTs) {
+              firstTs = ev.timestamp!;
+            }
+            if (ev.timestamp! > lastTs) {
+              lastTs = ev.timestamp!;
+            }
+
+            // Build RAW wire record from the same BLOB via project deserializer.
+            rawEvents.push(
+              await deserializeToOutboxRaw({
+                aggregateId: table,
+                eventType: row.type,
+                eventVersion: row.version,
+                requestId: row.requestId,
+                blockHeight: row.blockHeight,
+                payload: row.payload,
+                isCompressed: !!row.isCompressed, // for SQLite expected false
+                timestamp: ev.timestamp!,
+              })
+            );
+
+            // Numeric view of id (safe if < 2^53). If you want, keep as string in service.
+            outboxIds.push(newId.toString());
+          }
+
+          // Clear unsaved events after successful inserts for this aggregate.
+          agg.markEventsAsSaved();
         }
 
-        const unsaved: DomainEvent[] = agg.getUnsavedEvents();
-        if (unsaved.length === 0) {
-          continue;
+        await qr.query('COMMIT');
+
+        const firstId = firstIdBn ? String(firstIdBn) : '0';
+        const lastId = lastIdBn ? String(lastIdBn) : '0';
+        if (outboxIds.length === 0) {
+          firstTs = 0;
+          lastTs = 0;
         }
 
-        // First version for these unsaved events = agg.version - unsaved.length + 1
-        const startVersion = agg.version - unsaved.length + 1;
-
-        for (let i = 0; i < unsaved.length; i++) {
-          const ev = unsaved[i] as DomainEvent;
-          const version = startVersion + i;
-
-          const row = await serializeEventRow(ev, version, 'sqlite');
-
-          // Generate monotonic outbox id (uses event.timestamp in microseconds).
-          const newId = this.idGen.next(ev.timestamp!);
-
-          // (1) Insert into per-aggregate table (payload is BLOB).
-          await qr.manager.query(
-            `INSERT OR IGNORE INTO "${table}"
-               ("version","requestId","type","payload","blockHeight","isCompressed","timestamp")
-             VALUES (?,?,?,?,?,?,?)`,
-            [
-              row.version,
-              row.requestId,
-              row.type,
-              row.payload,
-              row.blockHeight,
-              row.isCompressed ? 1 : 0,
-              row.timestamp,
-            ]
-          );
-
-          // (2) Insert into outbox with our monotonic id.
-          await qr.manager.query(
-            `INSERT OR IGNORE INTO "outbox"
-               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
-             VALUES (?,?,?,?,?,?,?,?,?,?)`,
-            [
-              newId.toString(), // bind as string; SQLite will store as INTEGER
-              table,
-              row.type,
-              row.version,
-              row.requestId,
-              row.blockHeight,
-              row.payload,
-              row.isCompressed ? 1 : 0,
-              row.timestamp,
-              row.payloadUncompressedBytes,
-            ]
-          );
-
-          // Track id bounds (for compatibility return & diagnostics).
-          if (firstIdBn === null || newId < firstIdBn) {
-            firstIdBn = newId;
-          }
-          if (lastIdBn === null || newId > lastIdBn) {
-            lastIdBn = newId;
-          }
-
-          // Track min/max timestamp only for compatibility (service no longer relies on it).
-          if (ev.timestamp! < firstTs) {
-            firstTs = ev.timestamp!;
-          }
-          if (ev.timestamp! > lastTs) {
-            lastTs = ev.timestamp!;
-          }
-
-          // Build RAW wire record from the same BLOB via project deserializer.
-          rawEvents.push(
-            await deserializeToOutboxRaw({
-              aggregateId: table,
-              eventType: row.type,
-              eventVersion: row.version,
-              requestId: row.requestId,
-              blockHeight: row.blockHeight,
-              payload: row.payload,
-              isCompressed: !!row.isCompressed, // for SQLite expected false
-              timestamp: ev.timestamp!,
-            })
-          );
-
-          // Numeric view of id (safe if < 2^53). If you want, keep as string in service.
-          outboxIds.push(newId.toString());
-        }
-
-        // Clear unsaved events after successful inserts for this aggregate.
-        agg.markEventsAsSaved();
+        return {
+          insertedOutboxIds: outboxIds,
+          firstTs,
+          firstId,
+          lastTs,
+          lastId,
+          rawEvents,
+        };
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-
-      await qr.query('COMMIT');
-
-      const firstId = firstIdBn ? String(firstIdBn) : '0';
-      const lastId = lastIdBn ? String(lastIdBn) : '0';
-      if (outboxIds.length === 0) {
-        firstTs = 0;
-        lastTs = 0;
-      }
-
-      return {
-        insertedOutboxIds: outboxIds,
-        firstTs,
-        firstId,
-        lastTs,
-        lastId,
-        rawEvents,
-      };
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
   }
 
   public async deleteOutboxByIds(ids: string[]): Promise<void> {
     if (ids.length === 0) {
       return;
     }
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE');
-    try {
-      const step = SqliteAdapter.DELETE_ID_CHUNK;
-      for (let i = 0; i < ids.length; i += step) {
-        const chunk = ids.slice(i, i + step);
-        const placeholders = chunk.map(() => '?').join(',');
-        await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+    return this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE');
+      try {
+        const step = SqliteAdapter.DELETE_ID_CHUNK;
+        for (let i = 0; i < ids.length; i += step) {
+          const chunk = ids.slice(i, i + step);
+          const placeholders = chunk.map(() => '?').join(',');
+          await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+        }
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
   }
 
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
@@ -277,114 +284,120 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     transportCapBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
   ): Promise<number> {
-    const wantRows = Math.max(1, Math.floor(transportCapBytes / SqliteAdapter.AVG_EVENT_BYTES_GUESS));
-    const scanLimit = Math.max(SqliteAdapter.MIN_PREFETCH_ROWS, Math.min(SqliteAdapter.MAX_PREFETCH_ROWS, wantRows));
+    return this.deliverLock.runExclusive(async () => {
+      const wantRows = Math.max(1, Math.floor(transportCapBytes / SqliteAdapter.AVG_EVENT_BYTES_GUESS));
+      const scanLimit = Math.max(SqliteAdapter.MIN_PREFETCH_ROWS, Math.min(SqliteAdapter.MAX_PREFETCH_ROWS, wantRows));
 
-    const rows = (await this.dataSource.query(
-      `SELECT CAST(id AS TEXT) AS id,
-              "aggregateId" as aggregateId,
-              "eventType"   as eventType,
-              "eventVersion" as eventVersion,
-              "requestId"   as requestId,
-              "blockHeight" as blockHeight,
-              "payload"     as payload,
-              "isCompressed" as isCompressed,
-              "timestamp"   as timestamp,
-              "payload_uncompressed_bytes" as ulen
-      FROM "outbox"
-      WHERE id > CAST(? AS INTEGER)
-      ORDER BY id ASC
-      LIMIT ${scanLimit}`,
-      [String(this.lastSeenId)]
-    )) as Array<{
-      id: string;
-      aggregateId: string;
-      eventType: string;
-      eventVersion: number;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: number | boolean;
-      timestamp: number;
-      ulen: number;
-    }>;
+      const rows = (await this.dataSource.query(
+        `SELECT CAST(id AS TEXT) AS id,
+                "aggregateId" as aggregateId,
+                "eventType"   as eventType,
+                "eventVersion" as eventVersion,
+                "requestId"   as requestId,
+                "blockHeight" as blockHeight,
+                "payload"     as payload,
+                "isCompressed" as isCompressed,
+                "timestamp"   as timestamp,
+                "payload_uncompressed_bytes" as ulen
+        FROM "outbox"
+        WHERE id > CAST(? AS INTEGER)
+        ORDER BY id ASC
+        LIMIT ${scanLimit}`,
+        [String(this.lastSeenId)]
+      )) as Array<{
+        id: string;
+        aggregateId: string;
+        eventType: string;
+        eventVersion: number;
+        requestId: string;
+        blockHeight: number | null;
+        payload: Buffer;
+        isCompressed: number | boolean;
+        timestamp: number;
+        ulen: number;
+      }>;
 
-    if (rows.length === 0) {
-      return 0;
-    }
+      if (rows.length === 0) {
+        return 0;
+      }
 
-    // Pick first K rows that fit the transport budget (always at least one).
-    const accepted: typeof rows = [];
-    let running = 0;
+      // Pick first K rows that fit the transport budget (always at least one).
+      const accepted: typeof rows = [];
+      let running = 0;
 
-    for (const r of rows) {
-      const add = SqliteAdapter.FIXED_OVERHEAD + Number(r.ulen);
-      if (accepted.length === 0) {
+      for (const r of rows) {
+        const add = SqliteAdapter.FIXED_OVERHEAD + Number(r.ulen);
+        if (accepted.length === 0) {
+          accepted.push(r);
+          running += add;
+          continue;
+        }
+        if (running + add > transportCapBytes) {
+          break;
+        }
         accepted.push(r);
         running += add;
-        continue;
       }
-      if (running + add > transportCapBytes) {
-        break;
-      }
-      accepted.push(r);
-      running += add;
-    }
 
-    const events: WireEventRecord[] = new Array(accepted.length);
-    for (let i = 0; i < accepted.length; i++) {
-      const r = accepted[i]!;
-      events[i] = await deserializeToOutboxRaw({
-        aggregateId: r.aggregateId,
-        eventType: r.eventType,
-        eventVersion: r.eventVersion,
-        requestId: r.requestId,
-        blockHeight: r.blockHeight!,
-        payload: r.payload,
-        isCompressed: !!r.isCompressed,
-        timestamp: r.timestamp,
+      const events: WireEventRecord[] = new Array(accepted.length);
+      for (let i = 0; i < accepted.length; i++) {
+        const r = accepted[i]!;
+        events[i] = await deserializeToOutboxRaw({
+          aggregateId: r.aggregateId,
+          eventType: r.eventType,
+          eventVersion: r.eventVersion,
+          requestId: r.requestId,
+          blockHeight: r.blockHeight!,
+          payload: r.payload,
+          isCompressed: !!r.isCompressed,
+          timestamp: r.timestamp,
+        });
+      }
+
+      const last = accepted[accepted.length - 1]!;
+      const nextId = BigInt(last.id);
+
+      await deliver(events);
+
+      // ACK delete accepted ids.
+      await this.writeLock.runExclusive(async () => {
+        const ids = accepted.map((r) => r.id);
+        const qr = this.dataSource.createQueryRunner();
+        await qr.connect();
+        await qr.query('BEGIN IMMEDIATE');
+        try {
+          const step = SqliteAdapter.DELETE_ID_CHUNK;
+          for (let i = 0; i < ids.length; i += step) {
+            const chunk = ids.slice(i, i + step);
+            const placeholders = chunk.map(() => 'CAST(? AS INTEGER)').join(',');
+            await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+          }
+          await qr.query('COMMIT');
+        } catch (e) {
+          await qr.query('ROLLBACK').catch(() => undefined);
+          throw e;
+        } finally {
+          await qr.release().catch(() => undefined);
+        }
       });
-    }
 
-    const last = accepted[accepted.length - 1]!;
-    const nextId = BigInt(last.id);
+      this.lastSeenId = nextId;
 
-    await deliver(events);
-
-    // ACK delete accepted ids.
-    const ids = accepted.map((r) => r.id);
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE');
-    try {
-      const step = SqliteAdapter.DELETE_ID_CHUNK;
-      for (let i = 0; i < ids.length; i += step) {
-        const chunk = ids.slice(i, i + step);
-        const placeholders = chunk.map(() => 'CAST(? AS INTEGER)').join(',');
-        await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
-      }
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      await qr.release().catch(() => undefined);
-      throw e;
-    }
-    await qr.release();
-
-    this.lastSeenId = nextId;
-
-    return events.length;
+      return events.length;
+    });
   }
 
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
     const row = await serializeSnapshot(aggregate, 'sqlite');
-    await this.dataSource.query(
-      `INSERT OR IGNORE INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
-       VALUES (?,?,?,?,?)`,
-      [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed ? 1 : 0]
-    );
+    await this.writeLock.runExclusive(async () => {
+      await this.dataSource.query(
+        `INSERT OR IGNORE INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
+        VALUES (?,?,?,?,?)`,
+        [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed ? 1 : 0]
+      );
+    });
 
     // Prune only if the aggregate explicitly allows pruning.
     const allow = aggregate.allowPruning === true;
@@ -492,23 +505,25 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     if (aggregateIds.length === 0) {
       return;
     }
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE');
-    try {
-      for (const id of aggregateIds) {
-        await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = ? AND "blockHeight" = ?`, [
-          id,
-          blockHeight,
-        ]);
+    await this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE');
+      try {
+        for (const id of aggregateIds) {
+          await qr.manager.query(`DELETE FROM "snapshots" WHERE "aggregateId" = ? AND "blockHeight" = ?`, [
+            id,
+            blockHeight,
+          ]);
+        }
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
   }
 
   public async pruneOldSnapshots(
@@ -546,29 +561,34 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       return;
     }
 
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE');
-    try {
-      const step = SqliteAdapter.DELETE_ID_CHUNK;
-      for (let i = 0; i < toDelete.length; i += step) {
-        const chunk = toDelete.slice(i, i + step);
-        const placeholders = chunk.map(() => '?').join(',');
-        await qr.manager.query(`DELETE FROM "snapshots" WHERE "id" IN (${placeholders})`, chunk);
+    await this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE');
+      try {
+        const step = SqliteAdapter.DELETE_ID_CHUNK;
+        for (let i = 0; i < toDelete.length; i += step) {
+          const chunk = toDelete.slice(i, i + step);
+          const placeholders = chunk.map(() => '?').join(',');
+          await qr.manager.query(`DELETE FROM "snapshots" WHERE "id" IN (${placeholders})`, chunk);
+        }
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
   }
 
   public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
-    await this.dataSource.query(`DELETE FROM "${aggregateId}" WHERE "blockHeight" IS NOT NULL AND "blockHeight" <= ?`, [
-      pruneToBlockHeight,
-    ]);
+    await this.writeLock.runExclusive(async () => {
+      await this.dataSource.query(
+        `DELETE FROM "${aggregateId}" WHERE "blockHeight" IS NOT NULL AND "blockHeight" <= ?`,
+        [pruneToBlockHeight]
+      );
+    });
   }
 
   public async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
@@ -627,32 +647,34 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     if (aggregateIds.length === 0) {
       return;
     }
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN IMMEDIATE'); // SQLite write lock
-    try {
-      // 1) Per-aggregate event tables: delete above the rollback height
-      for (const id of aggregateIds) {
-        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+    await this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE'); // SQLite write lock
+      try {
+        // 1) Per-aggregate event tables: delete above the rollback height
+        for (const id of aggregateIds) {
+          await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+        }
+
+        // 2) Snapshots: delete snapshots after the rollback height for these aggregates
+        const placeholders = aggregateIds.map(() => '?').join(',');
+        await qr.manager.query(
+          `DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`,
+          [blockHeight, ...aggregateIds]
+        );
+
+        // 3) Outbox: clear entirely to avoid publishing stale rows post-reorg
+        await qr.manager.query(`DELETE FROM "outbox"`);
+
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-
-      // 2) Snapshots: delete snapshots after the rollback height for these aggregates
-      const placeholders = aggregateIds.map(() => '?').join(',');
-      await qr.manager.query(`DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`, [
-        blockHeight,
-        ...aggregateIds,
-      ]);
-
-      // 3) Outbox: clear entirely to avoid publishing stale rows post-reorg
-      await qr.manager.query(`DELETE FROM "outbox"`);
-
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
 
     // Reset streaming watermark (monotonic id)
     this.lastSeenId = 0n;

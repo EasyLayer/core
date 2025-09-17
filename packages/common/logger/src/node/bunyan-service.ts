@@ -7,6 +7,17 @@ import type { LogLevel, RootLoggerOptions } from '../core/types';
 
 export type BunyanInstance = bunyan;
 
+function memNow() {
+  // @ts-ignore
+  if (typeof process === 'undefined' || typeof process.memoryUsage !== 'function') return undefined;
+  const mu = process.memoryUsage();
+  const toMB = (b: number | undefined) => Math.round(((b || 0) / 1048576) * 10) / 10;
+  return {
+    rssMB: toMB(mu.rss),
+    heapUsedMB: toMB(mu.heapUsed),
+  };
+}
+
 function replacer(_k: string, v: any) {
   return typeof v === 'bigint' ? String(v) : v;
 }
@@ -58,20 +69,38 @@ class BunyanStream {
     const { name, time, level, msg, args, serviceName, methodName, component } = m;
     const ts = time ? time.toISOString() : new Date().toISOString();
 
+    const mem = level === bunyan.INFO ? memNow() : undefined;
+
     if (!prod) {
       const c = colorFor(level);
       const levelName = (nameFromLevel as any)[level]?.toUpperCase() || String(level);
-      const comp = toStr(component ?? name); // ← безопасно
+      const comp = toStr(component ?? name);
       const svc = serviceName ? toStr(serviceName) : '';
       const meth = methodName ? `.${toStr(methodName)}()` : '';
-      const extra = args ? ` ${toStr(args)}` : ''; // ← покажем meta
+      const meta = (() => {
+        if (args && mem) return ` ${toStr({ ...args, mem })}`;
+        if (args) return ` ${toStr(args)}`;
+        if (mem) return ` ${toStr({ mem })}`;
+        return '';
+      })();
+
       // eslint-disable-next-line no-console
-      console.log(`${c(`[${levelName}]`)} ${ts} ${comp} ${svc}${meth} ${toStr(msg)}${extra}`);
+      console.log(`${c(`[${levelName}]`)} ${ts} ${comp} ${svc}${meth} ${toStr(msg)}${meta}`);
       return;
     }
 
     const line =
-      JSON.stringify({ ...m, time: ts, level: (nameFromLevel as any)[level], hostname: undefined }, replacer) + '\n';
+      JSON.stringify(
+        {
+          ...m,
+          ...(mem ? { mem } : {}),
+          time: ts,
+          level: (nameFromLevel as any)[level],
+          hostname: undefined,
+        },
+        replacer
+      ) + '\n';
+
     const file = process?.env?.LOGS_FILE;
     if (file) fs.promises.appendFile(file, line);
     else process.stdout.write(line);
@@ -90,7 +119,7 @@ const lvlMap: Record<LogLevel, bunyan.LogLevel> = {
 type State = { root?: bunyan; enabled: boolean };
 const state: State = { root: undefined, enabled: true };
 
-export function configureRootBunyan(opts: RootLoggerOptions = {}) {
+export function configureRootBunyan(opts: RootLoggerOptions) {
   state.enabled = opts.enabled !== false;
   if (!state.enabled) {
     state.root = bunyan.createLogger({ name: opts.name || 'App', level: bunyan.FATAL + 1 });
@@ -107,8 +136,8 @@ export function configureRootBunyan(opts: RootLoggerOptions = {}) {
   return state.root!;
 }
 
-export function getRootBunyan() {
-  if (!state.root) configureRootBunyan();
+export function getRootBunyan(opts: RootLoggerOptions) {
+  if (!state.root) configureRootBunyan(opts);
   return state.root!;
 }
 

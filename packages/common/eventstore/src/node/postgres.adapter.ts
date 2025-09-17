@@ -1,3 +1,4 @@
+import { Mutex } from 'async-mutex';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
@@ -22,6 +23,7 @@ import { serializeSnapshot, deserializeSnapshot } from './snapshot.serialize';
  *     accumulate by (FIXED_OVERHEAD + payload_uncompressed_bytes).
  */
 export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
+  private deliverLock = new Mutex();
   /** Outbox delivery watermark (strictly increasing). */
   private lastSeenId = 0n;
 
@@ -240,106 +242,108 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     transportCapBytes: number,
     deliver: (events: WireEventRecord[]) => Promise<void>
   ): Promise<number> {
-    const wantRows = Math.max(1, Math.floor(transportCapBytes / PostgresAdapter.AVG_EVENT_BYTES_GUESS));
-    const scanLimit = Math.max(
-      PostgresAdapter.MIN_PREFETCH_ROWS,
-      Math.min(PostgresAdapter.MAX_PREFETCH_ROWS, wantRows)
-    );
+    return this.deliverLock.runExclusive(async () => {
+      const wantRows = Math.max(1, Math.floor(transportCapBytes / PostgresAdapter.AVG_EVENT_BYTES_GUESS));
+      const scanLimit = Math.max(
+        PostgresAdapter.MIN_PREFETCH_ROWS,
+        Math.min(PostgresAdapter.MAX_PREFETCH_ROWS, wantRows)
+      );
 
-    const rows = (await this.dataSource.query(
-      `SELECT id,
-                "aggregateId" as aggregateId,
-                "eventType"   as eventType,
-                "eventVersion" as eventVersion,
-                "requestId"   as requestId,
-                "blockHeight" as blockHeight,
-                "payload"     as payload,
-                "isCompressed" as isCompressed,
-                "timestamp"   as timestamp,
-                "payload_uncompressed_bytes" as ulen
-        FROM "outbox"
-        WHERE id > ?::bigint
-        ORDER BY id ASC
-        LIMIT ${scanLimit}`,
-      [String(this.lastSeenId)]
-    )) as Array<{
-      id: string; // BIGINT comes as string from PG driver
-      aggregateId: string;
-      eventType: string;
-      eventVersion: number;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: boolean;
-      timestamp: number;
-      ulen: number;
-    }>;
+      const rows = (await this.dataSource.query(
+        `SELECT id,
+                  "aggregateId" as aggregateId,
+                  "eventType"   as eventType,
+                  "eventVersion" as eventVersion,
+                  "requestId"   as requestId,
+                  "blockHeight" as blockHeight,
+                  "payload"     as payload,
+                  "isCompressed" as isCompressed,
+                  "timestamp"   as timestamp,
+                  "payload_uncompressed_bytes" as ulen
+          FROM "outbox"
+          WHERE id > ?::bigint
+          ORDER BY id ASC
+          LIMIT ${scanLimit}`,
+        [String(this.lastSeenId)]
+      )) as Array<{
+        id: string; // BIGINT comes as string from PG driver
+        aggregateId: string;
+        eventType: string;
+        eventVersion: number;
+        requestId: string;
+        blockHeight: number | null;
+        payload: Buffer;
+        isCompressed: boolean;
+        timestamp: number;
+        ulen: number;
+      }>;
 
-    if (rows.length === 0) {
-      return 0;
-    }
+      if (rows.length === 0) {
+        return 0;
+      }
 
-    // Pick first K rows that fit the transport budget (always at least one).
-    const accepted: typeof rows = [];
-    let running = 0;
+      // Pick first K rows that fit the transport budget (always at least one).
+      const accepted: typeof rows = [];
+      let running = 0;
 
-    for (const r of rows) {
-      const add = PostgresAdapter.FIXED_OVERHEAD + Number(r.ulen);
-      if (accepted.length === 0) {
+      for (const r of rows) {
+        const add = PostgresAdapter.FIXED_OVERHEAD + Number(r.ulen);
+        if (accepted.length === 0) {
+          accepted.push(r);
+          running += add;
+          continue;
+        }
+        if (running + add > transportCapBytes) {
+          break;
+        }
         accepted.push(r);
         running += add;
-        continue;
       }
-      if (running + add > transportCapBytes) {
-        break;
+
+      const events: WireEventRecord[] = new Array(accepted.length);
+      for (let i = 0; i < accepted.length; i++) {
+        const r = accepted[i]!;
+        events[i] = await deserializeToOutboxRaw({
+          aggregateId: r.aggregateId,
+          eventType: r.eventType,
+          eventVersion: r.eventVersion,
+          requestId: r.requestId,
+          blockHeight: r.blockHeight!,
+          payload: r.payload,
+          isCompressed: !!r.isCompressed,
+          timestamp: r.timestamp,
+        });
       }
-      accepted.push(r);
-      running += add;
-    }
 
-    const events: WireEventRecord[] = new Array(accepted.length);
-    for (let i = 0; i < accepted.length; i++) {
-      const r = accepted[i]!;
-      events[i] = await deserializeToOutboxRaw({
-        aggregateId: r.aggregateId,
-        eventType: r.eventType,
-        eventVersion: r.eventVersion,
-        requestId: r.requestId,
-        blockHeight: r.blockHeight!,
-        payload: r.payload,
-        isCompressed: !!r.isCompressed,
-        timestamp: r.timestamp,
-      });
-    }
+      const last = accepted[accepted.length - 1]!;
+      const nextId = BigInt(last.id);
 
-    const last = accepted[accepted.length - 1]!;
-    const nextId = BigInt(last.id);
+      await deliver(events);
 
-    await deliver(events);
-
-    // ACK delete accepted ids.
-    const ids = accepted.map((r) => r.id);
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN');
-    try {
-      const step = 10000;
-      for (let i = 0; i < ids.length; i += step) {
-        const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
-        const placeholders = chunk.map(() => '?::bigint').join(',');
-        await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+      // ACK delete accepted ids.
+      const ids = accepted.map((r) => r.id);
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN');
+      try {
+        const step = 10000;
+        for (let i = 0; i < ids.length; i += step) {
+          const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
+          const placeholders = chunk.map(() => '?::bigint').join(',');
+          await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
+        }
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release().catch(() => undefined);
       }
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      await qr.release().catch(() => undefined);
-      throw e;
-    }
-    await qr.release();
 
-    this.lastSeenId = nextId;
+      this.lastSeenId = nextId;
 
-    return events.length;
+      return events.length;
+    });
   }
 
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────

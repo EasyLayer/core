@@ -9,7 +9,7 @@ export interface LogMeta {
 }
 
 export interface RootLoggerOptions {
-  name?: string; // root logger name
+  name: string; // root logger name
   level?: LogLevel; // global level threshold
   enabled?: boolean; // turn off completely
   filePath?: string; // node-only: optional log file for production
