@@ -1,6 +1,6 @@
 import type { Subscription } from 'rxjs';
 import type { Logger } from '@nestjs/common';
-import type { DomainEvent, EventBus } from '@easylayer/common/cqrs';
+import type { EventBus } from '@easylayer/common/cqrs';
 import type { Publisher } from './publisher';
 
 export class Subscriber {
@@ -23,8 +23,8 @@ export class Subscriber {
 
   private initialize(): void {
     this.log.verbose('Subscribing to publisher events');
-    this.subscription = this.publisher.events$.subscribe((domainEvent: DomainEvent) => {
-      this.eventBus.subject$.next(domainEvent);
+    this.subscription = this.publisher.events$.subscribe((domainEvent) => {
+      this.eventBus.publish(domainEvent);
     });
   }
 }

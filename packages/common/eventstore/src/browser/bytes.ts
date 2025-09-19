@@ -1,3 +1,5 @@
+import type { Buffer } from 'buffer';
+
 export type Binary = Buffer | Uint8Array;
 
 // Convert UTF-8 string → Uint8Array (cast to Buffer type for API parity)

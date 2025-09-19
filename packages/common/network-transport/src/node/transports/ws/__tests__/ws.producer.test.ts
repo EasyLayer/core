@@ -1,5 +1,5 @@
-import { Actions } from '../../../shared';
-import type { Envelope } from '../../../shared';
+import { Actions } from '../../../../core';
+import type { Envelope } from '../../../../core';
 import { WsProducer } from '../ws.producer';
 import { createHmac } from 'node:crypto';
 

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { Type } from '@nestjs/common';
-import { BlockchainProviderModule } from '../../blockchain-provider';
+import { BlockchainProviderModule } from '../../../node';
 import { BlocksQueueModule, BlocksQueueModuleOptions } from '../blocks-queue.module';
 // import { BlocksQueueController } from '../blocks-queue.controller';
 import { BlocksQueueService } from '../blocks-queue.service';

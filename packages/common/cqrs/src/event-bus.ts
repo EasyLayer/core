@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Subject, from, of, merge, Observable } from 'rxjs';
-import { concatMap, catchError, filter, withLatestFrom, map, shareReplay } from 'rxjs/operators';
+import { concatMap, catchError, filter, withLatestFrom, map, share } from 'rxjs/operators';
 import type { IEvent, IEventHandler, ICommand, Type } from './interfaces';
 import { EVENTS_HANDLER_METADATA, SAGA_METADATA } from './constants';
 
@@ -10,7 +10,7 @@ import { EVENTS_HANDLER_METADATA, SAGA_METADATA } from './constants';
  * - Errors thrown by event handlers are routed to UnhandledExceptionBus ONLY.
  */
 @Injectable()
-export class EventBus<E extends IEvent = IEvent> {
+export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
   public readonly subject$ = new Subject<E>();
   private readonly _eventHandlerCompletion$ = new Subject<E>();
   private readonly _sagaCompletion$ = new Subject<E>();
@@ -19,6 +19,13 @@ export class EventBus<E extends IEvent = IEvent> {
   private readonly sagas: Array<(events$: Observable<E>) => Observable<ICommand>> = [];
   private _commandBus?: { execute(cmd: ICommand): Promise<any> };
   private _unhandled?: { publish(exc: any): void };
+
+  onModuleDestroy() {
+    this.subject$.complete();
+    this._eventHandlerCompletion$.complete();
+    this._sagaCompletion$.complete();
+    this.handlersByName.clear();
+  }
 
   bindCommandBus(bus: { execute(cmd: ICommand): Promise<any> }) {
     this._commandBus = bus;
@@ -57,10 +64,10 @@ export class EventBus<E extends IEvent = IEvent> {
     this.linkHandlers();
   }
 
-  registerSagaFunctions(sagas: Array<(events$: Observable<E>) => Observable<ICommand>>) {
-    for (const s of sagas) this.sagas.push(s);
-    this.linkSagas();
-  }
+  // registerSagaFunctions(sagas: Array<(events$: Observable<E>) => Observable<ICommand>>) {
+  //   for (const s of sagas) this.sagas.push(s);
+  //   this.linkSagas();
+  // }
 
   private linkHandlers() {
     this.events$
@@ -88,25 +95,25 @@ export class EventBus<E extends IEvent = IEvent> {
       .subscribe();
   }
 
-  private linkSagas() {
-    if (!this.sagas.length || !this._commandBus) return;
+  // private linkSagas() {
+  //   if (!this.sagas.length || !this._commandBus) return;
 
-    const sharedEvents$ = this.events$.pipe(shareReplay(1));
-    const streams = this.sagas.map((s) =>
-      s(sharedEvents$).pipe(
-        withLatestFrom(sharedEvents$),
-        map(([cmd, lastEvent]) => {
-          this._sagaCompletion$.next(lastEvent as E);
-          return cmd;
-        }),
-        catchError(() => of(undefined))
-      )
-    );
+  //   const sharedEvents$ = this.events$.pipe(share({ connector: () => new Subject(), resetOnComplete: true, resetOnError: true, resetOnRefCountZero: true }));
+  //   const streams = this.sagas.map((s) =>
+  //     s(sharedEvents$).pipe(
+  //       withLatestFrom(sharedEvents$),
+  //       map(([cmd, lastEvent]) => {
+  //         this._sagaCompletion$.next(lastEvent as E);
+  //         return cmd;
+  //       }),
+  //       catchError(() => of(undefined))
+  //     )
+  //   );
 
-    merge(...streams)
-      .pipe(filter((cmd: any) => !!cmd))
-      .subscribe((cmd) => {
-        this._commandBus!.execute(cmd);
-      });
-  }
+  //   merge(...streams)
+  //     .pipe(filter((cmd: any) => !!cmd))
+  //     .subscribe((cmd) => {
+  //       this._commandBus!.execute(cmd);
+  //     });
+  // }
 }

@@ -60,19 +60,17 @@ export class BlocksQueueService {
     });
   }
 
-  async confirmProcessedBatch(blockHashes: string[]): Promise<Block | Block[]> {
+  async confirmProcessedBatch(blockHashes: string[]): Promise<void> {
     this.logger.verbose('Confirming processed batch', {
       args: { count: blockHashes.length },
     });
 
-    const confirmedBlocks = await this._queue.dequeue(blockHashes);
+    await this._queue.dequeue(blockHashes);
     this.blocksQueueIterator.resolveNextBatch();
 
     this.logger.verbose('Batch has been confirmed', {
-      args: { count: Array.isArray(confirmedBlocks) ? confirmedBlocks.length : 0 },
+      args: { count: blockHashes.length },
     });
-
-    return confirmedBlocks || [];
   }
 
   public async getBlocksByHashes(hashes: string[]): Promise<Block[]> {

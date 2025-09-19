@@ -172,50 +172,16 @@ describe('BlocksQueue', () => {
       // Trigger transferItems by calling firstBlock
       await queue.firstBlock();
 
-      const dequeuedBlock1 = await queue.dequeue(block1.hash);
-      expect(dequeuedBlock1).toEqual(expect.objectContaining({
-        height: 0,
-        hash: 'hash0',
-        tx: [
-          expect.objectContaining({
-            txid: 'txid100',
-            hash: 'hash100',
-            vin: [],
-            vout: [],
-            size: 100,
-            strippedsize: 100,
-            sizeWithoutWitnesses: 100,
-          }),
-        ],
-        size: block1.size,
-        strippedsize: block1.strippedsize,
-        sizeWithoutWitnesses: block1.sizeWithoutWitnesses,
-      }));
+      const removed1 = await queue.dequeue(block1.hash);
+      expect(removed1).toBe(1);
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(1);
       expect(queue.currentSize).toBe(block2.size);
       expect(queue.isQueueFull).toBe(false);
       expect(queue.isMaxHeightReached).toBe(false);
 
-      const dequeuedBlock2 = await queue.dequeue(block2.hash);
-      expect(dequeuedBlock2).toEqual(expect.objectContaining({
-        height: 1,
-        hash: 'hash1',
-        tx: [
-          expect.objectContaining({
-            txid: 'txid150',
-            hash: 'hash150',
-            vin: [],
-            vout: [],
-            size: 150,
-            strippedsize: 150,
-            sizeWithoutWitnesses: 150,
-          }),
-        ],
-        size: block2.size,
-        strippedsize: block2.strippedsize,
-        sizeWithoutWitnesses: block2.sizeWithoutWitnesses,
-      }));
+      const removed2 = await queue.dequeue(block2.hash);
+      expect(removed2).toBe(1);
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(1); // Last height remains unchanged after dequeuing
       expect(queue.currentSize).toBe(0);

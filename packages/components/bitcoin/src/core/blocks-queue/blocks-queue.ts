@@ -167,14 +167,14 @@ export class BlocksQueue<T extends Block = Block> {
   }
 
   /**
-   * Dequeues blocks from the queue by hash(es).
-   * @complexity O(1) per block
+   * Dequeues blocks by hash(es).
+   * Complexity: O(1) per block. Returns count removed.
    */
-  public async dequeue(hashOrHashes: string | string[]) {
+  public async dequeue(hashOrHashes: string | string[]): Promise<number> {
     const hashes: string[] = Array.isArray(hashOrHashes) ? hashOrHashes : [hashOrHashes];
 
     return this.mutex.runExclusive(() => {
-      const results = [];
+      let removed = 0;
 
       for (const hash of hashes) {
         const bufferIndex = this.hashIndex.get(hash);
@@ -182,7 +182,6 @@ export class BlocksQueue<T extends Block = Block> {
           throw new Error(`Block not found: ${hash}`);
         }
 
-        // Verify it's the head block (FIFO order)
         if (bufferIndex !== this.headIndex) {
           throw new Error(`Block not at head of queue: ${hash}`);
         }
@@ -192,20 +191,18 @@ export class BlocksQueue<T extends Block = Block> {
           throw new Error(`Block data corrupted: ${hash}`);
         }
 
-        // Remove block and update indexes
         this.blocks[this.headIndex] = null;
         this.heightIndex.delete(Number(block.height));
         this.hashIndex.delete(block.hash);
 
-        // Update queue pointers
         this.headIndex = (this.headIndex + 1) % this.blocks.length;
         this.currentBlockCount--;
         this._size -= block.size;
 
-        results.push(block);
+        removed++;
       }
 
-      return Array.isArray(hashOrHashes) ? results : results[0];
+      return removed;
     });
   }
 

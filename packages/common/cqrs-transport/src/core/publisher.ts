@@ -1,10 +1,10 @@
 import { Subject } from 'rxjs';
-import type { Logger } from '@nestjs/common';
+import type { Logger, OnModuleDestroy } from '@nestjs/common';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { OutboxStreamManager } from '@easylayer/common/network-transport';
 import type { WireEventRecord } from './event-record.interface';
 
-export class Publisher {
+export class Publisher implements OnModuleDestroy {
   private subject$ = new Subject<DomainEvent>();
   private systemModelNamesSet: Set<string>;
 
@@ -14,6 +14,10 @@ export class Publisher {
     systemModelNames: string[]
   ) {
     this.systemModelNamesSet = new Set(systemModelNames ?? []);
+  }
+
+  onModuleDestroy() {
+    this.subject$.complete();
   }
 
   get events$() {
@@ -27,7 +31,9 @@ export class Publisher {
   async publishWireStreamBatchWithAck(events: WireEventRecord[]): Promise<void> {
     if (!events.length) return;
     await this.outboxStreamManager.streamWireWithAck(events);
-    queueMicrotask(() => this.emitSystemEventsLocally(events));
+    // fix the slice so that external mutation of the array does not break local emission
+    const batch = events.length > 1 ? events.slice() : events;
+    queueMicrotask(() => this.emitSystemEventsLocally(batch));
   }
 
   private emitSystemEventsLocally(events: WireEventRecord[]): void {

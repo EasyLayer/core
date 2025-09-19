@@ -1,5 +1,5 @@
-import { Actions } from '../../../shared';
-import type { Envelope, QueryRequestPayload, QueryResponsePayload, PongPayload } from '../../../shared';
+import { Actions } from '../../../../core';
+import type { Envelope, QueryRequestPayload, QueryResponsePayload, PongPayload } from '../../../../core';
 import { IpcChildConsumer } from '../ipc-child.consumer';
 import { IpcChildProducer } from '../ipc-child.producer';
 

@@ -14,3 +14,7 @@ export function bufferToUtf8(b: Binary): string {
 export function byteLengthUtf8(s: string): number {
   return Buffer.byteLength(s, 'utf8');
 }
+
+export function toBuffer(x: Buffer | Uint8Array): Buffer {
+  return Buffer.isBuffer(x) ? x : Buffer.from(x);
+}

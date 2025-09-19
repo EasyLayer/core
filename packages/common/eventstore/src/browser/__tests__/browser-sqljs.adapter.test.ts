@@ -1,24 +1,24 @@
-import "reflect-metadata";
-import { BrowserSqljsAdapter } from "../../../browser/browser-sqljs.adapter";
-import type { WireEventRecord } from "@easylayer/common/cqrs-transport";
-import { AggregateRoot } from "@easylayer/common/cqrs";
+import 'reflect-metadata';
+import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
+import { AggregateRoot } from '@easylayer/common/cqrs';
+import { BrowserSqljsAdapter } from '../browser-sqljs.adapter';
 
-jest.mock("../../event-data.model", () => ({
+jest.mock('../event-data.serialize', () => ({
   serializeEventRow: jest.fn(async (ev: any, version: number) => ({
-    type: ev?.__t ?? "Ev",
-    payload: Buffer.from(JSON.stringify(ev.payload ?? {}), "utf8"),
+    type: ev?.__t ?? 'Ev',
+    payload: Buffer.from(JSON.stringify(ev.payload ?? {}), 'utf8'),
     version,
     requestId: ev.requestId,
     blockHeight: ev.blockHeight,
     isCompressed: false,
     timestamp: ev.timestamp,
-    payloadUncompressedBytes: Buffer.byteLength(JSON.stringify(ev.payload ?? {}), "utf8"),
+    payloadUncompressedBytes: Buffer.byteLength(JSON.stringify(ev.payload ?? {}), 'utf8'),
   })),
   deserializeToDomainEvent: jest.fn(async (aggregateId: string, row: any) => {
-    const jsonStr = row.isCompressed ? "" : row.payload.toString("utf8");
+    const jsonStr = row.isCompressed ? '' : row.payload.toString('utf8');
     const payload = jsonStr ? JSON.parse(jsonStr) : {};
     const proto: any = {};
-    Object.defineProperty(proto, "constructor", { value: { name: row.type }, enumerable: false });
+    Object.defineProperty(proto, 'constructor', { value: { name: row.type }, enumerable: false });
     return Object.assign(Object.create(proto), {
       aggregateId,
       requestId: row.requestId,
@@ -30,31 +30,31 @@ jest.mock("../../event-data.model", () => ({
   }),
 }));
 
-jest.mock("../../outbox.model", () => ({
+jest.mock('../outbox.deserialize', () => ({
   deserializeToOutboxRaw: jest.fn(async (r: any) => ({
     modelName: r.aggregateId,
     eventType: r.eventType,
     eventVersion: r.eventVersion,
     requestId: r.requestId,
     blockHeight: r.blockHeight ?? -1,
-    payload: r.payload.toString("utf8"),
+    payload: r.payload.toString('utf8'),
     timestamp: r.timestamp,
   })),
 }));
 
-jest.mock("../../snapshots.model", () => ({
+jest.mock('../snapshot.serialize', () => ({
   serializeSnapshot: jest.fn(async (aggregate: any) => ({
     aggregateId: aggregate.aggregateId,
     blockHeight: aggregate.lastBlockHeight,
     version: aggregate.version,
-    payload: Buffer.from(JSON.stringify({ s: 1 }), "utf8"),
+    payload: Buffer.from(JSON.stringify({ s: 1 }), 'utf8'),
     isCompressed: false,
   })),
   deserializeSnapshot: jest.fn(async (row: any) => ({
     aggregateId: row.aggregateId,
     blockHeight: row.blockHeight,
     version: row.version,
-    payload: JSON.parse(row.payload.toString("utf8")),
+    payload: JSON.parse(row.payload.toString('utf8')),
   })),
 }));
 
@@ -75,15 +75,9 @@ class TestAgg extends AggregateRoot<any> {
   }
 }
 
-function mkEvent(aid: string, rid: string, bh: number, payload: any, ts: number, type = "Ev") {
-  const e: any = {
-    aggregateId: aid,
-    requestId: rid,
-    blockHeight: bh,
-    timestamp: ts,
-    payload,
-  };
-  Object.defineProperty(Object.getPrototypeOf(e), "constructor", { value: { name: type } });
+function mkEvent(aid: string, rid: string, bh: number, payload: any, ts: number, type = 'Ev') {
+  const e: any = { aggregateId: aid, requestId: rid, blockHeight: bh, timestamp: ts, payload };
+  Object.defineProperty(Object.getPrototypeOf(e), 'constructor', { value: { name: type } });
   return e;
 }
 
@@ -107,38 +101,41 @@ function flattenCalls(fn: jest.Mock) {
   return fn.mock.calls.map((args) => [args[0], args.slice(1)]);
 }
 
-describe("BrowserSqljsAdapter", () => {
+describe('BrowserSqljsAdapter', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it("onModuleInit applies PRAGMAs", async () => {
+  it('onModuleInit applies PRAGMAs', async () => {
     const { ds, qr } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
     await adapter.onModuleInit();
-    expect(qr.query).toHaveBeenCalled();
-    const stmts = qr.query.mock.calls.map(([sql]: any[]) => String(sql));
-    expect(stmts.join("\n")).toMatch(/PRAGMA journal_mode/i);
-    expect(stmts.join("\n")).toMatch(/PRAGMA synchronous/i);
+    const stmts = qr.query.mock.calls.map(([sql]: any[]) => String(sql)).join('\n');
+    expect(stmts).toMatch(/PRAGMA journal_mode\s*=\s*MEMORY/i);
+    expect(stmts).toMatch(/PRAGMA synchronous\s*=\s*OFF/i);
+    expect(stmts).toMatch(/PRAGMA temp_store/i);
+    expect(stmts).toMatch(/PRAGMA cache_size/i);
+    expect(stmts).toMatch(/PRAGMA foreign_keys\s*=\s*OFF/i);
+    expect(stmts).toMatch(/PRAGMA optimize/i);
   });
 
-  it("persistAggregatesAndOutbox: inserts rows, returns ids/ts/raw, clears unsaved, flushes to disk", async () => {
+  it('persistAggregatesAndOutbox inserts rows, returns ids/ts/raw, clears unsaved, flushes', async () => {
     const { ds, qr, manager } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
     (adapter as any).idGen = { next: jest.fn((ts: number) => BigInt(ts)) };
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
 
-    const a = new TestAgg("agg1", 0, 2);
+    const a = new TestAgg('agg1', 0, 2);
     const t1 = 1000_001n; const t2 = 1000_005n;
-    a.addUnsaved(mkEvent("agg1", "r1", 1, { x: 1 }, Number(t1)));
-    a.addUnsaved(mkEvent("agg1", "r2", 2, { x: 2 }, Number(t2)));
+    a.addUnsaved(mkEvent('agg1', 'r1', 1, { x: 1 }, Number(t1)));
+    a.addUnsaved(mkEvent('agg1', 'r2', 2, { x: 2 }, Number(t2)));
 
     const res = await adapter.persistAggregatesAndOutbox([a]);
 
-    expect(qr.query).toHaveBeenCalledWith("BEGIN");
-    expect(qr.query).toHaveBeenCalledWith("COMMIT");
+    expect(qr.query).toHaveBeenCalledWith('BEGIN');
+    expect(qr.query).toHaveBeenCalledWith('COMMIT');
 
-    const mCalls = flattenCalls(manager.query);
+    const mCalls = flattenCalls(manager.query as any);
     const insAgg = mCalls.filter(([sql]) => String(sql).includes(`INSERT OR IGNORE INTO "agg1"`));
     const insOut = mCalls.filter(([sql]) => String(sql).includes(`INSERT OR IGNORE INTO "outbox"`));
     expect(insAgg.length).toBe(2);
@@ -153,20 +150,20 @@ describe("BrowserSqljsAdapter", () => {
     expect(flushSpy).toHaveBeenCalled();
   });
 
-  it("deleteOutboxByIds: chunks, transactional, flushes", async () => {
+  it('deleteOutboxByIds chunks, transactional, flushes', async () => {
     const { ds, qr, manager } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
 
     (BrowserSqljsAdapter as any).DELETE_ID_CHUNK = 3;
     const ids = Array.from({ length: 7 }, (_, i) => String(1000 + i));
 
     await adapter.deleteOutboxByIds(ids);
 
-    expect(qr.query).toHaveBeenCalledWith("BEGIN");
-    expect(qr.query).toHaveBeenCalledWith("COMMIT");
+    expect(qr.query).toHaveBeenCalledWith('BEGIN');
+    expect(qr.query).toHaveBeenCalledWith('COMMIT');
 
-    const delCalls = manager.query.mock.calls.filter(([sql]: any[]) =>
+    const delCalls = (manager.query as jest.Mock).mock.calls.filter(([sql]: any[]) =>
       String(sql).startsWith(`DELETE FROM "outbox" WHERE "id" IN (`)
     );
     expect(delCalls.length).toBe(3);
@@ -175,28 +172,28 @@ describe("BrowserSqljsAdapter", () => {
     expect(flushSpy).toHaveBeenCalled();
   });
 
-  it("hasBacklogBefore / hasAnyPendingAfterWatermark", async () => {
+  it('hasBacklogBefore / hasAnyPendingAfterWatermark', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
 
     (ds.query as jest.Mock)
-      .mockResolvedValueOnce([{ "1": 1 }])
+      .mockResolvedValueOnce([{ '1': 1 }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ "1": 1 }]);
+      .mockResolvedValueOnce([{ '1': 1 }]);
 
-    expect(await adapter.hasBacklogBefore(0, "123")).toBe(true);
-    expect(await adapter.hasBacklogBefore(0, "123")).toBe(false);
+    expect(await adapter.hasBacklogBefore(0, '123')).toBe(true);
+    expect(await adapter.hasBacklogBefore(0, '123')).toBe(false);
 
     expect(await adapter.hasAnyPendingAfterWatermark()).toBe(false);
     (adapter as any).lastSeenId = 10n;
     expect(await adapter.hasAnyPendingAfterWatermark()).toBe(true);
   });
 
-  it("fetchDeliverAckChunk: honors budget, deletes accepted, advances watermark, flushes", async () => {
+  it('fetchDeliverAckChunk honors budget, deletes accepted, advances watermark, flushes', async () => {
     const { ds, qr, manager } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
     (adapter as any).lastSeenId = 0n;
 
     const rows = Array.from({ length: 5 }, (_, i) => {
@@ -204,12 +201,12 @@ describe("BrowserSqljsAdapter", () => {
       const ulen = 500;
       return {
         id,
-        aggregateId: "agg1",
-        eventType: "Ev",
+        aggregateId: 'agg1',
+        eventType: 'Ev',
         eventVersion: i + 1,
-        requestId: "r" + (i + 1),
+        requestId: 'r' + (i + 1),
         blockHeight: i + 1,
-        payload: Buffer.from(JSON.stringify({ p: i + 1 }), "utf8"),
+        payload: Buffer.from(JSON.stringify({ p: i + 1 }), 'utf8'),
         isCompressed: 0,
         timestamp: 1000000 + i,
         ulen,
@@ -227,32 +224,32 @@ describe("BrowserSqljsAdapter", () => {
     expect(delivered.length).toBe(1);
     expect(delivered[0]!.length).toBeGreaterThan(0);
 
-    const delCalls = manager.query.mock.calls.filter(([sql]: any[]) =>
+    const delCalls = (manager.query as jest.Mock).mock.calls.filter(([sql]: any[]) =>
       String(sql).startsWith(`DELETE FROM "outbox" WHERE id IN (`)
     );
     expect(delCalls.length).toBe(1);
-    expect(qr.query).toHaveBeenCalledWith("BEGIN IMMEDIATE");
-    expect(qr.query).toHaveBeenCalledWith("COMMIT");
+    expect(qr.query).toHaveBeenCalledWith('BEGIN IMMEDIATE');
+    expect(qr.query).toHaveBeenCalledWith('COMMIT');
     expect(flushSpy).toHaveBeenCalled();
 
     const lastAcceptedId = String(1000 + delivered[0]!.length - 1);
     expect((adapter as any).lastSeenId).toBe(BigInt(lastAcceptedId));
   });
 
-  it("fetchDeliverAckChunk: deliver throws → no delete, watermark unchanged", async () => {
+  it('fetchDeliverAckChunk when deliver throws keeps rows and watermark', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
     (adapter as any).lastSeenId = 0n;
 
     (ds.query as jest.Mock).mockResolvedValueOnce([
       {
-        id: "1001",
-        aggregateId: "agg1",
-        eventType: "Ev",
+        id: '1001',
+        aggregateId: 'agg1',
+        eventType: 'Ev',
         eventVersion: 1,
-        requestId: "r1",
+        requestId: 'r1',
         blockHeight: 1,
-        payload: Buffer.from(JSON.stringify({ p: 1 }), "utf8"),
+        payload: Buffer.from(JSON.stringify({ p: 1 }), 'utf8'),
         isCompressed: 0,
         timestamp: 1,
         ulen: 100,
@@ -261,74 +258,74 @@ describe("BrowserSqljsAdapter", () => {
 
     await expect(
       adapter.fetchDeliverAckChunk(10_000, async () => {
-        throw new Error("fail");
+        throw new Error('fail');
       })
     ).rejects.toThrow(/fail/);
 
     expect((adapter as any).lastSeenId).toBe(0n);
   });
 
-  it("createSnapshot inserts; findLatestSnapshot returns last; createSnapshotAtHeight parses payload", async () => {
-    const { ds, manager } = mkDS();
+  it('createSnapshot inserts; findLatestSnapshot returns last; createSnapshotAtHeight parses payload', async () => {
+    const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
 
-    await adapter.createSnapshot(new TestAgg("agg1", 10, 5) as any, { minKeep: 2, keepWindow: 0 });
+    await adapter.createSnapshot(new TestAgg('agg1', 10, 5) as any, { minKeep: 2, keepWindow: 0 });
     expect(ds.query).toHaveBeenCalledWith(
-        expect.stringMatching(/INSERT OR IGNORE INTO "snapshots".+VALUES \(\?,\?,\?,\?,\?\)/s),
-        ['agg1', 10, 5, expect.anything(), 0]
+      expect.stringMatching(/INSERT OR IGNORE INTO "snapshots".+VALUES \(\?,\?,\?,\?,\?\)/s),
+      ['agg1', 10, 5, expect.anything(), 0]
     );
     expect(flushSpy).toHaveBeenCalled();
 
     (ds.query as jest.Mock)
-      .mockResolvedValueOnce([{ blockHeight: 12 }]) // findLatestSnapshot
+      .mockResolvedValueOnce([{ blockHeight: 12 }])
       .mockResolvedValueOnce([
         {
-          aggregateId: "agg1",
+          aggregateId: 'agg1',
           blockHeight: 9,
           version: 4,
-          payload: Buffer.from(JSON.stringify({ s: 1 }), "utf8"),
+          payload: Buffer.from(JSON.stringify({ s: 1 }), 'utf8'),
           isCompressed: 0,
         },
       ]);
 
-    const last = await adapter.findLatestSnapshot("agg1");
+    const last = await adapter.findLatestSnapshot('agg1');
     expect(last).toEqual({ blockHeight: 12 });
 
-    const snapAt = await adapter.createSnapshotAtHeight(new TestAgg("agg1", 10, 5) as any, 10);
-    expect(snapAt.aggregateId).toBe("agg1");
+    const snapAt = await adapter.createSnapshotAtHeight(new TestAgg('agg1', 10, 5) as any, 10);
+    expect(snapAt.aggregateId).toBe('agg1');
     expect(snapAt.blockHeight).toBe(9);
     expect(snapAt.version).toBe(4);
     expect(snapAt.payload).toEqual({ s: 1 });
   });
 
-  it("applyEventsToAggregate selects and deserializes history", async () => {
+  it('applyEventsToAggregate selects rows and passes deserialized history to loadFromHistory', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
 
     (ds.query as jest.Mock).mockResolvedValueOnce([
       {
-        type: "Ev",
-        requestId: "r1",
+        type: 'Ev',
+        requestId: 'r1',
         blockHeight: 1,
-        payload: Buffer.from(JSON.stringify({ x: 1 }), "utf8"),
+        payload: Buffer.from(JSON.stringify({ x: 1 }), 'utf8'),
         isCompressed: 0,
         version: 1,
         timestamp: 11,
       },
       {
-        type: "Ev",
-        requestId: "r2",
+        type: 'Ev',
+        requestId: 'r2',
         blockHeight: 2,
-        payload: Buffer.from(JSON.stringify({ x: 2 }), "utf8"),
+        payload: Buffer.from(JSON.stringify({ x: 2 }), 'utf8'),
         isCompressed: 0,
         version: 2,
         timestamp: 12,
       },
     ]);
 
-    const a = new TestAgg("agg1", 0, 0);
-    const spy = jest.spyOn(a, "loadFromHistory");
+    const a = new TestAgg('agg1', 0, 0);
+    const spy = jest.spyOn(a, 'loadFromHistory');
     await adapter.applyEventsToAggregate(a as any, 0);
 
     expect(spy).toHaveBeenCalled();
@@ -339,18 +336,18 @@ describe("BrowserSqljsAdapter", () => {
     expect(arg[1].payload).toEqual({ x: 2 });
   });
 
-  it("rehydrateAtHeight applies snapshot then range events", async () => {
+  it('rehydrateAtHeight applies snapshot then range events', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
 
     (ds.query as jest.Mock)
       .mockResolvedValueOnce([
-        { aggregateId: "agg1", blockHeight: 5, version: 3, payload: Buffer.from(JSON.stringify({ s: 1 })), isCompressed: 0 },
+        { aggregateId: 'agg1', blockHeight: 5, version: 3, payload: Buffer.from(JSON.stringify({ s: 1 })), isCompressed: 0 },
       ])
       .mockResolvedValueOnce([
         {
-          type: "Ev",
-          requestId: "r4",
+          type: 'Ev',
+          requestId: 'r4',
           blockHeight: 6,
           payload: Buffer.from(JSON.stringify({ x: 4 })),
           isCompressed: 0,
@@ -359,9 +356,9 @@ describe("BrowserSqljsAdapter", () => {
         },
       ]);
 
-    const a = new TestAgg("agg1", 0, 0);
-    const fromSnapshotSpy = jest.spyOn(a, "fromSnapshot");
-    const loadSpy = jest.spyOn(a, "loadFromHistory");
+    const a = new TestAgg('agg1', 0, 0);
+    const fromSnapshotSpy = jest.spyOn(a, 'fromSnapshot');
+    const loadSpy = jest.spyOn(a, 'loadFromHistory');
 
     await adapter.rehydrateAtHeight(a as any, 6);
 
@@ -372,48 +369,48 @@ describe("BrowserSqljsAdapter", () => {
     expect(history[0].blockHeight).toBe(6);
   });
 
-  it("deleteSnapshotsByBlockHeight & pruneOldSnapshots: transactional and flushes", async () => {
+  it('deleteSnapshotsByBlockHeight and pruneOldSnapshots are transactional and flush', async () => {
     const { ds, qr, manager } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
 
-    await adapter.deleteSnapshotsByBlockHeight(["a1", "a2"], 10);
-    expect(qr.query).toHaveBeenCalledWith("BEGIN");
-    expect(qr.query).toHaveBeenCalledWith("COMMIT");
-    expect(manager.query).toHaveBeenCalled();
+    await adapter.deleteSnapshotsByBlockHeight(['a1', 'a2'], 10);
+    expect(qr.query).toHaveBeenCalledWith('BEGIN');
+    expect(qr.query).toHaveBeenCalledWith('COMMIT');
+    expect((manager.query as jest.Mock).mock.calls.length).toBeGreaterThan(0);
     expect(flushSpy).toHaveBeenCalled();
 
     (ds.query as jest.Mock).mockResolvedValueOnce(
-      Array.from({ length: 5 }, (_, i) => ({ id: i + 1, blockHeight: 1 + i })) // 5 rows
+      Array.from({ length: 5 }, (_, i) => ({ id: i + 1, blockHeight: 1 + i }))
     );
-    await adapter.pruneOldSnapshots("a1", 10, { minKeep: 2, keepWindow: 3 });
-    const delCalls = manager.query.mock.calls.filter(([sql]: any[]) =>
+    await adapter.pruneOldSnapshots('a1', 10, { minKeep: 2, keepWindow: 3 });
+    const delCalls = (manager.query as jest.Mock).mock.calls.filter(([sql]: any[]) =>
       String(sql).startsWith(`DELETE FROM "snapshots" WHERE "id" IN (`)
     );
     expect(delCalls.length).toBeGreaterThan(0);
   });
 
-  it("pruneEvents deletes by blockHeight and flushes", async () => {
+  it('pruneEvents deletes by blockHeight and flushes', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
 
-    await adapter.pruneEvents("agg1", 7);
+    await adapter.pruneEvents('agg1', 7);
     expect(ds.query).toHaveBeenCalledWith(`DELETE FROM "agg1" WHERE "blockHeight" <= ?`, [7]);
     expect(flushSpy).toHaveBeenCalled();
   });
 
-  it("rollbackAggregates deletes per-aggregate rows > height, snapshots > height for ids, clears outbox, resets watermark, flushes", async () => {
+  it('rollbackAggregates deletes aggregate rows > height, snapshots > height for ids, clears outbox, resets watermark, flushes', async () => {
     const { ds, qr, manager } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
-    const flushSpy = jest.spyOn<any, any>(adapter as any, "persistToDiskIfSupported");
+    const flushSpy = jest.spyOn<any, any>(adapter as any, 'persistToDiskIfSupported');
     (adapter as any).lastSeenId = 999n;
 
-    await adapter.rollbackAggregates(["agg1", "agg2"], 50);
+    await adapter.rollbackAggregates(['agg1', 'agg2'], 50);
 
-    expect(qr.query).toHaveBeenCalledWith("BEGIN");
-    expect(qr.query).toHaveBeenCalledWith("COMMIT");
-    const mCalls = flattenCalls(manager.query);
+    expect(qr.query).toHaveBeenCalledWith('BEGIN');
+    expect(qr.query).toHaveBeenCalledWith('COMMIT');
+    const mCalls = flattenCalls(manager.query as any);
     expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "agg1"`))).toBe(true);
     expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "agg2"`))).toBe(true);
     expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (`))).toBe(true);
@@ -422,15 +419,15 @@ describe("BrowserSqljsAdapter", () => {
     expect(flushSpy).toHaveBeenCalled();
   });
 
-  it("fetchEventsForAggregates applies filters and sorts by (timestamp, version)", async () => {
+  it('fetchEventsForAggregates applies filters and sorts by (timestamp, version)', async () => {
     const { ds } = mkDS();
     const adapter = new BrowserSqljsAdapter(ds as any);
 
     (ds.query as jest.Mock)
       .mockResolvedValueOnce([
         {
-          type: "Ev",
-          requestId: "r1",
+          type: 'Ev',
+          requestId: 'r1',
           blockHeight: 1,
           payload: Buffer.from(JSON.stringify({ a: 1 })),
           isCompressed: 0,
@@ -440,8 +437,8 @@ describe("BrowserSqljsAdapter", () => {
       ])
       .mockResolvedValueOnce([
         {
-          type: "Ev",
-          requestId: "r2",
+          type: 'Ev',
+          requestId: 'r2',
           blockHeight: 1,
           payload: Buffer.from(JSON.stringify({ b: 2 })),
           isCompressed: 0,
@@ -450,8 +447,7 @@ describe("BrowserSqljsAdapter", () => {
         },
       ]);
 
-    const out = await adapter.fetchEventsForAggregates(["agg1", "agg2"], { blockHeight: 1 });
+    const out = await adapter.fetchEventsForAggregates(['agg1', 'agg2'], { blockHeight: 1 });
     expect(out.length).toBe(2);
-    // expect(out[0].version <= out[1].version).toBe(true);
   });
 });

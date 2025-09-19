@@ -1,5 +1,5 @@
-import { Actions } from '../../shared';
-import type { WireEventRecord, Envelope } from '../../shared';
+import { Actions } from '../messages';
+import type { WireEventRecord, Envelope } from '../messages';
 import type { BaseProducer } from '../base-producer';
 import { OutboxStreamManager } from '../outbox-stream-manager';
 
@@ -27,7 +27,7 @@ function createMockProducer(ackValue: any = { allOk: true, okIndices: [0] }) {
 
 describe('OutboxStreamManager', () => {
   it('returns no-op success when producer is not set', async () => {
-    const mgr = new OutboxStreamManager({} as any);
+    const mgr = new OutboxStreamManager();
     const events: WireEventRecord[] = [];
     const ack = await mgr.streamWireWithAck(events);
     expect(ack).toEqual({ allOk: true, okIndices: [] });
@@ -35,7 +35,7 @@ describe('OutboxStreamManager', () => {
 
   it('waits for online, sends same events reference, and resolves ack from producer', async () => {
     const { mock, calls, waitForOnline, sendMessage, waitForAck } = createMockProducer({ allOk: true, okIndices: [0, 1] });
-    const mgr = new OutboxStreamManager({} as any);
+    const mgr = new OutboxStreamManager();
     mgr.setProducer(mock);
 
     const events: WireEventRecord[] = [
@@ -61,7 +61,7 @@ describe('OutboxStreamManager', () => {
     const { mock } = createMockProducer();
     (mock as any).waitForOnline = jest.fn(async () => { throw new Error('offline'); });
 
-    const mgr = new OutboxStreamManager({} as any);
+    const mgr = new OutboxStreamManager();
     mgr.setProducer(mock);
 
     await expect(mgr.streamWireWithAck([])).rejects.toThrow('offline');
@@ -74,7 +74,7 @@ describe('OutboxStreamManager', () => {
       throw new Error('ACK timeout');
     });
 
-    const mgr = new OutboxStreamManager({} as any);
+    const mgr = new OutboxStreamManager();
     mgr.setProducer(mock);
 
     await expect(mgr.streamWireWithAck([])).rejects.toThrow('ACK timeout');

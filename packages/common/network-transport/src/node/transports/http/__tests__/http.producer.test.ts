@@ -1,5 +1,5 @@
-import type { Envelope } from '../../../shared';
-import { Actions } from '../../../shared';
+import type { Envelope } from '../../../../core';
+import { Actions } from '../../../../core';
 import { HttpProducer } from '../http.producer';
 
 const originalFetch = globalThis.fetch as any;

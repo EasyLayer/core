@@ -1,4 +1,5 @@
 import { Mutex } from 'async-mutex';
+import { Buffer } from 'buffer';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
@@ -152,7 +153,6 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
                 row.payload, // same BLOB
                 row.isCompressed ? 1 : 0,
                 row.timestamp,
-                row.payloadUncompressedBytes,
               ]
             );
 

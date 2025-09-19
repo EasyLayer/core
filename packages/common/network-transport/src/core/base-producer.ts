@@ -59,6 +59,18 @@ export abstract class BaseProducer {
   protected abstract _sendRaw(serialized: string, byteLength: number, context?: unknown): Promise<void>;
   protected abstract _isUnderlyingConnected(): boolean;
 
+  /* eslint-disable no-empty */
+  public destroy(): void {
+    this.stopHeartbeat();
+    if (this.pendingAck) {
+      try {
+        this.pendingAck.reject(new Error(`[${this.configuration.name}] destroyed`));
+      } catch {}
+      this.pendingAck = null;
+    }
+  }
+  /* eslint-enable no-empty */
+
   public isConnected(): boolean {
     if (!this._isUnderlyingConnected()) return false;
     if (this.lastPongTime === 0) return true;
@@ -144,7 +156,7 @@ export abstract class BaseProducer {
     let timeoutRef: any;
     try {
       timeoutRef = setTimeout(() => {
-        if (this.pendingAck) {
+        if (this.pendingAck === deferred) {
           this.pendingAck.reject(new Error(`[${this.configuration.name}] ACK timeout`));
           this.pendingAck = null;
         }
@@ -154,13 +166,19 @@ export abstract class BaseProducer {
       return result as T;
     } finally {
       clearTimeout(timeoutRef);
-      this.pendingAck = null;
+      if (this.pendingAck === deferred) {
+        this.pendingAck = null;
+      }
     }
   }
 
   public resolveAck<T>(value: T): void {
-    if (this.pendingAck) this.pendingAck.resolve(value);
+    const d = this.pendingAck;
+    if (!d) return;
+    this.pendingAck = null;
+    d.resolve(value);
   }
+
   public rejectAck(err: unknown): void {
     if (this.pendingAck) this.pendingAck.reject(err);
   }

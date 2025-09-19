@@ -1,5 +1,4 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { AppLogger } from '@easylayer/common/logger';
 import { Block } from '../../blockchain-provider';
 import { BlocksQueueService } from '../blocks-queue.service';
 import { BlocksQueue } from '../blocks-queue';
@@ -8,20 +7,12 @@ import { BlocksQueueLoaderService } from '../blocks-loader';
 
 describe('BlocksQueueService', () => {
   let service: BlocksQueueService;
-  let mockLogger: jest.Mocked<AppLogger>;
   let mockBlocksIterator: jest.Mocked<BlocksQueueIteratorService>;
   let mockBlocksLoader: jest.Mocked<BlocksQueueLoaderService>;
   let mockBlockQueue: jest.Mocked<BlocksQueue<Block>>;
   let config: { maxQueueLength: number; maxBlockHeight: number };
 
   beforeEach(async () => {
-    mockLogger = {
-      debug: jest.fn(),
-      error: jest.fn(),
-      info: jest.fn(),
-      warn: jest.fn(),
-    } as any;
-
     mockBlocksIterator = {
       startQueueIterating: jest.fn(),
       resolveNextBatch: jest.fn(),
@@ -48,19 +39,17 @@ describe('BlocksQueueService', () => {
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
-        { provide: AppLogger, useValue: mockLogger },
         { provide: BlocksQueueIteratorService, useValue: mockBlocksIterator },
         { provide: BlocksQueueLoaderService, useValue: mockBlocksLoader },
         { provide: 'CONFIG', useValue: config },
         {
           provide: BlocksQueueService,
           useFactory: (
-            logger: AppLogger,
             iterator: BlocksQueueIteratorService,
             loader: BlocksQueueLoaderService,
             config: any
-          ) => new BlocksQueueService(logger, iterator, loader, config),
-          inject: [AppLogger, BlocksQueueIteratorService, BlocksQueueLoaderService, 'CONFIG'],
+          ) => new BlocksQueueService(iterator, loader, config),
+          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, 'CONFIG'],
         },
       ],
     }).compile();

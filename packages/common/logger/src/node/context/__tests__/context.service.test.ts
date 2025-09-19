@@ -1,5 +1,5 @@
-import { ContextService } from '../../../../eventstore/src/node/context/context.service';
-import { ContextData } from '../../interfaces';
+import { ContextService } from '../context.service';
+import { ContextData } from '../../../core';
 
 describe('ContextService', () => {
   let service: ContextService;

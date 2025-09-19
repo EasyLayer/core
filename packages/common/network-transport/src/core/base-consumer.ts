@@ -4,7 +4,7 @@ import type { Envelope, QueryRequestPayload, QueryResponsePayload } from './mess
 import { Actions } from './messages';
 
 export abstract class BaseConsumer {
-  protected constructor() {}
+  private readonly _queryProtoCache = new Map<string, any>();
 
   public async onMessage(message: Envelope, context?: unknown): Promise<void> {
     switch (message.action) {
@@ -54,19 +54,25 @@ export abstract class BaseConsumer {
     };
   }
 
-  protected async executeQuery(queryBus: QueryBus, req: QueryRequestPayload) {
-    const constructorName = req?.name;
-    const dto = req?.dto ?? {};
-    if (!constructorName || typeof constructorName !== 'string') {
+  private getQueryProto(constructorName: string) {
+    let proto = this._queryProtoCache.get(constructorName);
+    if (!proto) {
+      const Query = class {};
+      Object.defineProperty(Query, 'name', { value: constructorName });
+      setQueryMetadata(Query);
+      proto = Query.prototype;
+      this._queryProtoCache.set(constructorName, proto);
+    }
+    return proto;
+  }
+
+  protected async executeQuery(queryBus: QueryBus, constructorName: string, dto: any) {
+    if (typeof constructorName !== 'string' || !constructorName.length) {
       throw new Error('Query name must be a non-empty string');
     }
-
-    const Query = class {};
-    Object.defineProperty(Query, 'name', { value: constructorName });
-    setQueryMetadata(Query);
-
-    const instance = Object.assign(Object.create(Query.prototype), { payload: dto }) as IQuery;
-    return await queryBus.execute(instance);
+    const proto = this.getQueryProto(constructorName);
+    const instance = Object.assign(Object.create(proto), { payload: dto }) as IQuery;
+    return queryBus.execute(instance);
   }
 
   protected abstract handleBusinessMessage(message: Envelope, context?: unknown): Promise<void>;

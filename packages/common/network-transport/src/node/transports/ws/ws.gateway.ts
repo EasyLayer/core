@@ -82,7 +82,7 @@ export class WsGateway extends BaseConsumer {
     const name = message?.payload?.name ?? '';
     const dto = message?.payload?.dto;
     try {
-      const data = await this.executeQuery(this.queryBus, { name, dto });
+      const data = await this.executeQuery(this.queryBus, name, dto);
       const reply: Envelope<QueryResponsePayload> = {
         action: Actions.QueryResponse,
         payload: { name, data },

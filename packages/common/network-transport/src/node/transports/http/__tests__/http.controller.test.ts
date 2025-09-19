@@ -1,5 +1,5 @@
-import type { Envelope, QueryRequestPayload, QueryResponsePayload } from '../../../shared';
-import { Actions } from '../../../shared';
+import type { Envelope, QueryRequestPayload, QueryResponsePayload } from '../../../../core';
+import { Actions } from '../../../../core';
 import { HttpController } from '../http.controller';
 
 describe('HttpController', () => {

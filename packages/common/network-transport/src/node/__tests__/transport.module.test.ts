@@ -1,49 +1,55 @@
 import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
 import { NetworkTransportModule, TransportModuleOptions } from '../transport.module';
+import {
+  HTTP_PRODUCER,
+  WS_PRODUCER,
+  IPC_PRODUCER
+} from '../transports';
 import { OutboxStreamManager } from '../../core';
 
-jest.mock('../transports/http/http.module', () => {
-  class HttpTransportModule {
-    static forRoot(_opts: any) {
-      const httpProducer = { configuration: { name: 'http' } };
-      return {
-        module: HttpTransportModule,
-        providers: [{ provide: 'HTTP_PRODUCER', useValue: httpProducer }, { provide: 'HTTP_OPTIONS', useValue: _opts }],
-        exports: ['HTTP_PRODUCER', 'HTTP_OPTIONS'],
-      };
-    }
-  }
-  return { HttpTransportModule };
-}, { virtual: true });
+jest.mock('../transports', () => {
+  // explicit tokens
+  const HTTP_PRODUCER = 'HTTP_PRODUCER';
+  const WS_PRODUCER   = 'WS_PRODUCER';
+  const IPC_PRODUCER  = 'IPC_PRODUCER';
 
-jest.mock('../transports/ws/ws.module', () => {
-  class WsTransportModule {
-    static forRoot(_opts: any) {
-      const wsProducer = { configuration: { name: 'ws' } };
-      return {
-        module: WsTransportModule,
-        providers: [{ provide: 'WS_PRODUCER', useValue: wsProducer }, { provide: 'WS_OPTIONS', useValue: _opts }],
-        exports: ['WS_PRODUCER', 'WS_OPTIONS'],
-      };
-    }
-  }
-  return { WsTransportModule };
-}, { virtual: true });
+  const HTTP_OPTIONS = 'HTTP_OPTIONS';
+  const WS_OPTIONS   = 'WS_OPTIONS';
+  const IPC_OPTIONS  = 'IPC_OPTIONS';
 
-jest.mock('../transports/ipc-child/ipc-child.module', () => {
-  class IpcChildTransportModule {
-    static forRoot(_opts: any) {
-      const ipcProducer = { configuration: { name: 'ipc' } };
-      return {
-        module: IpcChildTransportModule,
-        providers: [{ provide: 'IPC_PRODUCER', useValue: ipcProducer }, { provide: 'IPC_OPTIONS', useValue: _opts }],
-        exports: ['IPC_PRODUCER', 'IPC_OPTIONS'],
-      };
-    }
-  }
-  return { IpcChildTransportModule };
-}, { virtual: true });
+  // helper to create a minimal DynamicModule
+  const mkModule = (token: string, name: 'http'|'ws'|'ipc', optsToken: string) => {
+    class DummyModule {}
+    // simple static forRoot that DOES NOT touch other exports
+    (DummyModule as any).forRoot = (opts: any) => ({
+      module: DummyModule,
+      providers: [
+        { provide: token, useValue: { configuration: { name } } },
+        { provide: optsToken, useValue: opts },
+      ],
+      exports: [token, optsToken],
+    });
+    return DummyModule;
+  };
+
+  const HttpTransportModule     = mkModule(HTTP_PRODUCER, 'http', HTTP_OPTIONS);
+  const WsTransportModule       = mkModule(WS_PRODUCER,   'ws',   WS_OPTIONS);
+  const IpcChildTransportModule = mkModule(IPC_PRODUCER,  'ipc',  IPC_OPTIONS);
+
+  // stubs for unused re-exports to keep the barrel happy
+  const ElectronWsClientModule   = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
+  const ElectronIpcClientModule  = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
+  const IpcParentTransportModule = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
+
+  // IMPORTANT: mark as ES module explicitly
+  return {
+    __esModule: true,
+    HTTP_PRODUCER, WS_PRODUCER, IPC_PRODUCER,
+    HttpTransportModule, WsTransportModule, IpcChildTransportModule,
+    ElectronWsClientModule, ElectronIpcClientModule, IpcParentTransportModule,
+  };
+});
 
 describe('TransportModule', () => {
   it('wires multiple providers and selects streaming by name', async () => {
@@ -62,9 +68,9 @@ describe('TransportModule', () => {
     }).compile();
 
     const manager = moduleRef.get(OutboxStreamManager);
-    const http = moduleRef.get('HTTP_PRODUCER');
-    const ws = moduleRef.get('WS_PRODUCER');
-    const ipc = moduleRef.get('IPC_PRODUCER');
+    const http = moduleRef.get(HTTP_PRODUCER);
+    const ws = moduleRef.get(WS_PRODUCER);
+    const ipc = moduleRef.get(IPC_PRODUCER);
 
     expect(http?.configuration?.name).toBe('http');
     expect(ws?.configuration?.name).toBe('ws');

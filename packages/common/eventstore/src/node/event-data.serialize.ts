@@ -1,7 +1,7 @@
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { DriverType, EventDataParameters } from '../core';
 import { CompressionUtils } from './compression';
-import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8 } from './bytes';
+import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8, toBuffer } from './bytes';
 
 /**
  * Single-pass serialization; ONE buffer feeds BOTH:
@@ -13,7 +13,7 @@ export async function serializeEventRow(
   event: DomainEvent,
   version: number,
   dbDriver: DriverType = 'postgres'
-): Promise<EventDataParameters & { payloadUncompressedBytes: number }> {
+): Promise<EventDataParameters> {
   const { requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
@@ -26,33 +26,29 @@ export async function serializeEventRow(
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
-  const uncompressedLen = byteLengthUtf8(json); // exact uncompressed size
-  const tryCompress = dbDriver === 'postgres' && CompressionUtils.shouldCompress(json);
 
-  let buf: Buffer;
-  let isCompressed = false;
-
-  if (tryCompress) {
-    const res = await CompressionUtils.compressToBuffer(json); // compressed Buffer
-    if (res.compressedSize / res.originalSize < 0.9) {
-      buf = res.buffer;
-      isCompressed = true;
-    } else {
-      buf = utf8ToBuffer(json);
-    }
-  } else {
-    buf = utf8ToBuffer(json);
+  if (dbDriver === 'postgres' && CompressionUtils.shouldCompress(json)) {
+    const deflated = await CompressionUtils.compressToBuffer(json);
+    return {
+      version,
+      requestId,
+      type,
+      payload: deflated.buffer,
+      isCompressed: true,
+      blockHeight: normalizedHeight as any,
+      timestamp,
+    };
   }
 
+  const buf = utf8ToBuffer(json);
   return {
-    type,
-    payload: buf,
     version,
     requestId,
+    type,
+    payload: buf,
+    isCompressed: false,
     blockHeight: normalizedHeight as any,
-    isCompressed,
     timestamp,
-    payloadUncompressedBytes: uncompressedLen,
   };
 }
 

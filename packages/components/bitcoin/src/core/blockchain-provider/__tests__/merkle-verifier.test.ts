@@ -1,10 +1,12 @@
-import { createHash } from 'node:crypto';
+import { hash as fastSha256 } from 'fast-sha256';
 import { BitcoinMerkleVerifier as MV } from '../merkle-verifier';
 
-function dsha(b: Buffer) {
-  const h1 = createHash('sha256').update(b).digest();
-  return createHash('sha256').update(h1).digest();
+function dsha(buf: Buffer): Buffer {
+  const h1 = fastSha256(buf);
+  const h2 = fastSha256(h1);
+  return Buffer.from(h2);
 }
+
 function beToLe(hex: string) {
   return Buffer.from(hex.match(/../g)!.reverse().join(''), 'hex');
 }

@@ -1,5 +1,5 @@
-import type { Envelope } from '../../shared';
-import { Actions } from '../../shared';
+import type { Envelope } from '../messages';
+import { Actions } from '../messages';
 import { BaseConsumer } from '../base-consumer';
 
 jest.mock('@easylayer/common/cqrs', () => ({ setQueryMetadata: jest.fn() }));
@@ -16,9 +16,9 @@ class TestConsumer extends BaseConsumer {
     return this.createQueryResponse(payload, requestId, correlationId);
   }
 
-  public execQuery(queryBus: any, req: any) {
+  public execQuery(queryBus: any, req: any, dto: any) {
     // @ts-ignore
-    return this.executeQuery(queryBus, req);
+    return this.executeQuery(queryBus, req, dto);
   }
 
   protected async handleBusinessMessage(message: Envelope, context?: unknown): Promise<void> {
@@ -89,7 +89,7 @@ describe('BaseConsumer', () => {
     const c = new TestConsumer();
     const dto = { id: 42, q: 'x' };
     const bus = { execute: jest.fn().mockResolvedValue({ ok: true }) };
-    const result = await c.execQuery(bus, { name: 'GetUser', dto });
+    const result = await c.execQuery(bus, 'GetUser', dto);
     expect(result).toEqual({ ok: true });
     expect(bus.execute).toHaveBeenCalledTimes(1);
     const instance = bus.execute.mock.calls[0][0];
@@ -100,7 +100,7 @@ describe('BaseConsumer', () => {
   it('executeQuery throws on invalid name', async () => {
     const c = new TestConsumer();
     const bus = { execute: jest.fn() };
-    await expect(c.execQuery(bus, { name: '' })).rejects.toThrow('Query name must be a non-empty string');
-    await expect(c.execQuery(bus, { name: 123 as any })).rejects.toThrow('Query name must be a non-empty string');
+    await expect(c.execQuery(bus, '', {})).rejects.toThrow('Query name must be a non-empty string');
+    await expect(c.execQuery(bus, 123, {})).rejects.toThrow('Query name must be a non-empty string');
   });
 });

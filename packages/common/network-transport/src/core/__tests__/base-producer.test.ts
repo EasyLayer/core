@@ -1,5 +1,5 @@
-import type { Envelope } from '../../shared';
-import { TRANSPORT_OVERHEAD_WIRE, Actions } from '../../shared';
+import type { Envelope } from '../messages';
+import { TRANSPORT_OVERHEAD_WIRE, Actions } from '../messages';
 import { BaseProducer, utf8Len } from '../base-producer';
 import type { ProducerConfig } from '../base-producer';
 

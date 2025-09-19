@@ -1,7 +1,7 @@
-import { Actions } from '../../../shared';
-import type { Envelope } from '../../../shared';
-import { IpcChildProducer } from '../ipc-child.producer';
 import { createHmac, randomBytes } from 'node:crypto';
+import { Actions } from '../../../../core';
+import type { Envelope } from '../../../../core';
+import { IpcChildProducer } from '../ipc-child.producer';
 
 const originalProcessSend = (process as any).send;
 const originalProcessConnected = (process as any).connected;
@@ -40,6 +40,8 @@ describe('IpcChildProducer', () => {
   });
 
   it('startHeartbeat sends ping with nonce and allows proof verification once', async () => {
+    jest.useFakeTimers();
+
     const p = new IpcChildProducer({
       name: 'ipc',
       maxMessageBytes: 1024 * 1024,
@@ -48,13 +50,18 @@ describe('IpcChildProducer', () => {
       heartbeatTimeoutMs: 8000,
       token: 'secret',
     });
+
     p.startHeartbeat();
-    await new Promise((r) => setTimeout(r, 0));
+
+    jest.advanceTimersByTime(15);
+    await Promise.resolve();
+
     expect((process as any).send).toHaveBeenCalled();
 
-    const callArg = ((process as any).send as jest.Mock).mock.calls.pop()[0];
+    const callArg = ((process as any).send as jest.Mock).mock.calls.pop()![0];
     const ping = typeof callArg === 'string' ? JSON.parse(callArg) : callArg;
     expect(ping.action).toBe(Actions.Ping);
+
     const nonce: string = ping.payload?.nonce;
     const ts: number = ping.payload?.ts;
 

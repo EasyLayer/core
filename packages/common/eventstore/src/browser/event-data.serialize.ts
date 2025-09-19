@@ -10,10 +10,7 @@ import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8 } from './bytes';
  *
  * Browser build: compression is disabled entirely.
  */
-export async function serializeEventRow(
-  event: DomainEvent,
-  version: number
-): Promise<EventDataParameters & { payloadUncompressedBytes: number }> {
+export async function serializeEventRow(event: DomainEvent, version: number): Promise<EventDataParameters> {
   const { requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
@@ -26,17 +23,16 @@ export async function serializeEventRow(
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
-  const uncompressedLen = byteLengthUtf8(json); // exact uncompressed size
 
+  const buf = utf8ToBuffer(json);
   return {
-    type,
-    payload: utf8ToBuffer(json), // plain UTF-8 bytes only
     version,
     requestId,
+    type,
+    payload: buf,
+    isCompressed: false,
     blockHeight: normalizedHeight as any,
-    isCompressed: false, // never compressed in browser
     timestamp,
-    payloadUncompressedBytes: uncompressedLen,
   };
 }
 

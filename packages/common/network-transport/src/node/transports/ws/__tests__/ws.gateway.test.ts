@@ -1,5 +1,5 @@
-import type { Envelope, QueryRequestPayload, QueryResponsePayload, OutboxStreamAckPayload, PongPayload } from '../../../shared';
-import { Actions } from '../../../shared';
+import type { Envelope, QueryRequestPayload, QueryResponsePayload, OutboxStreamAckPayload, PongPayload } from '../../../../core';
+import { Actions } from '../../../../core';
 import { WsGateway } from '../ws.gateway';
 import type { WsProducer } from '../ws.producer';
 

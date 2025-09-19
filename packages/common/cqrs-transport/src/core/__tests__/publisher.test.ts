@@ -1,9 +1,6 @@
 import "reflect-metadata";
+import { Logger } from '@nestjs/common';
 import { Publisher } from "../publisher";
-
-jest.mock("@easylayer/common/logger", () => ({
-  AppLogger: class { debug(){} error(){} },
-}));
 
 jest.mock("@easylayer/common/cqrs", () => ({
   setEventMetadata: () => {},
@@ -21,10 +18,9 @@ jest.mock("@easylayer/common/network-transport", () => ({
 describe("Publisher", () => {
   it("streams to transport then emits only system events locally with correct constructor name", async () => {
     const { OutboxStreamManager } = require("@easylayer/common/network-transport");
-    const { AppLogger } = require("@easylayer/common/logger");
 
     const pm = new OutboxStreamManager();
-    const logger = new AppLogger();
+    const logger = new Logger();
     const system = ["sys-model"];
     const pub = new Publisher(pm as any, logger as any, system);
 

@@ -17,7 +17,7 @@ export class HttpController extends BaseConsumer {
     const name = body?.payload?.name ?? '';
 
     try {
-      const data = await this.executeQuery(this.queryBus, { name, dto: body?.payload?.dto });
+      const data = await this.executeQuery(this.queryBus, name, body?.payload?.dto);
       const resp: Envelope<QueryResponsePayload> = {
         action: Actions.QueryResponse,
         payload: { name, data },

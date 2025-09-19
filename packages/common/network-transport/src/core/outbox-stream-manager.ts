@@ -7,9 +7,17 @@ export class OutboxStreamManager {
   private logger = new Logger(OutboxStreamManager.name);
   private producer: BaseProducer | null = null;
 
-  public setProducer(producer: BaseProducer | null): void {
-    this.producer = producer ?? null;
+  /* eslint-disable no-empty */
+  public setProducer(next: BaseProducer | null): void {
+    const prev = this.producer;
+    if (prev && prev !== next) {
+      try {
+        prev.destroy?.();
+      } catch {}
+    }
+    this.producer = next ?? null;
   }
+  /* eslint-enable no-empty */
 
   public getProducer(): BaseProducer | null {
     return this.producer;

@@ -160,7 +160,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
                 row.payload,
                 row.isCompressed ? 1 : 0,
                 row.timestamp,
-                row.payloadUncompressedBytes,
               ]
             );
 

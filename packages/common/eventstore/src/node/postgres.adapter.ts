@@ -125,7 +125,6 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
               row.payload, // same bytea
               row.isCompressed, // boolean
               row.timestamp,
-              row.payloadUncompressedBytes,
             ]
           );
 

@@ -15,7 +15,7 @@ import {
   Saga,
 } from '@nestjs/cqrs';
 import { Observable, filter, map } from 'rxjs';
-import { CustomCqrsModule } from '../custom-cqrs.module';
+import { CqrsModule } from '../cqrs.module';
 
 class TestEvent {}
 class TestQuery {}
@@ -51,12 +51,12 @@ class SagaHost {
 })
 class FeatureModule {}
 
-describe('CustomCQRSModule', () => {
+describe('CQRSModule', () => {
   it('register handlers/sagas в onModuleInit', async () => {
     const testingModule = await Test.createTestingModule({
       imports: [
         FeatureModule,
-        CustomCqrsModule.forRoot({ isGlobal: false }),
+        CqrsModule.forRoot({ isGlobal: false }),
       ],
     }).compile();
 

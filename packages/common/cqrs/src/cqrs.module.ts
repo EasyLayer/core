@@ -20,7 +20,7 @@ export interface CQRSModuleParameters {
   events?: Type<IEventHandler>[];
   commands?: Type<ICommandHandler>[];
   queries?: Type<IQueryHandler>[];
-  sagas?: Array<Type | ((events$: any) => any)>;
+  // sagas?: Array<Type | ((events$: any) => any)>;
 }
 
 @Module({})
@@ -29,13 +29,13 @@ export class CqrsModule {
     const eventClasses = params.events ?? [];
     const commandClasses = params.commands ?? [];
     const queryClasses = params.queries ?? [];
-    const sagaClasses = (params.sagas ?? []).filter((s: any) => typeof s === 'function' && s.prototype) as Type[];
-    const sagaFactories = (params.sagas ?? []).filter(
-      (s: any) => typeof s === 'function' && !s.prototype
-    ) as Function[];
+    // const sagaClasses = (params.sagas ?? []).filter((s: any) => typeof s === 'function' && s.prototype) as Type[];
+    // const sagaFactories = (params.sagas ?? []).filter(
+    //   (s: any) => typeof s === 'function' && !s.prototype
+    // ) as Function[];
 
     // We put ALL classes in providers so that Nest can create instances with DI
-    const handlerProviders: Provider[] = [...eventClasses, ...commandClasses, ...queryClasses, ...sagaClasses];
+    const handlerProviders: Provider[] = [...eventClasses, ...commandClasses, ...queryClasses]; //...sagaClasses
 
     // Aggregate instances into arrays without ModuleRef
     const aggregatorProviders: Provider[] = [
@@ -54,24 +54,24 @@ export class CqrsModule {
         useFactory: (...handlers: any[]) => handlers,
         inject: queryClasses,
       },
-      {
-        provide: SAGA_CLASS_INSTANCES,
-        useFactory: (...instances: any[]) => instances,
-        inject: sagaClasses,
-      },
-      { provide: SAGA_FACTORIES_INLINE, useValue: sagaFactories },
-      {
-        provide: SAGA_FUNCTIONS,
-        useFactory: (classes: any[], factories: Function[]) => {
-          const fns: Function[] = [...factories];
-          for (const inst of classes) {
-            const keys: string[] = Reflect.getMetadata(SAGA_METADATA, inst.constructor) || [];
-            for (const k of keys) fns.push(inst[k].bind(inst));
-          }
-          return fns;
-        },
-        inject: [SAGA_CLASS_INSTANCES, SAGA_FACTORIES_INLINE],
-      },
+      // {
+      //   provide: SAGA_CLASS_INSTANCES,
+      //   useFactory: (...instances: any[]) => instances,
+      //   inject: sagaClasses,
+      // },
+      // { provide: SAGA_FACTORIES_INLINE, useValue: sagaFactories },
+      // {
+      //   provide: SAGA_FUNCTIONS,
+      //   useFactory: (classes: any[], factories: Function[]) => {
+      //     const fns: Function[] = [...factories];
+      //     for (const inst of classes) {
+      //       const keys: string[] = Reflect.getMetadata(SAGA_METADATA, inst.constructor) || [];
+      //       for (const k of keys) fns.push(inst[k].bind(inst));
+      //     }
+      //     return fns;
+      //   },
+      //   inject: [SAGA_CLASS_INSTANCES, SAGA_FACTORIES_INLINE],
+      // },
     ];
 
     const wireUp: Provider = {
@@ -83,13 +83,13 @@ export class CqrsModule {
         unhandled: UnhandledExceptionBus,
         eventHandlers: any[],
         commandHandlers: any[],
-        queryHandlers: any[],
-        sagaFns: Array<(events$: any) => any>
+        queryHandlers: any[]
+        // sagaFns: Array<(events$: any) => any>
       ) => {
         eb.bindCommandBus(cb);
         eb.bindUnhandledBus(unhandled);
         eb.registerInstances(eventHandlers);
-        eb.registerSagaFunctions(sagaFns);
+        // eb.registerSagaFunctions(sagaFns);
         cb.registerInstances(commandHandlers);
         qb.registerInstances(queryHandlers);
       },
@@ -101,7 +101,7 @@ export class CqrsModule {
         EVENT_HANDLER_INSTANCES,
         COMMAND_HANDLER_INSTANCES,
         QUERY_HANDLER_INSTANCES,
-        SAGA_FUNCTIONS,
+        // SAGA_FUNCTIONS,
       ],
     };
 

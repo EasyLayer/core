@@ -1,6 +1,5 @@
 import { BlockchainProviderService, Block } from '../../../../blockchain-provider';
 import { PullRpcProviderStrategy } from '../pull-rpc-provider.strategy';
-import { AppLogger } from '@easylayer/common/logger';
 import { BlocksQueue } from '../../../blocks-queue';
 
 function createTestBlock(height: number, hash: string, size: number): Block {
@@ -31,7 +30,7 @@ function createTestBlock(height: number, hash: string, size: number): Block {
 
 describe('PullRpcProviderStrategy', () => {
   let strategy: PullRpcProviderStrategy;
-  let mockLogger: jest.Mocked<AppLogger>;
+  let mockLogger: jest.Mocked<any>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
   let queue: BlocksQueue<Block>;
   const basePreloadCount = 4;
@@ -49,8 +48,9 @@ describe('PullRpcProviderStrategy', () => {
     queue.isQueueOverloaded = jest.fn().mockReturnValue(false);
 
     mockLogger = { 
+      verbose: jest.fn(),
       debug: jest.fn(), 
-      info: jest.fn(), 
+      log: jest.fn(), 
       warn: jest.fn(), 
       error: jest.fn() 
     } as any;
@@ -225,7 +225,7 @@ describe('PullRpcProviderStrategy', () => {
         .rejects.toThrow('Persistent error');
       
       expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledTimes(2);
-      expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect(mockLogger.verbose).toHaveBeenCalledWith(
         'Exceeded max retries for fetching blocks batch.',
         expect.objectContaining({
           methodName: 'loadBlocks',
@@ -264,8 +264,8 @@ describe('PullRpcProviderStrategy', () => {
       
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(3);
-      expect(mockLogger.debug).toHaveBeenCalledTimes(2);
-      expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect(mockLogger.verbose).toHaveBeenCalledTimes(2);
+      expect(mockLogger.verbose).toHaveBeenCalledWith(
         'Skipping block with height less than or equal to lastHeight',
         expect.objectContaining({
           args: expect.objectContaining({

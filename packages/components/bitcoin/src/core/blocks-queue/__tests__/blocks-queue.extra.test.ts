@@ -48,11 +48,16 @@ describe('BlocksQueue reference identity and behavior', () => {
     } as any);
   });
 
-  it('enqueue then dequeue returns the same object reference', async () => {
+  it('enqueue then dequeue removes the block and updates state', async () => {
     const block = makeBlock(0, [makeTransaction(100)]);
     await queue.enqueue(block);
-    const dequeued = await queue.dequeue(block.hash);
-    expect(dequeued).toBe(block);
+    const removed = await queue.dequeue(block.hash);
+    expect(removed).toBe(1);
+    expect(queue.length).toBe(0);
+    expect(queue.currentSize).toBe(0);
+    // firstBlock should now be undefined
+    const first = await queue.firstBlock();
+    expect(first).toBeUndefined();
   });
 
   it('findBlocks returns the same object references as stored', async () => {
@@ -79,13 +84,14 @@ describe('BlocksQueue reference identity and behavior', () => {
     const c = makeBlock(2, [makeTransaction(512)]);
     await smallQueue.enqueue(a);
     await smallQueue.enqueue(b);
-    const first = await smallQueue.dequeue(a.hash);
+    const removedA = await smallQueue.dequeue(a.hash);
+    expect(removedA).toBe(1);
     await smallQueue.enqueue(c);
-    const second = await smallQueue.dequeue(b.hash);
-    const third = await smallQueue.dequeue(c.hash);
-    expect(first).toBe(a);
-    expect(second).toBe(b);
-    expect(third).toBe(c);
+    const removedB = await smallQueue.dequeue(b.hash);
+    expect(removedB).toBe(1);
+    const removedC = await smallQueue.dequeue(c.hash);
+    expect(removedC).toBe(1);
+    expect(smallQueue.length).toBe(0);
   });
 
   it('reorganize clears queue and sets new last height', async () => {
@@ -114,7 +120,7 @@ describe('BlocksQueue reference identity and behavior', () => {
     }
     await Promise.all(blocks.map(b => queue.enqueue(b)));
     const removed = await queue.dequeue(blocks[0]!.hash);
-    expect(removed).toBe(blocks[0]);
+    expect(removed).toBe(1);
     const firstAfter = await queue.firstBlock();
     expect(firstAfter?.height).toBe(blocks[1]!.height);
     const subset = new Set([blocks[5]!.hash, blocks[10]!.hash, blocks[20]!.hash]);
