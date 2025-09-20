@@ -8,8 +8,6 @@ export interface RPCTransportOptions extends BaseTransportOptions {
   responseTimeout?: number;
 }
 
-type Bytes = Buffer | Uint8Array;
-
 function toBase64(str: string): string {
   if (typeof Buffer !== 'undefined') {
     return Buffer.from(str).toString('base64');

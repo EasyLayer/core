@@ -8,46 +8,105 @@ function bufToHexBE(buf?: Buffer): string | undefined {
   return Buffer.from(buf).reverse().toString('hex');
 }
 
+/**
+ * Safe Buffer view from Uint8Array without copying bytes.
+ */
+function bufferFromU8(u8: Uint8Array): Buffer {
+  return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength);
+}
+
 // ============================================================
 //  HexTransformer
 //  ------------------------------------------------------------
-//  - Parses block/tx hex using bitcoinjs-lib.
+//  - Parses block/tx from BYTES (preferred) or HEX using bitcoinjs-lib.
 //  - Converts header hashes to BE for RPC-style fields:
 //      * hash          -> BE (bitcoinjs getId() already BE)
 //      * merkleroot    -> convert LE Buffer -> BE hex
 //      * prevHash      -> convert LE Buffer -> BE hex
-//  - Produces Universal* structures. Sizes via BlockSizeCalculator.
+//  - Produces Universal* structures. Sizes are computed from BYTES
+//    (no hex string allocations).
 //  - Computes wtxid in BE when SegWit is present.
 //  - Works across BTC/BCH/LTC/DOGE; SegWit fields only if networkConfig.hasSegWit.
 // ============================================================
 
 export class HexTransformer {
-  /**
-   * Overload: parse block hex with known height
-   */
-  static parseBlockHex(hex: string, height: number, networkConfig: NetworkConfig): UniversalBlock;
+  // =======================
+  // BYTES-BASED ENTRYPOINTS
+  // =======================
 
   /**
-   * Overload: parse block hex without height
+   * Parse block bytes with known height (preferred path).
    */
-  static parseBlockHex(
-    hex: string,
+  static parseBlockBytes(u8: Uint8Array, height: number, networkConfig: NetworkConfig): UniversalBlock;
+
+  /**
+   * Parse block bytes without height (preferred path).
+   */
+  static parseBlockBytes(
+    u8: Uint8Array,
     networkConfig: NetworkConfig
   ): Omit<UniversalBlock, 'height'> & { height?: undefined };
 
-  static parseBlockHex(
-    hex: string,
+  static parseBlockBytes(
+    u8: Uint8Array,
     arg2: number | NetworkConfig,
     arg3?: NetworkConfig
   ): UniversalBlock | (Omit<UniversalBlock, 'height'> & { height?: undefined }) {
-    if (!hex) throw new Error('Block hex is required');
+    if (!u8 || u8.byteLength === 0) throw new Error('Block bytes are required');
 
     const networkConfig = typeof arg2 === 'number' ? (arg3 as NetworkConfig) : (arg2 as NetworkConfig);
     const height = typeof arg2 === 'number' ? arg2 : undefined;
 
-    const buffer = Buffer.from(hex, 'hex');
+    const buffer = bufferFromU8(u8);
     const btcBlock = bitcoin.Block.fromBuffer(buffer);
 
+    return this.buildUniversalBlockFromBitcoinJS(btcBlock, buffer, networkConfig, height);
+  }
+
+  /**
+   * Parse transaction bytes (preferred path).
+   */
+  static parseTxBytes(
+    u8: Uint8Array,
+    networkConfig: NetworkConfig,
+    blockhash?: string,
+    time?: number,
+    blocktime?: number
+  ): UniversalTransaction {
+    if (!u8 || u8.byteLength === 0) throw new Error('Transaction bytes are required');
+
+    const buffer = bufferFromU8(u8);
+    const tx = bitcoin.Transaction.fromBuffer(buffer);
+
+    // Sizes from bitcoinjs Transaction (no hex conversions)
+    const sizeMetrics = BlockSizeCalculator.calculateTransactionSizeFromBitcoinJS(tx, networkConfig);
+    if (!BlockSizeCalculator.validateSizes(sizeMetrics)) {
+      throw new Error(`Transaction size calculation validation failed for tx: ${tx.getId()}`);
+    }
+
+    return this.parseTransactionFromBitcoinJS(tx, blockhash, time ?? blocktime, networkConfig, time, blocktime, {
+      size: sizeMetrics.size,
+      strippedSize: sizeMetrics.strippedSize,
+      vsize: sizeMetrics.vsize,
+      weight: sizeMetrics.weight,
+      witnessSize: sizeMetrics.witnessSize,
+    });
+  }
+
+  // =======================
+  // INTERNAL HELPERS
+  // =======================
+
+  /**
+   * Build UniversalBlock from a bitcoinjs Block + raw bytes buffer.
+   * Computes size/weight/vsize from bytes to avoid hex allocations.
+   */
+  private static buildUniversalBlockFromBitcoinJS(
+    btcBlock: bitcoin.Block,
+    buffer: Buffer,
+    networkConfig: NetworkConfig,
+    height?: number
+  ): UniversalBlock | (Omit<UniversalBlock, 'height'> & { height?: undefined }) {
     const hash = btcBlock.getId();
     const time = btcBlock.timestamp;
 
@@ -56,7 +115,8 @@ export class HexTransformer {
       this.parseTransactionFromBitcoinJS(tx, hash, time, networkConfig)
     );
 
-    const sizeMetrics = BlockSizeCalculator.calculateSizeFromHex(hex, networkConfig);
+    // Compute sizes from bytes (mirrors logic in BlockSizeCalculator for blocks)
+    const sizeMetrics = this.calculateBlockSizesFromBytes(btcBlock, buffer, networkConfig);
     if (!BlockSizeCalculator.validateSizes(sizeMetrics)) {
       throw new Error(`Block size calculation validation failed for block: ${hash}`);
     }
@@ -71,11 +131,11 @@ export class HexTransformer {
       versionHex: '0x' + btcBlock.version.toString(16).padStart(8, '0'),
       merkleroot: bufToHexBE(btcBlock.merkleRoot) ?? '',
       time,
-      mediantime: time,
+      mediantime: time, // no header median time in bitcoinjs, reuse timestamp
       nonce: btcBlock.nonce,
       bits: '0x' + btcBlock.bits.toString(16).padStart(8, '0'),
       difficulty: this.calculateDifficulty(btcBlock.bits),
-      chainwork: '',
+      chainwork: '', // not derivable from a single block buffer
       previousblockhash: bufToHexBE(btcBlock.prevHash),
       nextblockhash: undefined,
       tx: transactions,
@@ -87,33 +147,79 @@ export class HexTransformer {
       : (base as Omit<UniversalBlock, 'height'> & { height?: undefined });
   }
 
-  static parseTransactionHex(
-    hex: string,
-    networkConfig: NetworkConfig,
-    blockhash?: string,
-    time?: number,
-    blocktime?: number
-  ): UniversalTransaction {
-    if (!hex) throw new Error('Transaction hex is required');
+  /**
+   * Compute stripped size / weight / vsize for a block from bytes.
+   * This avoids any intermediate hex string allocations.
+   */
+  private static calculateBlockSizesFromBytes(
+    btcBlock: bitcoin.Block,
+    buffer: Buffer,
+    networkConfig: NetworkConfig
+  ): { size: number; strippedSize: number; weight: number; vsize: number; witnessSize?: number } {
+    const size = buffer.length;
+    const txs = btcBlock.transactions || [];
 
-    const buffer = Buffer.from(hex, 'hex');
-    const tx = bitcoin.Transaction.fromBuffer(buffer);
+    // strippedSize = header(80) + varint(txCount) + sum(stripped(tx))
+    let strippedSize = 80;
+    strippedSize += this.varintSize(txs.length);
 
-    const sizeMetrics = BlockSizeCalculator.calculateTransactionSizeFromHex(hex, networkConfig);
-    if (!BlockSizeCalculator.validateSizes(sizeMetrics)) {
-      throw new Error(`Transaction size calculation validation failed for tx: ${tx.getId()}`);
+    for (const tx of txs) {
+      strippedSize += this.strippedTxSize(tx as unknown as bitcoin.Transaction);
     }
 
-    return this.parseTransactionFromBitcoinJS(
-      tx,
-      blockhash,
-      time ?? blocktime,
-      networkConfig,
-      time,
-      blocktime,
-      sizeMetrics
-    );
+    let weight: number;
+    let vsize: number;
+    let witnessSize: number | undefined;
+
+    if (networkConfig.hasSegWit) {
+      witnessSize = size > strippedSize ? size - strippedSize : undefined;
+      weight = strippedSize * 4 + (witnessSize ?? 0);
+      vsize = Math.ceil(weight / 4);
+    } else {
+      weight = strippedSize * 4;
+      vsize = strippedSize;
+      witnessSize = undefined;
+    }
+
+    return { size, strippedSize, weight, vsize, witnessSize };
   }
+
+  /**
+   * Stripped tx size from bitcoinjs Transaction shape (no witness data).
+   */
+  private static strippedTxSize(tx: bitcoin.Transaction): number {
+    let size = 4; // version
+
+    size += this.varintSize((tx as any).ins.length);
+    for (const input of (tx as any).ins) {
+      size += 32; // prevout hash
+      size += 4; // prevout index
+      size += this.varintSize(input.script.length);
+      size += input.script.length;
+      size += 4; // sequence
+    }
+
+    size += this.varintSize((tx as any).outs.length);
+    for (const output of (tx as any).outs) {
+      size += 8; // value
+      size += this.varintSize(output.script.length);
+      size += output.script.length;
+    }
+
+    size += 4; // locktime
+    return size;
+  }
+
+  private static varintSize(value: number): number {
+    if (value < 0xfd) return 1;
+    if (value <= 0xffff) return 3;
+    if (value <= 0xffffffff) return 5;
+    return 9;
+  }
+
+  // =======================
+  // COMMON TX/BLOCK PARSERS
+  // =======================
 
   private static parseTransactionFromBitcoinJS(
     tx: bitcoin.Transaction,
@@ -164,7 +270,7 @@ export class HexTransformer {
 
   private static parseVin(
     input: bitcoin.Transaction['ins'][0],
-    index: number,
+    _index: number,
     networkConfig?: NetworkConfig
   ): UniversalVin {
     const isCoinbase = input.hash.every((b) => b === 0) && input.index === 0xffffffff;

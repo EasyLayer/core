@@ -31,11 +31,15 @@ export class NetworkProvider extends BaseProvider {
     if (typeof this.transport.subscribeToNewBlocks !== 'function') {
       throw new Error('Transport does not support block subscriptions');
     }
+    // Parse from bytes to avoid huge hex strings in memory
     return this.transport.subscribeToNewBlocks((blockData: Buffer) => {
       try {
-        const hexData = blockData.toString('hex');
-        const parsedBlock = HexTransformer.parseBlockHex(hexData, this.network);
-        (parsedBlock as any).hex = hexData;
+        const u8 =
+          typeof Buffer !== 'undefined' && Buffer.isBuffer(blockData)
+            ? new Uint8Array(blockData.buffer, blockData.byteOffset, blockData.byteLength)
+            : (blockData as unknown as Uint8Array);
+        const parsedBlock = HexTransformer.parseBlockBytes(u8, this.network);
+        // Do NOT attach .hex to the block object to avoid memory bloat
         callback(parsedBlock as UniversalBlock);
       } catch (err) {
         onError?.(err instanceof Error ? err : new Error(String(err)));
@@ -66,7 +70,7 @@ export class NetworkProvider extends BaseProvider {
     return await this.transport.getManyBlockHashesByHeights(heights);
   }
 
-  // ===== HEX METHODS =====
+  // ===== HEX (bytes) METHODS =====
 
   /**
    * Get multiple blocks parsed from hex as Universal objects
@@ -81,22 +85,23 @@ export class NetworkProvider extends BaseProvider {
       const hexBlockBuffers = await this.transport.requestHexBlocks(hashes);
 
       return await Promise.all(
-        hexBlockBuffers.map(async (buffer: any, index: any) => {
-          if (!buffer) {
-            return null;
-          }
-
+        hexBlockBuffers.map(async (buffer: any) => {
+          if (!buffer) return null;
           try {
-            const hex = buffer.toString('hex');
-            const parsedBlock = HexTransformer.parseBlockHex(hex, this.network);
-            parsedBlock.hex = hex;
+            const u8 =
+              typeof Buffer !== 'undefined' && Buffer.isBuffer(buffer)
+                ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+                : (buffer as Uint8Array);
+            // Parse directly from bytes; do NOT create hex strings
+            const parsedBlock = HexTransformer.parseBlockBytes(u8, this.network);
+            // Do NOT attach .hex = ...
             return parsedBlock as UniversalBlock;
-          } catch (error) {
+          } catch {
             return null;
           }
         })
       );
-    } catch (error) {
+    } catch {
       return new Array(hashes.length).fill(null);
     }
   }
@@ -125,15 +130,11 @@ export class NetworkProvider extends BaseProvider {
     });
 
     return hashes.map((hash, index) => {
-      if (hash === null) {
-        return null;
-      }
-
+      if (hash === null) return null;
       const block = hashToBlock.get(hash) || null;
       if (block !== null) {
         block.height = heights[index];
       }
-
       return block;
     });
   }
@@ -159,7 +160,7 @@ export class NetworkProvider extends BaseProvider {
 
         try {
           return this.normalizeRawBlock(rawBlock);
-        } catch (error) {
+        } catch {
           return null;
         }
       })
@@ -191,15 +192,11 @@ export class NetworkProvider extends BaseProvider {
     });
 
     return blocksHashes.map((hash, index) => {
-      if (hash === null) {
-        return null;
-      }
-
+      if (hash === null) return null;
       const block = hashToBlock.get(hash) || null;
       if (block !== null) {
         block.height = heights[index];
       }
-
       return block;
     });
   }
@@ -223,7 +220,7 @@ export class NetworkProvider extends BaseProvider {
 
       try {
         return this.normalizeRawBlockStats(rawStats);
-      } catch (error) {
+      } catch {
         return null;
       }
     });
@@ -270,31 +267,9 @@ export class NetworkProvider extends BaseProvider {
           ? {
               blockhash: genesisHash,
               height: genesisHeight,
-              total_size: 285, // Known Bitcoin genesis block size
-              total_weight: 1140, // Known weight (285 * 4 for non-segwit)
-              total_fee: 0, // No fees in genesis
-              // fee_rate_percentiles: [0, 0, 0, 0, 0], // No fees
-              // subsidy: 5000000000,          // 50 BTC in satoshis
-              // total_out: 5000000000,        // Same as subsidy
-              // utxo_increase: 1,             // One new UTXO created
-              // utxo_size_inc: 43,            // Estimated UTXO size increase
-              // ins: 0,                       // No real inputs (coinbase)
-              // outs: 1,                      // One output
-              // txs: 1,                       // One transaction
-              // minfee: 0,                    // No fees
-              // maxfee: 0,
-              // medianfee: 0,
-              // avgfee: 0,
-              // minfeerate: 0,                // No fee rates
-              // maxfeerate: 0,
-              // medianfeerate: 0,
-              // avgfeerate: 0,
-              // mintxsize: 204,               // Genesis transaction size
-              // maxtxsize: 204,
-              // mediantxsize: 204,
-              // avgtxsize: 204,
-              // total_stripped_size: 285,     // Same as total_size for non-segwit
-              // witness_txs: 0,               // No witness transactions in genesis
+              total_size: 285,
+              total_weight: 1140,
+              total_fee: 0,
             }
           : null;
 
@@ -312,7 +287,7 @@ export class NetworkProvider extends BaseProvider {
         });
 
         return results;
-      } catch (error) {
+      } catch {
         return new Array(heights.length).fill(null);
       }
     } else {
@@ -380,7 +355,7 @@ export class NetworkProvider extends BaseProvider {
 
       try {
         return this.normalizeRawTransaction(rawTx);
-      } catch (error) {
+      } catch {
         return null;
       }
     });
@@ -406,16 +381,18 @@ export class NetworkProvider extends BaseProvider {
       if (hex === null) return null;
 
       try {
-        const parsedTx = HexTransformer.parseTransactionHex(hex, this.network);
-        parsedTx.hex = hex;
+        // If you later add bytes parser for transactions:
+        const u8 = Buffer.from(hex, 'hex');
+        const parsedTx = HexTransformer.parseTxBytes(u8, this.network);
+        // Do NOT attach tx.hex to the object
         return parsedTx;
-      } catch (error) {
+      } catch {
         return null;
       }
     });
   }
 
-  // ===== NETWORK METHODS =====
+  // ===== NETWORK/ESTIMATE METHODS =====
 
   /**
    * Get blockchain information
@@ -455,7 +432,6 @@ export class NetworkProvider extends BaseProvider {
     const results = await this.transport.batchCall([
       { method: 'estimatesmartfee', params: [confTarget, estimateMode] },
     ]);
-
     const feeData = results[0];
 
     if (feeData === null) {

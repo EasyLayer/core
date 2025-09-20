@@ -5,6 +5,10 @@ import {
   MempoolConnectionManager,
   NetworkProvider,
   MempoolProvider,
+  KeyManagementService,
+  ScriptUtilService,
+  WalletService,
+  TransactionService,
 } from '../../core';
 // import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from '../../blockchain-provider/utils';
 import type { NetworkConfig, RateLimits } from '../../core';
@@ -109,7 +113,7 @@ export class BlockchainProviderModule {
     const { networkProviders, mempoolProviders, network, rateLimits, isGlobal } = opts;
 
     const buildTransports = (cfg: ModuleProviderConfig) =>
-      cfg.connections.map((c, i) => {
+      (cfg.connections ?? []).map((c, i) => {
         if (cfg.type === 'rpc') {
           if (!c.baseUrl) throw new Error(`RPC connection ${i}: baseUrl required`);
           return new NodeRPC({
@@ -165,23 +169,17 @@ export class BlockchainProviderModule {
           new BlockchainProviderService(ncm, mcm, network),
         inject: [NetworkConnectionManager, MempoolConnectionManager],
       },
-      // KeyManagementService,
-      // ScriptUtilService,
-      // WalletService,
-      // TransactionService,
+      KeyManagementService,
+      ScriptUtilService,
+      WalletService,
+      TransactionService,
     ];
 
     return {
       module: BlockchainProviderModule,
       global: isGlobal ?? false,
       providers,
-      exports: [
-        BlockchainProviderService,
-        // KeyManagementService,
-        // ScriptUtilService,
-        // WalletService,
-        // TransactionService,
-      ],
+      exports: [BlockchainProviderService, KeyManagementService, ScriptUtilService, WalletService, TransactionService],
     };
   }
 }

@@ -64,8 +64,10 @@ export class MempoolProvider extends BaseProvider {
       if (hex === null) return null;
 
       try {
-        const parsedTx = HexTransformer.parseTransactionHex(hex, this.network);
-        parsedTx.hex = hex;
+        // If you later add bytes parser for transactions:
+        const u8 = Buffer.from(hex, 'hex');
+        const parsedTx = HexTransformer.parseTxBytes(u8, this.network);
+        // Do NOT attach tx.hex to the object
         return parsedTx;
       } catch (error) {
         return null;

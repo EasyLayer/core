@@ -37,7 +37,7 @@ export class NestLogger implements LoggerService {
     this.write('trace', m, c);
   }
   error(m: any, trace?: string, c?: string) {
-    this.write('fatal', m, c, true, trace ? { trace } : undefined);
+    this.write('error', m, c, true, trace ? { trace } : undefined);
   }
 
   private payload(includeCtx?: boolean) {

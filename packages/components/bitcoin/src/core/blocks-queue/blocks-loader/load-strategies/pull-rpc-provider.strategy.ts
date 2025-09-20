@@ -6,13 +6,20 @@ import type { BlocksQueue } from '../../blocks-queue';
 
 interface BlockInfo {
   hash: string;
-  size: number;
+  size: number; // binary total_size
   height: number;
 }
 
+/**
+ * Pull RPC Provider Strategy with reply-size budgeting.
+ * We treat the limit as "RPC reply budget" (bytes), not sum of binary block sizes.
+ * Approximate reply size = sum(total_size) * 2.1 (×2 hex + ~10% JSON overhead).
+ */
 export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.RPC_PULL;
-  private _maxRequestBlocksBatchSize: number = 10 * 1024 * 1024; // Batch size in bytes
+
+  // Budget of expected RPC reply bytes (not raw block bytes)
+  private _maxRpcReplyBytes: number = 10 * 1024 * 1024;
   private _preloadedItemsQueue: BlockInfo[] = [];
 
   private _maxPreloadCount: number;
@@ -24,18 +31,19 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @param log - The application logger.
    * @param blockchainProvider - The blockchain provider service.
    * @param queue - The blocks queue.
-   * @param config - Configuration object containing maxRequestBlocksBatchSize.
+   * @param config - Configuration object.
+   *
    */
   constructor(
     private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: {
-      maxRequestBlocksBatchSize: number;
+      maxRpcReplyBytes: number;
       basePreloadCount: number;
     }
   ) {
-    this._maxRequestBlocksBatchSize = config.maxRequestBlocksBatchSize;
+    this._maxRpcReplyBytes = config.maxRpcReplyBytes;
     this._maxPreloadCount = config.basePreloadCount;
   }
 
@@ -63,7 +71,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
       // IMPORTANT: This check is mandatory after preload.
       // We don't want to start downloading blocks if there is no items in the queue for them
-      if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
+      if (this.queue.isQueueOverloaded(this._maxRpcReplyBytes)) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         continue;
       }
@@ -111,7 +119,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     // Dynamic adjustment based on timing comparison with previous loadAndEnqueue
     if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
       const timingRatio = this._lastLoadAndEnqueueDuration / this._previousLoadAndEnqueueDuration;
-
       if (timingRatio > 1.2) {
         // Current loadAndEnqueue took significantly longer - need more preload buffer
         this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
@@ -144,17 +151,14 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   }
 
   /**
-   * Load blocks metadata in parallel batches, parse them into Block instances and enqueue.
+   * Load blocks metadata in a single batch, parse them into Block instances and enqueue.
    *
-   * - Sorts pending block infos by height (highest first).
-   * - Splits into up to `_concurrency` batches, each limited by `_maxRequestBlocksBatchSize`.
-   * - For each batch:
-   *   1. Calls `loadBlocks(infos, retryLimit)` to fetch raw hex via RPC (`verbosity=0`) with retries.
-   *   2. Parses each raw hex into a `Block` using `bitcoinjs-lib` and `ScriptUtilService`.
-   * - Flattens all loaded blocks and calls `enqueueBlocks(blocks)`.
-   *
-   * @returns A promise that resolves once all blocks are enqueued.
-   * @internal
+   * Batching logic:
+   * - Sort pending block infos by height (highest first).
+   * - Fill one batch limited by the **reply budget**:
+   *     predictedReplyBytes ≈ sum(total_size) * 2.1
+   * - Fetch via hex RPC (verbosity=0), provider parses from bytes, not hex strings.
+   * - After enqueue, aggressively release big arrays to help GC.
    */
   private async loadAndEnqueueBlocks(): Promise<void> {
     const retryLimit = 3;
@@ -172,19 +176,18 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     for (let i = 0; i < 1; i++) {
       // 1 - conccurency
       const infos: BlockInfo[] = [];
-      let size = 0;
+      let predictedReplyBytes = 0;
+      const OVERHEAD = 2.1; // ×2 hex + ~10% JSON envelope
 
-      while (size < this._maxRequestBlocksBatchSize && this._preloadedItemsQueue.length > 0) {
+      // Fill the batch by reply-size budget
+      while (this._preloadedItemsQueue.length > 0) {
+        const next = this._preloadedItemsQueue[this._preloadedItemsQueue.length - 1]!;
+        const nextPredicted = predictedReplyBytes + Math.floor(next.size * OVERHEAD);
+        if (nextPredicted > this._maxRpcReplyBytes) break;
+
         const info = this._preloadedItemsQueue.pop()!;
-
-        if (size + info.size <= this._maxRequestBlocksBatchSize) {
-          infos.push(info);
-          size += info.size;
-        } else {
-          // If it doesn't fit, we return it back to the queue.
-          this._preloadedItemsQueue.push(info);
-          break;
-        }
+        infos.push(info);
+        predictedReplyBytes = nextPredicted;
       }
 
       if (infos.length > 0) {
@@ -195,7 +198,12 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
     const batches: Block[][] = await Promise.all(activeTasks);
     const blocks: Block[] = batches.flat();
+
     await this.enqueueBlocks(blocks);
+
+    // Release large arrays ASAP to help GC
+    blocks.length = 0;
+    batches.length = 0;
 
     // Update timing history
     this._previousLoadAndEnqueueDuration = this._lastLoadAndEnqueueDuration;
@@ -206,18 +214,16 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * Fetches blocks in batches with retry logic.
    * @param infos - Array of block infos.
    * @param maxRetries - Maximum number of retry attempts.
-   * @returns Array of fetched blocks.
-   * @throws Will throw an error if fetching blocks fails after maximum retries.
    */
   private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
         const heights = infos.map((i) => i.height);
-        // Use the new performance method that returns fully parsed blocks with all transactions
+        // Provider parses from bytes; use useHex=true for performance and complete transaction data
         const blocks: Block[] = await this.blockchainProvider.getManyBlocksByHeights(
           heights,
-          true, // useHex = true for better performance and complete transaction data
+          true, // useHex = true (bytes path under the hood)
           undefined, // verbosity ignored when useHex = true
           true // verifyMerkle = true for security
         );
@@ -246,24 +252,18 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
     while (blocks.length > 0) {
       const block = blocks.pop();
+      if (!block) continue;
 
-      if (block) {
-        if (block.height <= this.queue.lastHeight) {
-          // The situation is when somehow we still have old blocks, we just skip them
-          this.log.verbose('Skipping block with height less than or equal to lastHeight', {
-            args: {
-              blockHeight: block.height,
-              lastHeight: this.queue.lastHeight,
-            },
-          });
-
-          continue;
-        }
-
-        // In case of errors we should throw all this away without try catch
-        // to reset everything and try again
-        await this.queue.enqueue(block);
+      if (block.height <= this.queue.lastHeight) {
+        // Skip old blocks quietly
+        this.log.verbose('Skipping block with height less than or equal to lastHeight', {
+          args: { blockHeight: block.height, lastHeight: this.queue.lastHeight },
+        });
+        continue;
       }
+
+      // No try/catch here by design to reset on errors
+      await this.queue.enqueue(block);
     }
   }
 }
