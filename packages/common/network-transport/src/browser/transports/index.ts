@@ -1,2 +1,3 @@
-export * from './electron-ipc-client';
-export * from './electron-ws-client';
+export * from './electron-ipc-renderer';
+export * from './ws-browser';
+export * from './http-browser';

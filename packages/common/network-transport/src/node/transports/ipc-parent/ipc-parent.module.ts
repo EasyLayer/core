@@ -1,14 +1,21 @@
 import { Module, DynamicModule } from '@nestjs/common';
-import type { IpcParentOptions } from './ipc-parent.gateway';
-import { IpcParentGateway } from './ipc-parent.gateway';
+import { QueryBus } from '@easylayer/common/cqrs';
+import { IpcParentTransportService } from './ipc-parent.service';
+import type { IpcParentOptions } from './ipc-parent.service';
 
 @Module({})
 export class IpcParentTransportModule {
-  static forRoot(options: IpcParentOptions): DynamicModule {
+  static forRoot(opts: IpcParentOptions): DynamicModule {
     return {
       module: IpcParentTransportModule,
-      providers: [{ provide: 'IPC_PARENT_OPTIONS', useValue: options }, IpcParentGateway],
-      exports: [],
+      providers: [
+        {
+          provide: IpcParentTransportService,
+          useFactory: (queryBus: QueryBus) => new IpcParentTransportService(opts, queryBus),
+          inject: [QueryBus],
+        },
+      ],
+      exports: [IpcParentTransportService],
     };
   }
 }

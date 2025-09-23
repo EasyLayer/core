@@ -1,12 +1,12 @@
 import type { Logger } from '@nestjs/common';
 import type { EventBus } from '@easylayer/common/cqrs';
 import { AppLogger } from '@easylayer/common/logger';
-import type { OutboxStreamManager } from '@easylayer/common/network-transport';
+import type { OutboxBatchSender } from '@easylayer/common/network-transport';
 import { Publisher, Subscriber } from '../core';
 
 export type BrowserCqrsTransportOptions = {
   systemAggregates?: string[];
-  outbox: OutboxStreamManager;
+  outbox: OutboxBatchSender;
   eventBus: EventBus;
   logger: Logger;
 };

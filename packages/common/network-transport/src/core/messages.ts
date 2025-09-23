@@ -1,10 +1,19 @@
 export const TRANSPORT_OVERHEAD_WIRE = 256;
 
-export interface Envelope<T = unknown> {
+export type TransportKind =
+  | 'http' // only for node version
+  | 'ws' // node + broser same name
+  | 'ipc-parent' // only for node version
+  | 'ipc-child' // only for node version
+  | 'electron-ipc-main' // only for node version
+  | 'electron-ipc-renderer'; // only for browser version
+
+export interface Message<T = unknown> {
   action: string;
   payload?: T;
   requestId?: string;
   correlationId?: string;
+  clientId?: string;
   timestamp?: number;
 }
 
@@ -20,23 +29,8 @@ export type PongPayload = {
   sid?: string;
 };
 
-export type RegisterStreamConsumerPayload = { token?: string };
-
-export interface WireEventRecord {
-  modelName: string;
-  eventType: string;
-  eventVersion: number;
-  requestId: string;
-  blockHeight: number | null;
-  payload: string;
-  timestamp: number;
-}
-
-export interface OutboxStreamBatchPayload {
-  events: WireEventRecord[];
-}
 export interface OutboxStreamAckPayload {
-  allOk: boolean;
+  ok: boolean;
   okIndices?: number[];
 }
 
@@ -45,6 +39,7 @@ export interface QueryRequestPayload {
   dto?: any;
 }
 export interface QueryResponsePayload {
+  ok: boolean;
   name: string;
   data?: any;
   err?: string;
@@ -53,16 +48,10 @@ export interface QueryResponsePayload {
 export const Actions = {
   Ping: 'ping',
   Pong: 'pong',
-
-  RegisterStreamConsumer: 'registerStreamConsumer',
-
-  OutboxStreamBatch: 'outboxStreamBatch',
-  OutboxStreamAck: 'outboxStreamAck',
-
+  OutboxStreamBatch: 'outbox.stream.batch',
+  OutboxStreamAck: 'outbox.stream.ack',
   QueryRequest: 'query.request',
   QueryResponse: 'query.response',
-
-  Error: 'error',
 } as const;
 
 export type ActionsKey = (typeof Actions)[keyof typeof Actions];

@@ -1,116 +1,90 @@
-import 'reflect-metadata';
-import { Test } from '@nestjs/testing';
-import { NetworkTransportModule, TransportModuleOptions } from '../transport.module';
-import {
-  HTTP_PRODUCER,
-  WS_PRODUCER,
-  IPC_PRODUCER
-} from '../transports';
-import { OutboxStreamManager } from '../../core';
+import { Test, TestingModule } from '@nestjs/testing';
+import { NetworkTransportModule } from '../transport.module';
+import { CqrsModule } from '@easylayer/common/cqrs';
+import { EventEmitter } from 'events';
 
-jest.mock('../transports', () => {
-  // explicit tokens
-  const HTTP_PRODUCER = 'HTTP_PRODUCER';
-  const WS_PRODUCER   = 'WS_PRODUCER';
-  const IPC_PRODUCER  = 'IPC_PRODUCER';
+class FakeChild extends EventEmitter {
+  send = jest.fn();
+  once = super.once.bind(this) as any;
+  off = super.off.bind(this) as any;
+}
 
-  const HTTP_OPTIONS = 'HTTP_OPTIONS';
-  const WS_OPTIONS   = 'WS_OPTIONS';
-  const IPC_OPTIONS  = 'IPC_OPTIONS';
+describe('NetworkTransportModule', () => {
+  let modRef: TestingModule | undefined;
 
-  // helper to create a minimal DynamicModule
-  const mkModule = (token: string, name: 'http'|'ws'|'ipc', optsToken: string) => {
-    class DummyModule {}
-    // simple static forRoot that DOES NOT touch other exports
-    (DummyModule as any).forRoot = (opts: any) => ({
-      module: DummyModule,
-      providers: [
-        { provide: token, useValue: { configuration: { name } } },
-        { provide: optsToken, useValue: opts },
-      ],
-      exports: [token, optsToken],
-    });
-    return DummyModule;
-  };
-
-  const HttpTransportModule     = mkModule(HTTP_PRODUCER, 'http', HTTP_OPTIONS);
-  const WsTransportModule       = mkModule(WS_PRODUCER,   'ws',   WS_OPTIONS);
-  const IpcChildTransportModule = mkModule(IPC_PRODUCER,  'ipc',  IPC_OPTIONS);
-
-  // stubs for unused re-exports to keep the barrel happy
-  const ElectronWsClientModule   = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
-  const ElectronIpcClientModule  = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
-  const IpcParentTransportModule = { forRoot: (_: any) => ({ module: class {}, providers: [], exports: [] }) };
-
-  // IMPORTANT: mark as ES module explicitly
-  return {
-    __esModule: true,
-    HTTP_PRODUCER, WS_PRODUCER, IPC_PRODUCER,
-    HttpTransportModule, WsTransportModule, IpcChildTransportModule,
-    ElectronWsClientModule, ElectronIpcClientModule, IpcParentTransportModule,
-  };
-});
-
-describe('TransportModule', () => {
-  it('wires multiple providers and selects streaming by name', async () => {
-    const options: TransportModuleOptions = {
-      isGlobal: false,
-      transports: [
-        { type: 'http', webhook: { url: 'https://example/hook' } } as any,
-        { type: 'ws' } as any,
-        { type: 'ipc' } as any,
-      ],
-      streaming: 'ws',
-    };
-
-    const moduleRef = await Test.createTestingModule({
-      imports: [NetworkTransportModule.forRoot(options)],
-    }).compile();
-
-    const manager = moduleRef.get(OutboxStreamManager);
-    const http = moduleRef.get(HTTP_PRODUCER);
-    const ws = moduleRef.get(WS_PRODUCER);
-    const ipc = moduleRef.get(IPC_PRODUCER);
-
-    expect(http?.configuration?.name).toBe('http');
-    expect(ws?.configuration?.name).toBe('ws');
-    expect(ipc?.configuration?.name).toBe('ipc');
-
-    expect(manager.getProducer()).toBe(ws);
+  afterEach(async () => {
+    try { await modRef?.close(); } catch {}
+    jest.clearAllTimers();
+    jest.useRealTimers();
   });
 
-  it('when streaming is not set, manager has no producer', async () => {
-    const options: TransportModuleOptions = {
-      isGlobal: false,
-      transports: [
-        { type: 'http', webhook: { url: 'https://example/hook' } } as any,
-        { type: 'ws' } as any,
+  it('creates without transports and without outbox', async () => {
+    modRef = await Test.createTestingModule({
+      imports: [
+        CqrsModule.forRoot({ isGlobal: true }),
+        NetworkTransportModule.forRoot({ transports: [] }),
       ],
-      // streaming: undefined
-    };
-
-    const moduleRef = await Test.createTestingModule({
-      imports: [NetworkTransportModule.forRoot(options)],
     }).compile();
-
-    const manager = moduleRef.get(OutboxStreamManager);
-    expect(manager.getProducer()).toBeNull();
+    expect(modRef).toBeDefined();
   });
 
-  it('throws if requested streaming transport was not provisioned', async () => {
-    const options: TransportModuleOptions = {
-      isGlobal: false,
-      transports: [
-        { type: 'http', webhook: { url: 'https://example/hook' } } as any,
-        { type: 'ws' } as any,
+  it('compiles when outbox enabled with no transports', async () => {
+    modRef = await Test.createTestingModule({
+      imports: [
+        CqrsModule.forRoot({ isGlobal: true }),
+        NetworkTransportModule.forRoot({ transports: [], outbox: { enabled: true, kind: 'http' } }),
       ],
-      streaming: 'ipc', // not present
-    };
+    }).compile();
+    expect(modRef).toBeDefined();
+  });
 
-    await expect(
-      Test.createTestingModule({
-        imports: [NetworkTransportModule.forRoot(options)],
-      }).compile()
-    ).rejects.toThrow('Streaming transport "ipc" was requested but not provisioned');
+  it('wires DI for http transport with outbox=http', async () => {
+    modRef = await Test.createTestingModule({
+      imports: [
+        CqrsModule.forRoot({ isGlobal: true }),
+        NetworkTransportModule.forRoot({
+          transports: [
+            {
+              type: 'http',
+              host: '127.0.0.1',
+              port: 31234,
+              webhook: { url: 'http://localhost:9999/hook' },
+            },
+          ],
+          outbox: { enabled: true, kind: 'http' },
+        }),
+      ],
+    }).compile();
+    expect(modRef).toBeDefined();
+  });
+
+  it('still compiles when outbox kind not present among transports', async () => {
+    modRef = await Test.createTestingModule({
+      imports: [
+        CqrsModule.forRoot({ isGlobal: true }),
+        NetworkTransportModule.forRoot({
+          transports: [{ type: 'ipc-parent', child: new FakeChild() as any }],
+          outbox: { enabled: true, kind: 'ws' },
+        }),
+      ],
+    }).compile();
+    expect(modRef).toBeDefined();
+  });
+
+  it('accepts multiple transports without outbox', async () => {
+    modRef = await Test.createTestingModule({
+      imports: [
+        CqrsModule.forRoot({ isGlobal: true }),
+        NetworkTransportModule.forRoot({
+          transports: [
+            { type: 'ws', host: '127.0.0.1', port: 31337, password: 'pw' },
+            { type: 'ipc-child' },
+            { type: 'ipc-parent', child: new FakeChild() as any },
+            // { type: 'electron-ipc-main' },
+          ],
+        }),
+      ],
+    }).compile();
+    expect(modRef).toBeDefined();
   });
 });

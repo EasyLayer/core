@@ -1,6 +1,6 @@
 import { Module, DynamicModule, Inject, Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { EventBus } from '@easylayer/common/cqrs';
-import { OutboxStreamManager } from '@easylayer/common/network-transport';
+import { OutboxBatchSender } from '@easylayer/common/network-transport';
 import { Publisher as CorePublisher, Subscriber as CoreSubscriber } from './core';
 
 export const SYSTEM_MODEL_NAMES = 'SYSTEM_MODEL_NAMES';
@@ -10,10 +10,7 @@ export class PublisherProvider {
   logger: Logger = new Logger(PublisherProvider.name);
   public readonly instance: CorePublisher;
 
-  constructor(
-    @Inject(OutboxStreamManager) outbox: OutboxStreamManager,
-    @Inject(SYSTEM_MODEL_NAMES) modelNames: string[]
-  ) {
+  constructor(@Inject(OutboxBatchSender) outbox: OutboxBatchSender, @Inject(SYSTEM_MODEL_NAMES) modelNames: string[]) {
     // Same wiring as on Node — just uses browser impls of the tokens.
     this.instance = new CorePublisher(outbox, this.logger, modelNames);
   }

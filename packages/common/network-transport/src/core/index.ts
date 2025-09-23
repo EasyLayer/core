@@ -1,4 +1,3 @@
-export * from './base-consumer';
-export * from './base-producer';
-export * from './outbox-stream-manager';
+export * from './outbox-batch-sender';
 export * from './messages';
+export * from './transport-port';

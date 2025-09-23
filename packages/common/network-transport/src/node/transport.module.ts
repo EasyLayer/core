@@ -1,118 +1,105 @@
 import { Module, DynamicModule } from '@nestjs/common';
-import { OutboxStreamManager } from '../core';
-import type { BaseProducer } from '../core';
+import { OutboxBatchSender } from '../core';
+import type { TransportKind, TransportPort } from '../core';
+import type {
+  HttpServiceOptions,
+  IpcChildOptions,
+  IpcParentOptions,
+  WsServerOptions,
+  ElectronIpcMainOptions,
+} from './transports';
 import {
   HttpTransportModule,
-  HttpServerOptions,
-  WsTransportModule,
-  WsServerOptions,
+  HttpTransportService,
   IpcChildTransportModule,
-  IpcServerOptions,
-  ElectronWsClientModule,
-  ElectronWsClientOptions,
-  ElectronIpcClientModule,
+  IpcChildTransportService,
   IpcParentTransportModule,
-  ElectronIpcClientOptions,
-  IpcParentOptions,
-  HTTP_PRODUCER,
-  WS_PRODUCER,
-  IPC_PRODUCER,
+  IpcParentTransportService,
+  WsTransportModule,
+  WsTransportService,
+  ElectronIpcMainModule,
+  ElectronIpcMainService,
 } from './transports';
 
 export type ServerTransportConfig =
-  | HttpServerOptions
+  | HttpServiceOptions
+  | IpcChildOptions
+  | IpcParentOptions
   | WsServerOptions
-  | IpcServerOptions
-  | ElectronWsClientOptions
-  | ElectronIpcClientOptions
-  | IpcParentOptions;
+  | ElectronIpcMainOptions;
 
 export interface TransportModuleOptions {
   isGlobal?: boolean;
-  transports: ServerTransportConfig[];
-  streaming?: 'http' | 'ws' | 'ipc';
-}
-
-function assertNodeRuntime() {
-  if (typeof window !== 'undefined') {
-    throw new Error('Node transport module cannot be used in Browser runtime');
-  }
+  transports?: ServerTransportConfig[];
+  outbox?: { enabled: boolean; kind: TransportKind };
 }
 
 @Module({})
 export class NetworkTransportModule {
   static forRoot(options: TransportModuleOptions): DynamicModule {
-    assertNodeRuntime();
+    const { isGlobal, transports = [], outbox } = options ?? {};
 
-    const imports: any[] = [];
-    const producerTokens: string[] = [];
+    const imports: DynamicModule[] = [];
+    const map: Array<{ kind: TransportKind; token: any }> = [];
 
-    for (const t of options.transports) {
-      const type = (t as any).type;
+    for (const t of transports) {
+      const kind = (t as any).type as TransportKind;
 
-      if (type === 'http') {
-        imports.push(HttpTransportModule.forRoot(t as HttpServerOptions));
-        producerTokens.push(HTTP_PRODUCER);
+      if (kind === 'http') {
+        imports.push(HttpTransportModule.forRoot(t as HttpServiceOptions));
+        map.push({ kind, token: HttpTransportService });
       }
-      if (type === 'ws') {
-        imports.push(WsTransportModule.forRoot(t as WsServerOptions));
-        producerTokens.push(WS_PRODUCER);
+      if (kind === 'ipc-child') {
+        imports.push(IpcChildTransportModule.forRoot(t as IpcChildOptions));
+        map.push({ kind, token: IpcChildTransportService });
       }
-      if (type === 'ipc') {
-        imports.push(IpcChildTransportModule.forRoot(t as IpcServerOptions));
-        producerTokens.push(IPC_PRODUCER);
-      }
-
-      // node-side clients and ipc parent (do not add to producerTokens) ---
-      if (type === 'electron-ws-client') {
-        imports.push(ElectronWsClientModule.forRoot(t as ElectronWsClientOptions));
-      }
-      if (type === 'electron-ipc-client') {
-        imports.push(ElectronIpcClientModule.forRoot(t as ElectronIpcClientOptions));
-      }
-      if (type === 'ipc-parent') {
+      if (kind === 'ipc-parent') {
         imports.push(IpcParentTransportModule.forRoot(t as IpcParentOptions));
+        map.push({ kind, token: IpcParentTransportService });
+      }
+      if (kind === 'ws') {
+        imports.push(WsTransportModule.forRoot(t as WsServerOptions));
+        map.push({ kind, token: WsTransportService });
+      }
+      if (kind === 'electron-ipc-main') {
+        imports.push(ElectronIpcMainModule.forRoot(t as ElectronIpcMainOptions));
+        map.push({ kind, token: ElectronIpcMainService });
       }
     }
 
+    const injectTokens = map.map((m) => m.token);
+
+    const providers = [
+      {
+        provide: OutboxBatchSender,
+        useFactory: (...ports: TransportPort[]) => {
+          const sender = new OutboxBatchSender();
+
+          // If outbox is enabled, try to bind the matching transport.
+          if (outbox?.enabled) {
+            const target = outbox.kind;
+            const port = ports.find((p) => p && p.kind === target);
+            if (!port) {
+              // No matching transport provisioned; leave sender without transport.
+              // This is intentional: app can still run without outbox bound.
+            } else {
+              sender.setTransport(port);
+            }
+          }
+          // If outbox is disabled or not provided, sender remains without transport.
+
+          return sender;
+        },
+        inject: injectTokens,
+      },
+    ];
+
     return {
       module: NetworkTransportModule,
-      global: options.isGlobal ?? false,
+      global: isGlobal ?? false,
       imports,
-      providers: [
-        {
-          provide: OutboxStreamManager,
-          useFactory: (...producers: BaseProducer[]) => {
-            const manager = new OutboxStreamManager();
-
-            if (options.streaming) {
-              const target = options.streaming;
-              let chosen: BaseProducer | null = null;
-
-              for (const p of producers) {
-                if (!p) continue;
-                const name = (p as any)?.configuration?.name;
-                if (name === target) {
-                  chosen = p;
-                  break;
-                }
-              }
-
-              if (!chosen) {
-                throw new Error(`Streaming transport "${target}" was requested but not provisioned`);
-              }
-
-              manager.setProducer(chosen);
-            } else {
-              manager.setProducer(null);
-            }
-
-            return manager;
-          },
-          inject: [...(producerTokens.length > 0 ? producerTokens : [])],
-        },
-      ],
-      exports: [OutboxStreamManager],
+      providers,
+      exports: [OutboxBatchSender],
     };
   }
 }

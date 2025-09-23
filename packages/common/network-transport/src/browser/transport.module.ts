@@ -1,90 +1,72 @@
 import { Module, DynamicModule } from '@nestjs/common';
-import { OutboxStreamManager } from '../core';
-import type { BaseProducer } from '../core';
+import { OutboxBatchSender } from '../core';
+import type { TransportKind, TransportPort } from '../core';
+import type { HttpBrowserClientOptions, WsBrowserClientOptions, ElectronIpcRendererOptions } from './transports';
 import {
-  ElectronIpcRendererClientModule,
-  ElectronWsRendererClientModule,
-  ElectronIpcRendererProducerOptions,
-  ElectronWsRendererProducerOptions,
-  ELECTRON_IPC_RENDERER_PRODUCER,
-  ELECTRON_WS_RENDERER_PRODUCER,
+  HttpBrowserClientModule,
+  HttpBrowserService,
+  WsBrowserClientModule,
+  WsBrowserTransportService,
+  ElectronIpcRendererModule,
+  ElectronIpcRendererService,
 } from './transports';
 
-// Keep the same signature as Node version:
-export type ServerTransportConfig = ElectronIpcRendererProducerOptions | ElectronWsRendererProducerOptions;
+export type ServerTransportConfig = HttpBrowserClientOptions | WsBrowserClientOptions | ElectronIpcRendererOptions;
 
 export interface TransportModuleOptions {
   isGlobal?: boolean;
-  transports: ServerTransportConfig[];
-  streaming?: 'ws' | 'ipc';
-}
-
-function assertBrowserRuntime() {
-  if (typeof window === 'undefined') {
-    throw new Error('Browser transport module cannot be used in Node runtime');
-  }
+  transports?: ServerTransportConfig[];
+  outbox?: { enabled: boolean; kind: TransportKind };
 }
 
 @Module({})
 export class NetworkTransportModule {
   static forRoot(options: TransportModuleOptions): DynamicModule {
-    assertBrowserRuntime();
+    const { isGlobal, transports = [], outbox } = options ?? {};
 
-    const imports: any[] = [];
-    const providers: any[] = [];
-    const producerTokens: string[] = [];
+    const imports: DynamicModule[] = [];
+    const map: Array<{ kind: TransportKind; token: any }> = [];
 
-    for (const t of options.transports) {
-      const type = (t as any).type;
-
-      if (type === 'ipc') {
-        imports.push(ElectronIpcRendererClientModule.forRoot(t as ElectronIpcRendererProducerOptions));
-        producerTokens.push(ELECTRON_IPC_RENDERER_PRODUCER);
+    for (const t of transports) {
+      const kind = (t as any).type as TransportKind;
+      if (kind === 'http') {
+        imports.push(HttpBrowserClientModule.forRoot(t as HttpBrowserClientOptions));
+        map.push({ kind, token: HttpBrowserService });
       }
-      if (type === 'ws') {
-        imports.push(ElectronWsRendererClientModule.forRoot(t as ElectronWsRendererProducerOptions));
-        producerTokens.push(ELECTRON_WS_RENDERER_PRODUCER);
+      if (kind === 'ws') {
+        imports.push(WsBrowserClientModule.forRoot(t as WsBrowserClientOptions));
+        map.push({ kind, token: WsBrowserTransportService });
+      }
+      if (kind === 'electron-ipc-renderer') {
+        imports.push(ElectronIpcRendererModule.forRoot(t as ElectronIpcRendererOptions));
+        map.push({ kind, token: ElectronIpcRendererService });
       }
     }
 
-    providers.push({
-      provide: OutboxStreamManager,
-      useFactory: (...producers: BaseProducer[]) => {
-        const manager = new OutboxStreamManager();
+    const providers: any[] = [];
+    const exportsArr: any[] = [];
 
-        if (options.streaming) {
-          const target = options.streaming;
-          let chosen: BaseProducer | null = null;
-
-          for (const p of producers) {
-            if (!p) continue;
-            const name = (p as any)?.configuration?.name;
-            if (name === target) {
-              chosen = p;
-              break;
-            }
-          }
-
-          if (!chosen) {
-            throw new Error(`Streaming transport "${target}" was requested but not provisioned`);
-          }
-
-          manager.setProducer(chosen);
-        } else {
-          manager.setProducer(null);
-        }
-
-        return manager;
-      },
-      inject: [...(producerTokens.length > 0 ? producerTokens : [])],
-    });
+    if (outbox?.enabled) {
+      const m = map.find((x) => x.kind === outbox.kind);
+      if (!m) throw new Error(`Outbox enabled but transport "${outbox.kind}" is not provisioned`);
+      providers.push({
+        provide: OutboxBatchSender,
+        useFactory: (port: TransportPort) => {
+          const s = new OutboxBatchSender();
+          s.setTransport(port);
+          return s;
+        },
+        inject: [m.token],
+      });
+      exportsArr.push(OutboxBatchSender);
+    }
 
     return {
       module: NetworkTransportModule,
-      global: options.isGlobal ?? false,
+      global: isGlobal ?? false,
       imports,
       providers,
-      exports: [OutboxStreamManager],
+      exports: exportsArr,
     };
   }
 }
