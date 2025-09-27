@@ -8,12 +8,13 @@ import {
   createSnapshotsEntity,
   createEventDataEntity,
   createOutboxEntity,
-  EventStoreService,
   BaseAdapter,
   ensureSchema,
   getTableName,
   ensureNonNegativeGuards,
   DriverType,
+  EventStoreReadService,
+  EventStoreWriteService,
 } from '../core';
 import { PostgresAdapter } from './postgres.adapter';
 import { SqliteAdapter } from './sqlite.adapter';
@@ -105,14 +106,21 @@ export class EventStoreModule {
           inject: [getDataSourceToken(name)],
         },
         {
-          provide: EventStoreService,
-          useFactory: (adapter: BaseAdapter, publisher: PublisherProvider) => {
-            return new EventStoreService(adapter, publisher, {});
+          provide: EventStoreWriteService,
+          useFactory: (adapter: BaseAdapter, publisher: PublisherProvider, readService: EventStoreReadService) => {
+            return new EventStoreWriteService(adapter, publisher, readService, {});
           },
-          inject: [EVENT_STORE_ADAPTER, PublisherProvider],
+          inject: [EVENT_STORE_ADAPTER, PublisherProvider, EventStoreReadService],
+        },
+        {
+          provide: EventStoreReadService,
+          useFactory: (adapter: BaseAdapter) => {
+            return new EventStoreReadService(adapter);
+          },
+          inject: [EVENT_STORE_ADAPTER],
         },
       ],
-      exports: [EventStoreService, EVENT_STORE_ADAPTER],
+      exports: [EventStoreWriteService, EventStoreReadService],
     };
   }
 }

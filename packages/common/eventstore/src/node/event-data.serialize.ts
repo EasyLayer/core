@@ -1,7 +1,7 @@
 import type { DomainEvent } from '@easylayer/common/cqrs';
-import type { DriverType, EventDataParameters } from '../core';
+import type { DriverType, EventDataModel, EventReadRow } from '../core';
 import { CompressionUtils } from './compression';
-import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8, toBuffer } from './bytes';
+import { utf8ToBuffer, bufferToUtf8 } from './bytes';
 
 /**
  * Single-pass serialization; ONE buffer feeds BOTH:
@@ -9,11 +9,11 @@ import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8, toBuffer } from './bytes';
  *  - outbox (BLOB/bytea)
  * No extra plain-buffer if compression is used.
  */
-export async function serializeEventRow(
+export async function toEventDataModel(
   event: DomainEvent,
   version: number,
   dbDriver: DriverType = 'postgres'
-): Promise<EventDataParameters> {
+): Promise<EventDataModel> {
   const { requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
@@ -52,10 +52,13 @@ export async function serializeEventRow(
   };
 }
 
-/** Read-side helper (OK to parse). Aggregate row uses Buffer payload. */
-export async function deserializeToDomainEvent(
+// Builds a DomainEvent for aggregate rehydration.
+// - Decompress/UTF-8 decode BLOB payload.
+// - JSON.parse to get the event payload object.
+// - Intended ONLY for domain path: model.loadFromHistory([...]).
+export async function toDomainEvent(
   aggregateId: string,
-  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataParameters,
+  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataModel,
   _dbDriver: DriverType = 'postgres'
 ) {
   const jsonStr = isCompressed ? await CompressionUtils.decompressBufferToString(payload) : bufferToUtf8(payload);
@@ -76,4 +79,29 @@ export async function deserializeToDomainEvent(
     timestamp,
     payload: userPayload,
   }) as DomainEvent;
+}
+
+// Converts a raw DB event row (BLOB payload) into a network-facing DTO.
+// IMPORTANT:
+// - payload is returned as a JSON STRING (already decompressed/decoded).
+// - Never JSON.parse here; the caller decides when to parse.
+// - This keeps read-path cheap for transport and avoids double parse.
+export async function toEventReadRow(
+  aggregateId: string,
+  row: EventDataModel,
+  _dbDriver: DriverType = 'postgres'
+): Promise<EventReadRow> {
+  const jsonStr = row.isCompressed
+    ? await CompressionUtils.decompressBufferToString(row.payload)
+    : bufferToUtf8(row.payload);
+
+  return {
+    modelId: aggregateId,
+    eventType: row.type,
+    eventVersion: row.version,
+    requestId: row.requestId,
+    blockHeight: row.blockHeight ?? -1,
+    payload: jsonStr,
+    timestamp: row.timestamp,
+  };
 }

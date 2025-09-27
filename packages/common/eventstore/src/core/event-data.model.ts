@@ -1,8 +1,23 @@
 import { EntitySchema } from 'typeorm';
 import type { DriverType } from './utils';
 
+/**
+ * Read-only lightweight row for external services:
+ * - modelId: aggregateId (table name) that produced this row (not stored in table)
+ * - payload: JSON string (no JSON.parse here)
+ */
+export interface EventReadRow {
+  modelId: string; // <- aggregateId (table name)
+  eventType: string; // <- type
+  eventVersion: number; // <- version
+  requestId: string;
+  blockHeight: number;
+  payload: string; // JSON string; caller may JSON.parse if needed
+  timestamp: number;
+}
+
 /** Event row as stored in aggregate tables – payload is binary buffer now. */
-export interface EventDataParameters {
+export interface EventDataModel {
   id?: number; // bigserial/integer autoincrement
   type: string;
   payload: Buffer; // BLOB/bytea for aggregate tables
@@ -20,7 +35,7 @@ export interface EventDataParameters {
 export const createEventDataEntity = (
   aggregateId: string,
   dbDriver: DriverType = 'sqlite'
-): EntitySchema<EventDataParameters> => {
+): EntitySchema<EventDataModel> => {
   const isPostgres = dbDriver === 'postgres';
 
   // Auto-incrementing sequence for guaranteed order
@@ -34,7 +49,7 @@ export const createEventDataEntity = (
     type: isPostgres ? 'bytea' : 'blob',
   };
 
-  return new EntitySchema<EventDataParameters>({
+  return new EntitySchema<EventDataModel>({
     name: aggregateId,
     tableName: aggregateId,
     columns: {

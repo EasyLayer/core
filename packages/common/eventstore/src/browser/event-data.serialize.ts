@@ -1,16 +1,14 @@
 import type { DomainEvent } from '@easylayer/common/cqrs';
-import type { EventDataParameters } from '../core';
-import { byteLengthUtf8, utf8ToBuffer, bufferToUtf8 } from './bytes';
+import type { DriverType, EventDataModel, EventReadRow } from '../core';
+import { utf8ToBuffer, bufferToUtf8 } from './bytes';
 
 /**
  * Single-pass serialization; ONE buffer feeds BOTH:
  *  - aggregate tables (BLOB/bytea)
  *  - outbox (BLOB/bytea)
  * No extra plain-buffer if compression is used.
- *
- * Browser build: compression is disabled entirely.
  */
-export async function serializeEventRow(event: DomainEvent, version: number): Promise<EventDataParameters> {
+export async function toEventDataModel(event: DomainEvent, version: number): Promise<EventDataModel> {
   const { requestId, blockHeight, timestamp, payload } = event;
 
   if (!requestId) throw new Error('Request Id is missed in the event');
@@ -36,15 +34,14 @@ export async function serializeEventRow(event: DomainEvent, version: number): Pr
   };
 }
 
-/** Read-side helper (OK to parse). Aggregate row uses Buffer payload. */
-export async function deserializeToDomainEvent(
+// Builds a DomainEvent for aggregate rehydration.
+// - Decompress/UTF-8 decode BLOB payload.
+// - JSON.parse to get the event payload object.
+// - Intended ONLY for domain path: model.loadFromHistory([...]).
+export async function toDomainEvent(
   aggregateId: string,
-  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataParameters
-): Promise<DomainEvent> {
-  if (isCompressed) {
-    throw new Error('Compressed aggregate payload is not supported in browser build');
-  }
-
+  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataModel
+) {
   const jsonStr = bufferToUtf8(payload);
   const userPayload = JSON.parse(jsonStr);
 
@@ -56,13 +53,34 @@ export async function deserializeToDomainEvent(
     writable: false,
   });
 
-  const event: DomainEvent = Object.assign(Object.create(proto), {
+  return Object.assign(Object.create(proto), {
     aggregateId,
     requestId,
     blockHeight: blockHeight ?? -1, // null => -1
     timestamp,
     payload: userPayload,
-  });
+  }) as DomainEvent;
+}
 
-  return event;
+// Converts a raw DB event row (BLOB payload) into a network-facing DTO.
+// IMPORTANT:
+// - payload is returned as a JSON STRING (already decompressed/decoded).
+// - Never JSON.parse here; the caller decides when to parse.
+// - This keeps read-path cheap for transport and avoids double parse.
+export async function toEventReadRow(
+  aggregateId: string,
+  row: EventDataModel,
+  _dbDriver: DriverType = 'postgres'
+): Promise<EventReadRow> {
+  const jsonStr = bufferToUtf8(row.payload);
+
+  return {
+    modelId: aggregateId,
+    eventType: row.type,
+    eventVersion: row.version,
+    requestId: row.requestId,
+    blockHeight: row.blockHeight ?? -1,
+    payload: jsonStr,
+    timestamp: row.timestamp,
+  };
 }

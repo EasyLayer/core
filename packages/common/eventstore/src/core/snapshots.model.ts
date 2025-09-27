@@ -2,33 +2,37 @@ import { EntitySchema } from 'typeorm';
 import type { DriverType } from './utils';
 
 /**
+ * Read-only lightweight snapshot for external services:
+ * - payload: JSON string (no JSON.parse here)
+ * - no DB `id` in the shape
+ */
+export interface SnapshotReadRow {
+  modelId: string;
+  blockHeight: number;
+  version: number;
+  payload: string; // JSON string; caller may JSON.parse if needed
+}
+
+/**
  * DB row shape: what is actually stored in the table.
  * payload is binary (bytea/blob). isCompressed says whether payload bytes are deflated JSON.
  */
-export interface SnapshotInterface {
-  id: string;
+export interface SnapshotDataModel {
+  id?: string;
   aggregateId: string;
   blockHeight: number;
   version: number;
   payload: Buffer; // binary payload: deflated JSON or plain utf8 JSON bytes
-  isCompressed: boolean; // never null in practice
-  createdAt: Date;
+  isCompressed?: boolean; // never null in practice
+  createdAt: string;
 }
 
-/**
- * In-memory shape after deserialize: what aggregate wants to consume.
- * payload is a parsed JS object.
- */
-export interface SnapshotParameters {
-  aggregateId: string;
-  blockHeight: number;
-  version: number;
-  payload: any; // parsed object after decompress+parse
-  isCompressed?: boolean; // always false after deserialize()
+export interface SnapshotParsedPayload extends SnapshotDataModel {
+  payload: any; // parsed object
 }
 
 /** Create TypeORM entity for "snapshots" table (BLOB/bytea payload). */
-export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<SnapshotInterface> => {
+export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<SnapshotDataModel> => {
   const isPostgres = dbDriver === 'postgres';
 
   // Auto-incrementing sequence for guaranteed order
@@ -47,7 +51,7 @@ export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): Entity
     default: () => 'CURRENT_TIMESTAMP',
   };
 
-  return new EntitySchema<SnapshotInterface>({
+  return new EntitySchema<SnapshotDataModel>({
     name: 'snapshots',
     tableName: 'snapshots',
     columns: {

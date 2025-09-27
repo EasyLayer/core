@@ -1,28 +1,24 @@
 import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
-import type { DriverType, SnapshotInterface, SnapshotParameters } from '../core';
+import type { DriverType, SnapshotDataModel, SnapshotReadRow, SnapshotParsedPayload } from '../core';
 import { CompressionUtils } from './compression';
 import { utf8ToBuffer, bufferToUtf8 } from './bytes';
 
-/**
- * Deserialize snapshot DB row into in-memory object with parsed payload.
- * - Decompress if needed (PG case)
- * - Parse JSON and return clean SnapshotParameters (no compression flags)
- */
-export async function deserializeSnapshot(
-  row: SnapshotInterface,
+export async function toSnapshotParsedPayload(
+  row: SnapshotDataModel,
   _dbDriver: DriverType = 'postgres'
-): Promise<SnapshotParameters> {
+): Promise<SnapshotParsedPayload> {
   const jsonStr = row.isCompressed
     ? await CompressionUtils.decompressBufferToString(row.payload)
     : bufferToUtf8(row.payload);
 
-  const payloadObj = JSON.parse(jsonStr);
+  const payload = JSON.parse(jsonStr);
 
   return {
     aggregateId: row.aggregateId,
     blockHeight: row.blockHeight,
     version: row.version,
-    payload: payloadObj,
+    payload,
+    createdAt: row.createdAt,
   };
 }
 
@@ -32,10 +28,10 @@ export async function deserializeSnapshot(
  * - For Postgres: compress if it’s beneficial; store compressed bytes in payload; isCompressed=true.
  * - For SQLite: store plain UTF-8 bytes (blob); isCompressed=false.
  */
-export async function serializeSnapshot<T extends AggregateRoot<DomainEvent>>(
+export async function toSnapshotDataModel<T extends AggregateRoot<DomainEvent>>(
   aggregate: T,
   dbDriver: DriverType = 'postgres'
-): Promise<Omit<SnapshotInterface, 'id' | 'createdAt'>> {
+): Promise<SnapshotDataModel> {
   const { aggregateId, lastBlockHeight, version } = aggregate;
   if (!aggregateId) throw new Error('aggregate Id is missed');
   if (lastBlockHeight == null) throw new Error('lastBlockHeight is missing');
@@ -65,5 +61,22 @@ export async function serializeSnapshot<T extends AggregateRoot<DomainEvent>>(
     version,
     payload: payloadBuf,
     isCompressed,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+export async function toSnapshotReadRow<T extends AggregateRoot<DomainEvent>>(aggregate: T): Promise<SnapshotReadRow> {
+  const { aggregateId, lastBlockHeight, version } = aggregate;
+  if (!aggregateId) throw new Error('aggregate Id is missed');
+  if (lastBlockHeight == null) throw new Error('lastBlockHeight is missing');
+  if (version == null) throw new Error('version is missing');
+
+  const payload = aggregate.toSnapshot(); // JSON string
+
+  return {
+    modelId: aggregateId,
+    blockHeight: lastBlockHeight,
+    version,
+    payload,
   };
 }

@@ -8,13 +8,14 @@ import {
   createSnapshotsEntity,
   createEventDataEntity,
   createOutboxEntity,
-  EventStoreService,
   BaseAdapter,
   ensureSchema,
   getTableName,
   ensureNonNegativeGuards,
   DriverType,
   ensurePersistentStorage,
+  EventStoreReadService,
+  EventStoreWriteService,
 } from '../core';
 
 import { BrowserSqljsAdapter } from './browser-sqljs.adapter';
@@ -99,19 +100,27 @@ export class EventStoreModule {
     };
 
     const serviceProvider: Provider = {
-      provide: EventStoreService,
-      useFactory: (adapter: BaseAdapter, publisher: PublisherProvider) => {
-        return new EventStoreService(adapter, publisher, {});
+      provide: EventStoreWriteService,
+      useFactory: (adapter: BaseAdapter, publisher: PublisherProvider, readService: EventStoreReadService) => {
+        return new EventStoreWriteService(adapter, publisher, readService, {});
       },
-      inject: [EVENT_STORE_ADAPTER, PublisherProvider],
+      inject: [EVENT_STORE_ADAPTER, PublisherProvider, EventStoreReadService],
+    };
+
+    const readServiceProvider: Provider = {
+      provide: EventStoreReadService,
+      useFactory: (adapter: BaseAdapter) => {
+        return new EventStoreReadService(adapter);
+      },
+      inject: [EVENT_STORE_ADAPTER],
     };
 
     return {
       module: EventStoreModule,
       global: isGlobal || false,
       imports: [],
-      providers: [dataSourceProvider, adapterProvider, serviceProvider],
-      exports: [EventStoreService, EVENT_STORE_ADAPTER, BROWSER_DATASOURCE],
+      providers: [dataSourceProvider, adapterProvider, serviceProvider, readServiceProvider],
+      exports: [EventStoreWriteService, EventStoreReadService],
     };
   }
 }

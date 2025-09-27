@@ -2,11 +2,18 @@ import { Mutex } from 'async-mutex';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import type { SnapshotOptions } from '../core';
+import type {
+  FindEventsOptions,
+  EventReadRow,
+  SnapshotDataModel,
+  EventDataModel,
+  SnapshotReadRow,
+  SnapshotOptions,
+} from '../core';
 import { BaseAdapter } from '../core';
-import { serializeEventRow, deserializeToDomainEvent } from './event-data.serialize';
-import { deserializeToOutboxRaw } from './outbox.deserialize';
-import { serializeSnapshot, deserializeSnapshot } from './snapshot.serialize';
+import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
+import { toWireEventRecord } from './outbox.deserialize';
+import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
 
 /**
  * SQLite adapter (Node sqlite).
@@ -108,14 +115,10 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       try {
         for (const agg of aggregates) {
           const table = agg.aggregateId;
-          if (!table) {
-            throw new Error('Aggregate has no aggregateId');
-          }
+          if (!table) throw new Error('Aggregate has no aggregateId');
 
           const unsaved: DomainEvent[] = agg.getUnsavedEvents();
-          if (unsaved.length === 0) {
-            continue;
-          }
+          if (unsaved.length === 0) continue;
 
           // First version for these unsaved events = agg.version - unsaved.length + 1
           const startVersion = agg.version - unsaved.length + 1;
@@ -124,7 +127,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
             const ev = unsaved[i] as DomainEvent;
             const version = startVersion + i;
 
-            const row = await serializeEventRow(ev, version, 'sqlite');
+            const row = await toEventDataModel(ev, version, 'sqlite');
 
             // Generate monotonic outbox id (uses event.timestamp in microseconds).
             const newId = this.idGen.next(ev.timestamp!);
@@ -164,24 +167,16 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
             );
 
             // Track id bounds (for compatibility return & diagnostics).
-            if (firstIdBn === null || newId < firstIdBn) {
-              firstIdBn = newId;
-            }
-            if (lastIdBn === null || newId > lastIdBn) {
-              lastIdBn = newId;
-            }
+            if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+            if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
 
             // Track min/max timestamp only for compatibility (service no longer relies on it).
-            if (ev.timestamp! < firstTs) {
-              firstTs = ev.timestamp!;
-            }
-            if (ev.timestamp! > lastTs) {
-              lastTs = ev.timestamp!;
-            }
+            if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
+            if (ev.timestamp! > lastTs) lastTs = ev.timestamp!;
 
             // Build RAW wire record from the same BLOB via project deserializer.
             rawEvents.push(
-              await deserializeToOutboxRaw({
+              await toWireEventRecord({
                 aggregateId: table,
                 eventType: row.type,
                 eventVersion: row.version,
@@ -193,7 +188,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
               })
             );
 
-            // Numeric view of id (safe if < 2^53). If you want, keep as string in service.
             outboxIds.push(newId.toString());
           }
 
@@ -228,9 +222,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   }
 
   public async deleteOutboxByIds(ids: string[]): Promise<void> {
-    if (ids.length === 0) {
-      return;
-    }
+    if (ids.length === 0) return;
     return this.writeLock.runExclusive(async () => {
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
@@ -250,6 +242,43 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         await qr.release();
       }
     });
+  }
+
+  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) {
+      return;
+    }
+    await this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN IMMEDIATE'); // SQLite write lock
+      try {
+        // 1) Per-aggregate event tables: delete above the rollback height
+        for (const id of aggregateIds) {
+          await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+        }
+
+        // 2) Snapshots: delete snapshots after the rollback height for these aggregates
+        const placeholders = aggregateIds.map(() => '?').join(',');
+        await qr.manager.query(
+          `DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`,
+          [blockHeight, ...aggregateIds]
+        );
+
+        // 3) Outbox: clear entirely to avoid publishing stale rows post-reorg
+        await qr.manager.query(`DELETE FROM "outbox"`);
+
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
+      }
+    });
+
+    // Reset streaming watermark (monotonic id)
+    this.lastSeenId = 0n;
   }
 
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
@@ -298,10 +327,10 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
                 "isCompressed" as isCompressed,
                 "timestamp"   as timestamp,
                 "payload_uncompressed_bytes" as ulen
-        FROM "outbox"
-        WHERE id > CAST(? AS INTEGER)
-        ORDER BY id ASC
-        LIMIT ${scanLimit}`,
+         FROM "outbox"
+         WHERE id > CAST(? AS INTEGER)
+         ORDER BY id ASC
+         LIMIT ${scanLimit}`,
         [String(this.lastSeenId)]
       )) as Array<{
         id: string;
@@ -316,9 +345,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         ulen: number;
       }>;
 
-      if (rows.length === 0) {
-        return 0;
-      }
+      if (rows.length === 0) return 0;
 
       // Pick first K rows that fit the transport budget (always at least one).
       const accepted: typeof rows = [];
@@ -331,9 +358,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
           running += add;
           continue;
         }
-        if (running + add > transportCapBytes) {
-          break;
-        }
+        if (running + add > transportCapBytes) break;
         accepted.push(r);
         running += add;
       }
@@ -341,7 +366,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       const events: WireEventRecord[] = new Array(accepted.length);
       for (let i = 0; i < accepted.length; i++) {
         const r = accepted[i]!;
-        events[i] = await deserializeToOutboxRaw({
+        events[i] = await toWireEventRecord({
           aggregateId: r.aggregateId,
           eventType: r.eventType,
           eventVersion: r.eventVersion,
@@ -376,7 +401,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
           await qr.query('ROLLBACK').catch(() => undefined);
           throw e;
         } finally {
-          await qr.release().catch(() => undefined);
+          await qr.release();
         }
       });
 
@@ -388,122 +413,137 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
+  /** Persist the CURRENT aggregate state as a new snapshot. (kept from original) */
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
-    const row = await serializeSnapshot(aggregate, 'sqlite');
+    const row = await toSnapshotDataModel(aggregate, 'sqlite');
     await this.writeLock.runExclusive(async () => {
       await this.dataSource.query(
         `INSERT OR IGNORE INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
-        VALUES (?,?,?,?,?)`,
+         VALUES (?,?,?,?,?)`,
         [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed ? 1 : 0]
       );
     });
 
-    // Prune only if the aggregate explicitly allows pruning.
+    // Prune only if the aggregate explicitly allows pruning. (kept)
     const allow = aggregate.allowPruning === true;
     if (allow) {
       await this.pruneOldSnapshots(row.aggregateId, row.blockHeight, opts);
     }
   }
 
-  public async findLatestSnapshot(aggregateId: string): Promise<{ blockHeight: number } | null> {
+  /** Return latest snapshot (full DB row) for aggregateId. */
+  public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "blockHeight"
+      `SELECT "aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = ?
        ORDER BY "blockHeight" DESC
        LIMIT 1`,
       [aggregateId]
     );
-    if (rows.length === 0) {
-      return null;
-    }
-    return { blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight) };
+    if (rows.length === 0) return null;
+
+    return {
+      id: rows[0].id,
+      aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      version: Number(rows[0].version),
+      payload: rows[0].payload,
+      isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
+      createdAt: rows[0].createdAt ? rows[0].createdAt : new Date().toISOString(),
+    };
   }
 
-  public async createSnapshotAtHeight<K extends T>(
-    model: K,
-    height: number
-  ): Promise<{ aggregateId: string; version: number; blockHeight: number; payload: any }> {
+  /** Return latest snapshot (full DB row) ≤ given height. */
+  public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "aggregateId","blockHeight","version","payload","isCompressed"
+      `SELECT "aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = ? AND "blockHeight" <= ?
        ORDER BY "blockHeight" DESC
        LIMIT 1`,
-      [model.aggregateId, height]
+      [aggregateId, height]
     );
-
-    if (rows.length === 0) {
-      return { aggregateId: model.aggregateId!, version: 0, blockHeight: 0, payload: {} };
-    }
-
-    const snap = await deserializeSnapshot(
-      {
-        id: '0',
-        aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
-        blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
-        version: Number(rows[0].version),
-        payload: rows[0].payload,
-        isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
-        createdAt: new Date(),
-      },
-      'sqlite'
-    );
+    if (rows.length === 0) return null;
 
     return {
-      aggregateId: snap.aggregateId,
-      version: snap.version,
-      blockHeight: snap.blockHeight,
-      payload: snap.payload,
+      id: rows[0].id,
+      aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      version: Number(rows[0].version),
+      payload: rows[0].payload,
+      isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
+      createdAt: rows[0].createdAt ? rows[0].createdAt : new Date().toISOString(),
     };
   }
 
-  public async applyEventsToAggregate<K extends T>(model: K, fromVersion?: number): Promise<void> {
+  /**
+   * Batch-fetch and apply events to the model.
+   * - If `blockHeight` is provided → historical rehydration (events with blockHeight ≤ H, excluding NULL).
+   * - If `blockHeight` is undefined → latest rehydration (no height cap; includes NULL heights).
+   * - Fetch strictly ordered by version ASC; loop in batches to avoid large memory spikes.
+   */
+  public async applyEventsToAggregate({
+    model,
+    blockHeight,
+    lastVersion = 0,
+    batchSize = 5000,
+  }: {
+    model: T;
+    blockHeight?: number;
+    lastVersion?: number;
+    batchSize?: number;
+  }): Promise<void> {
     const table = model.aggregateId!;
-    const since = fromVersion ?? 0;
+    let cursor = lastVersion;
 
-    const rows = (await this.dataSource.query(
-      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-       FROM "${table}"
-       WHERE "version" > ?
-       ORDER BY "version" ASC`,
-      [since]
-    )) as Array<{
-      type: string;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: number | boolean;
-      version: number;
-      timestamp: number;
-    }>;
+    for (;;) {
+      const params: any[] = [cursor];
+      const heightSql = blockHeight == null ? '' : ` AND "blockHeight" IS NOT NULL AND "blockHeight" <= ?`;
+      if (blockHeight != null) params.push(blockHeight);
+      params.push(batchSize);
 
-    const history: DomainEvent[] = [];
-    for (const r of rows) {
-      history.push(
-        await deserializeToDomainEvent(
+      const rows = (await this.dataSource.query(
+        `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+         FROM "${table}"
+         WHERE "version" > ?${heightSql}
+         ORDER BY "version" ASC
+         LIMIT ?`,
+        params
+      )) as Array<EventDataModel>;
+
+      if (rows.length === 0) break;
+
+      // Convert to DomainEvent via project deserializer (does decompress+parse)
+      const batch: DomainEvent[] = [];
+      for (const r of rows) {
+        const ev = await toDomainEvent(
           table,
           {
             type: r.type,
             requestId: r.requestId,
-            blockHeight: r.blockHeight!,
+            blockHeight: r.blockHeight,
             payload: r.payload,
             isCompressed: !!r.isCompressed,
             version: r.version,
             timestamp: r.timestamp,
           },
           'sqlite'
-        )
-      );
-    }
+        );
+        batch.push(ev);
+      }
 
-    model.loadFromHistory(history);
+      // Apply to aggregate
+      model.loadFromHistory(batch);
+
+      // Advance
+      cursor = rows[rows.length - 1]!.version;
+      if (rows.length < batchSize) break;
+    }
   }
 
   public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (aggregateIds.length === 0) {
-      return;
-    }
+    if (aggregateIds.length === 0) return;
     await this.writeLock.runExclusive(async () => {
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
@@ -541,31 +581,25 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       [aggregateId]
     )) as Array<{ id: number; blockHeight: number }>;
 
-    if (rows.length <= minKeep) {
-      return;
-    }
+    if (rows.length <= minKeep) return;
 
     const toKeep = new Set<number>();
     for (let i = 0; i < Math.min(minKeep, rows.length); i++) {
       toKeep.add(rows[i]!.id);
     }
     for (const r of rows) {
-      if (r.blockHeight >= protectFrom) {
-        toKeep.add(r.id);
-      }
+      if (r.blockHeight >= protectFrom) toKeep.add(r.id);
     }
 
     const toDelete = rows.filter((r) => !toKeep.has(r.id)).map((r) => r.id);
-    if (toDelete.length === 0) {
-      return;
-    }
+    if (toDelete.length === 0) return;
 
     await this.writeLock.runExclusive(async () => {
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
       await qr.query('BEGIN IMMEDIATE');
       try {
-        const step = SqliteAdapter.DELETE_ID_CHUNK;
+        const step = 10_000;
         for (let i = 0; i < toDelete.length; i += step) {
           const chunk = toDelete.slice(i, i + step);
           const placeholders = chunk.map(() => '?').join(',');
@@ -590,164 +624,139 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     });
   }
 
-  public async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    // 1) load snapshot ≤ height
-    const snap = await this.createSnapshotAtHeight(model, blockHeight);
-    model.fromSnapshot({
-      aggregateId: snap.aggregateId,
-      version: snap.version,
-      blockHeight: snap.blockHeight,
-      payload: snap.payload,
-    });
+  public async rehydrateAtHeight(model: T, blockHeight: number): Promise<void> {
+    const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
 
-    // 2) apply events in (snap.blockHeight, height]
-    const table = model.aggregateId!;
-    const rows = (await this.dataSource.query(
-      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-      FROM "${table}"
-      WHERE "blockHeight" IS NOT NULL
-        AND "version" > ?
-        AND "blockHeight" <= ?
-      ORDER BY "version" ASC`,
-      [snap.version, blockHeight]
-    )) as Array<{
-      type: string;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: number | boolean;
-      version: number;
-      timestamp: number;
-    }>;
-
-    const history: DomainEvent[] = [];
-    for (const r of rows) {
-      history.push(
-        await deserializeToDomainEvent(
-          table,
-          {
-            type: r.type,
-            requestId: r.requestId,
-            blockHeight: r.blockHeight!,
-            payload: r.payload,
-            isCompressed: !!r.isCompressed,
-            version: r.version,
-            timestamp: r.timestamp,
-          },
-          'sqlite'
-        )
-      );
+    if (snap) {
+      const parsed = await toSnapshotParsedPayload(snap, 'sqlite');
+      model.fromSnapshot(parsed);
+      await this.applyEventsToAggregate({ model, blockHeight, lastVersion: parsed.version });
+    } else {
+      await this.applyEventsToAggregate({ model, blockHeight });
     }
-
-    model.loadFromHistory(history);
   }
 
-  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (aggregateIds.length === 0) {
-      return;
+  public async rehydrateLatest(model: T): Promise<void> {
+    const snap = await this.findLatestSnapshot(model.aggregateId);
+    if (snap) {
+      const parsed = await toSnapshotParsedPayload(snap, 'sqlite');
+      model.fromSnapshot(parsed);
+      await this.applyEventsToAggregate({ model, lastVersion: parsed.version });
+    } else {
+      await this.applyEventsToAggregate({ model });
     }
-    await this.writeLock.runExclusive(async () => {
-      const qr = this.dataSource.createQueryRunner();
-      await qr.connect();
-      await qr.query('BEGIN IMMEDIATE'); // SQLite write lock
-      try {
-        // 1) Per-aggregate event tables: delete above the rollback height
-        for (const id of aggregateIds) {
-          await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
-        }
-
-        // 2) Snapshots: delete snapshots after the rollback height for these aggregates
-        const placeholders = aggregateIds.map(() => '?').join(',');
-        await qr.manager.query(
-          `DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`,
-          [blockHeight, ...aggregateIds]
-        );
-
-        // 3) Outbox: clear entirely to avoid publishing stale rows post-reorg
-        await qr.manager.query(`DELETE FROM "outbox"`);
-
-        await qr.query('COMMIT');
-      } catch (e) {
-        await qr.query('ROLLBACK').catch(() => undefined);
-        throw e;
-      } finally {
-        await qr.release();
-      }
-    });
-
-    // Reset streaming watermark (monotonic id)
-    this.lastSeenId = 0n;
   }
 
-  public async fetchEventsForAggregates(
+  // ───────────────────────────────────────────────────────────────────────────
+  // ───────────── READ IMPLEMENTATION (payload → string, no JSON.parse) ─
+  // ───────────────────────────────────────────────────────────────────────────
+
+  public async fetchEventsForManyAggregatesRead(
     aggregateIds: string[],
-    options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
-  ): Promise<DomainEvent[]> {
-    const out: DomainEvent[] = [];
-    const { version, blockHeight, limit, offset } = options ?? {};
+    options: FindEventsOptions = {}
+  ): Promise<EventReadRow[]> {
+    const out: EventReadRow[] = [];
+
+    const {
+      versionGte,
+      versionLte,
+      heightGte,
+      heightLte,
+      limit,
+      offset,
+      orderBy = 'version',
+      orderDir = 'asc',
+    } = options;
+
+    const orderCol = orderBy === 'createdAt' ? '"timestamp"' : '"version"';
+    const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const limSql = limit != null ? `LIMIT ${Number(limit)}` : 100;
+    const offSql = offset != null ? `OFFSET ${Number(offset)}` : '';
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
-      const params: Array<string | number | Buffer> = [];
+      const params: any[] = [];
 
-      if (version != null) {
-        conds.push(`"version" = ?`);
-        params.push(version);
+      if (versionGte != null) {
+        conds.push(`"version" >= ?`);
+        params.push(versionGte);
       }
-      if (blockHeight != null) {
-        conds.push(`"blockHeight" = ?`);
-        params.push(blockHeight);
+      if (versionLte != null) {
+        conds.push(`"version" <= ?`);
+        params.push(versionLte);
+      }
+
+      // Height filters should exclude NULL (mempool) to be meaningful.
+      if (heightGte != null) {
+        conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" >= ?`);
+        params.push(heightGte);
+      }
+      if (heightLte != null) {
+        conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" <= ?`);
+        params.push(heightLte);
       }
 
       const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-      const limitSql = limit != null ? `LIMIT ${Number(limit)}` : '';
-      const offsetSql = offset != null ? `OFFSET ${Number(offset)}` : '';
 
-      const rows = (await this.dataSource.query(
-        `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-         FROM "${id}"
-         ${whereSql}
-         ORDER BY "version" ASC
-         ${limitSql}
-         ${offsetSql}`,
+      const rows = await this.dataSource.query(
+        `SELECT "type","payload","version","requestId","blockHeight","timestamp","isCompressed"
+        FROM "${id}"
+        ${whereSql}
+        ORDER BY ${orderCol} ${orderDirSql}
+        ${limSql}
+        ${offSql}`,
         params
-      )) as Array<{
-        type: string;
-        requestId: string;
-        blockHeight: number | null;
-        payload: Buffer;
-        isCompressed: number | boolean;
-        version: number;
-        timestamp: number;
-      }>;
+      );
 
-      for (const r of rows) {
-        out.push(
-          await deserializeToDomainEvent(
-            id,
-            {
-              type: r.type,
-              requestId: r.requestId,
-              blockHeight: r.blockHeight!,
-              payload: r.payload,
-              isCompressed: !!r.isCompressed,
-              version: r.version,
-              timestamp: r.timestamp,
-            },
-            'sqlite'
-          )
-        );
+      for (let r of rows) {
+        out.push(await toEventReadRow(id, r, 'sqlite'));
       }
     }
 
-    // Stable sort by (timestamp, version) for deterministic return order.
-    out.sort((a: any, b: any) => {
-      if (a.timestamp !== b.timestamp) {
-        return a.timestamp - b.timestamp;
-      }
-      return (a.version ?? 0) - (b.version ?? 0);
-    });
+    return out;
+  }
 
+  public async fetchEventsForOneAggregateRead(
+    aggregateId: string,
+    options: FindEventsOptions = {}
+  ): Promise<EventReadRow[]> {
+    return this.fetchEventsForManyAggregatesRead([aggregateId], options);
+  }
+
+  /* eslint-disable require-yield */
+  /** Stream is not supported by this database driver (sqlite). */
+  public async *streamEventsForOneAggregateRead(
+    _aggregateId: string,
+    _options: FindEventsOptions = {}
+  ): AsyncGenerator<EventReadRow, void, unknown> {
+    throw new Error('Stream is not supported by this database driver (sqlite)');
+  }
+  /* eslint-enable require-yield */
+
+  /* eslint-disable require-yield */
+  /** Stream is not supported by this database driver (sqlite). */
+  public async *streamEventsForManyAggregatesRead(
+    _aggregateIds: string[],
+    _options: FindEventsOptions = {}
+  ): AsyncGenerator<EventReadRow, void, unknown> {
+    throw new Error('Stream is not supported by this database driver (sqlite)');
+  }
+  /* eslint-enable require-yield */
+
+  public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
+    const id = model.aggregateId;
+    if (!id) return null;
+    await this.rehydrateAtHeight(model, blockHeight);
+    return toSnapshotReadRow(model);
+  }
+
+  public async getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]> {
+    if (models.length === 0) return [];
+    const out: SnapshotReadRow[] = [];
+    for (const m of models) {
+      const row = await this.getOneModelByHeightRead(m, blockHeight);
+      if (row) out.push(row);
+    }
     return out;
   }
 }

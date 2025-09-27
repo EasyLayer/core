@@ -1,3 +1,3 @@
 export { EventStoreModule } from './node/eventstore.module';
-export { EventStoreService } from './core';
+export { EventStoreWriteService, EventStoreReadService } from './core';
 export type { EventStoreConfiguration } from './core';

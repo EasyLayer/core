@@ -796,10 +796,6 @@ __metadata:
     lodash: "npm:4.17.21"
     p-queue: "npm:6.6.2"
     pg: "npm:8.12.0"
-    pg-copy-streams: "npm:6.0.6"
-    pg-error-enum: "npm:0.7.1"
-    pg-query-stream: "npm:4.9.6"
-    piscina: "npm:4.1.0"
     reflect-metadata: "npm:0.1.14"
     rimraf: "npm:5.0.5"
     rxjs: "npm:7.8.1"
@@ -863,7 +859,6 @@ __metadata:
     "@types/lodash": "npm:4.17.7"
     "@types/node": "npm:20.10.4"
     "@types/pg": "npm:8.11.6"
-    "@types/pg-copy-streams": "npm:1.2.5"
     "@types/sql.js": "npm:1.4.9"
     async-mutex: "npm:0.5.0"
     better-sqlite3: "npm:11.2.1"
@@ -871,9 +866,6 @@ __metadata:
     localforage: "npm:1.10.0"
     lodash: "npm:4.17.21"
     pg: "npm:8.12.0"
-    pg-copy-streams: "npm:6.0.6"
-    pg-error-enum: "npm:0.7.1"
-    pg-query-stream: "npm:4.9.6"
     reflect-metadata: "npm:0.1.14"
     rxjs: "npm:7.8.1"
     sql.js: "npm:1.13.0"
@@ -3243,27 +3235,6 @@ __metadata:
   version: 7.0.3
   resolution: "@types/parse-path@npm:7.0.3"
   checksum: 10/21a12c228d38f5a75659dfd7cb127dc2001ed3f6acbd1b2e0575d1348c735594c0bab06a97fe849c151438384829f20ea5971cb045f7ecd37d53c76a9fcb9de3
-  languageName: node
-  linkType: hard
-
-"@types/pg-copy-streams@npm:1.2.5":
-  version: 1.2.5
-  resolution: "@types/pg-copy-streams@npm:1.2.5"
-  dependencies:
-    "@types/node": "npm:*"
-    "@types/pg": "npm:*"
-  checksum: 10/66120c8f33b27a0d70a1998b8c5b3de12c5788be874eea0670bc8df61598330fe18c5463ebfa0b32222ef77f503238a78e055f7f4115bf5160f98bc499c5f946
-  languageName: node
-  linkType: hard
-
-"@types/pg@npm:*":
-  version: 8.15.5
-  resolution: "@types/pg@npm:8.15.5"
-  dependencies:
-    "@types/node": "npm:*"
-    pg-protocol: "npm:*"
-    pg-types: "npm:^2.2.0"
-  checksum: 10/31bae283d044cd87a62fcbf1dc4d5a431783f4b19cad769bf5ad23794ccff969ae6fe7915c352a7b78a7159bc8b945560a5f76e74091e283c089618d1aacfff5
   languageName: node
   linkType: hard
 
@@ -10044,7 +10015,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"obuf@npm:^1.1.2, obuf@npm:~1.1.2":
+"obuf@npm:~1.1.2":
   version: 1.1.2
   resolution: "obuf@npm:1.1.2"
   checksum: 10/53ff4ab3a13cc33ba6c856cf281f2965c0aec9720967af450e8fd06cfd50aceeefc791986a16bcefa14e7898b3ca9acdfcf15b9d9a1b9c7e1366581a8ad6e65e
@@ -10501,31 +10472,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"pg-copy-streams@npm:6.0.6":
-  version: 6.0.6
-  resolution: "pg-copy-streams@npm:6.0.6"
-  dependencies:
-    obuf: "npm:^1.1.2"
-  checksum: 10/58bd4a44f618e0706de402b401bad42fbb3b3743985ac5891536a239331469db3be734352955259bfdf46d1b772604a8da493edd16f0399f3685fcb4517bf165
-  languageName: node
-  linkType: hard
-
-"pg-cursor@npm:^2.14.6":
-  version: 2.15.3
-  resolution: "pg-cursor@npm:2.15.3"
-  peerDependencies:
-    pg: ^8
-  checksum: 10/ceae81cf5e48d0e30382fa267dd659d929f4122d8435f40908421428104973eb54665651df94872d513835b32ac188833bc7ebee18acb3b27a8863fbc5dfc1d8
-  languageName: node
-  linkType: hard
-
-"pg-error-enum@npm:0.7.1":
-  version: 0.7.1
-  resolution: "pg-error-enum@npm:0.7.1"
-  checksum: 10/5b2b9bd41a214904b104f95c08b1f4fcce58fc3d0251118d394030097fe23c1484ebd2e329c5f3201440f8c0ad6fa89bdf84d7d7f4daa579250b15ca5609eca7
-  languageName: node
-  linkType: hard
-
 "pg-int8@npm:1.0.1":
   version: 1.0.1
   resolution: "pg-int8@npm:1.0.1"
@@ -10556,18 +10502,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"pg-query-stream@npm:4.9.6":
-  version: 4.9.6
-  resolution: "pg-query-stream@npm:4.9.6"
-  dependencies:
-    pg-cursor: "npm:^2.14.6"
-  peerDependencies:
-    pg: ^8
-  checksum: 10/fd089ea68f0850b3ed3132cc91ed594e53bfe64601ea9ad37587bc553cd5e038524080b9f0f11fc02e10c4a9578e52ae5eaf5c79d6d97d1c767ee83e03a1cf0f
-  languageName: node
-  linkType: hard
-
-"pg-types@npm:^2.1.0, pg-types@npm:^2.2.0":
+"pg-types@npm:^2.1.0":
   version: 2.2.0
   resolution: "pg-types@npm:2.2.0"
   dependencies:

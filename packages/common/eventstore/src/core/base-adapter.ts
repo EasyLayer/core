@@ -1,10 +1,30 @@
 import type { DataSource } from 'typeorm';
-import type { AggregateRoot, DomainEvent } from '@easylayer/common/cqrs';
+import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
+import type { SnapshotDataModel, SnapshotReadRow } from './snapshots.model';
+import type { EventReadRow } from './event-data.model';
 
 export interface SnapshotOptions {
   minKeep: number;
   keepWindow: number; // 0 => disabled
+}
+
+export interface FindEventsOptions {
+  /** Inclusive range for version (both bounds optional). */
+  versionGte?: number;
+  versionLte?: number;
+
+  /** Inclusive range for height (both bounds optional). */
+  heightGte?: number | null;
+  heightLte?: number | null;
+
+  /** Limit / pagination. */
+  limit?: number;
+  offset?: number;
+
+  /** Sort by version or createdAt; default version ASC. */
+  orderBy?: 'version' | 'createdAt';
+  orderDir?: 'asc' | 'desc';
 }
 
 /**
@@ -47,15 +67,16 @@ class MonotonicId {
 }
 
 /**
- * BaseAdapter describes the contract that concrete adapters must implement.
- * All chunk sizing / EMA logic is adapter-owned.
- * The service passes only the 'transportCapBytes' into fetchDeliverAckChunk().
+ * BaseAdapter declares the contract for EventStore storage engines.
+ * This revision focuses on read/rehydration/snapshot APIs.
  */
 export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
   constructor(protected readonly dataSource: DataSource) {}
 
   // Local id generator
   protected readonly idGen = new MonotonicId(10);
+
+  // ─────────────────────────────── WRITE / OUTBOX (unchanged) ───────────────────────────────
 
   // ───────────── Write-path (persist + outbox) ─────────────
 
@@ -68,7 +89,7 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
    * - lastTs/lastId:  maximal (ts,id) among inserted — watermark helpers.
    * - rawEvents: wire-encoded events (payload as JSON string) for fast-path publish.
    */
-  public abstract persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+  abstract persistAggregatesAndOutbox(aggregates: T[]): Promise<{
     insertedOutboxIds: string[];
     firstTs: number;
     firstId: string;
@@ -77,58 +98,94 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
     rawEvents: WireEventRecord[];
   }>;
 
-  /** Delete by ids after ACK. Must chunk by placeholder limits where necessary. */
-  public abstract deleteOutboxByIds(ids: string[]): Promise<void>;
+  abstract hasBacklogBefore(firstTs: number, firstId: string): Promise<boolean>;
 
-  // ───────────── Backlog tests / watermark ─────────────
+  abstract hasAnyPendingAfterWatermark(): Promise<boolean>;
 
-  /** Checks if there are outbox rows strictly before (ts,id). */
-  public abstract hasBacklogBefore(ts: number, id: string): Promise<boolean>;
+  abstract deleteOutboxByIds(ids: string[]): Promise<void>;
 
-  /** Checks if there is anything pending after the current adapter watermark. */
-  public abstract hasAnyPendingAfterWatermark(): Promise<boolean>;
-
-  /**
-   * Fetch→deliver→ACK a chunk sized to stay under 'transportCapBytes'.
-   * Returns number of events delivered (0 means nothing pending).
-   * Adapter is free to use window SUM + EMA internally.
-   */
-  public abstract fetchDeliverAckChunk(
-    transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<void>
+  abstract fetchDeliverAckChunk(
+    transportMaxFrameBytes: number,
+    publish: (events: WireEventRecord[]) => Promise<void>
   ): Promise<number>;
 
-  // ───────────── Snapshots / Read-path ─────────────
+  abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
 
-  public abstract createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void>;
+  abstract createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void>;
 
-  public abstract findLatestSnapshot(aggregateId: string): Promise<{ blockHeight: number } | null>;
+  // ─────────────────────────────── SNAPSHOTS / REHYDRATION ───────────────────────────────
 
-  public abstract createSnapshotAtHeight<K extends T>(
-    model: K,
-    height: number
-  ): Promise<{ aggregateId: string; version: number; blockHeight: number; payload: any }>;
+  /**
+   * Returns the latest persisted snapshot regardless of height (DB row shape).
+   */
+  abstract findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null>;
 
-  public abstract applyEventsToAggregate<K extends T>(model: K, fromVersion?: number): Promise<void>;
+  /**
+   * Returns the latest persisted snapshot with blockHeight <= height (DB row shape).
+   */
+  abstract findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null>;
 
-  public abstract deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void>;
+  /**
+   * Apply events with version > fromVersion (no blockHeight filter) to get the freshest state.
+   * Used by EventStoreService.getOne(...) after loading from a nearest snapshot.
+   */
+  abstract applyEventsToAggregate({
+    model,
+    blockHeight,
+    lastVersion,
+    batchSize,
+  }: {
+    model: T;
+    blockHeight?: number;
+    lastVersion?: number;
+    batchSize?: number;
+  }): Promise<void>;
 
-  public abstract pruneOldSnapshots(
-    aggregateId: string,
-    currentBlockHeight: number,
-    opts: SnapshotOptions
-  ): Promise<void>;
+  /** Apply assembled state on model for a given height. */
+  abstract rehydrateAtHeight(model: T, height: number): Promise<void>;
 
-  public abstract pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void>;
+  /** Rehydrate to latest (no height cap): snapshot (if any) + apply tail events. */
+  abstract rehydrateLatest(model: T): Promise<void>;
 
-  public abstract rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void>;
+  // ─────────────────────────────── READ API (events / snapshots) ───────────────────────────────
 
-  public abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
+  /**
+   * Return events for one aggregate (payload returned as JSON string; caller may JSON.parse).
+   */
+  abstract fetchEventsForOneAggregateRead(aggregateId: string, options?: FindEventsOptions): Promise<EventReadRow[]>;
 
-  // ───────────── Read API passthroughs used by service ─────────────
-
-  public abstract fetchEventsForAggregates(
+  /**
+   * Return events for many aggregates.
+   */
+  abstract fetchEventsForManyAggregatesRead(
     aggregateIds: string[],
-    options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
-  ): Promise<DomainEvent[]>;
+    options?: FindEventsOptions
+  ): Promise<EventReadRow[]>;
+
+  /**
+   * Stream events for one aggregate.
+   */
+  abstract streamEventsForOneAggregateRead(
+    aggregateId: string,
+    options?: FindEventsOptions
+  ): AsyncGenerator<EventReadRow, void, unknown>;
+
+  /**
+   * Stream events for many aggregates.
+   */
+  abstract streamEventsForManyAggregatesRead(
+    aggregateIds: string[],
+    options?: FindEventsOptions
+  ): AsyncGenerator<EventReadRow, void, unknown>;
+
+  /**
+   * Return model state at height as RAW SnapshotReadRow (payload is JSON string).
+   * IMPORTANT: This method now accepts the MODEL, not id.
+   */
+  abstract getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null>;
+
+  /**
+   * Batch version of getOneModelByHeightRead (MODEL array).
+   */
+  abstract getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]>;
 }

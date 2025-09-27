@@ -2,11 +2,18 @@ import { Mutex } from 'async-mutex';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import type { SnapshotOptions } from '../core';
+import type {
+  FindEventsOptions,
+  EventReadRow,
+  SnapshotDataModel,
+  EventDataModel,
+  SnapshotReadRow,
+  SnapshotOptions,
+} from '../core';
 import { BaseAdapter } from '../core';
-import { serializeEventRow, deserializeToDomainEvent } from './event-data.serialize';
-import { deserializeToOutboxRaw } from './outbox.deserialize';
-import { serializeSnapshot, deserializeSnapshot } from './snapshot.serialize';
+import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
+import { toWireEventRecord } from './outbox.deserialize';
+import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
 
 /**
  * Postgres adapter.
@@ -87,7 +94,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           const version = startVersion + i;
 
           // Serialize once; driver tag 'postgres' enables compression heuristics in serializers.
-          const row = await serializeEventRow(ev, version, 'postgres');
+          const row = await toEventDataModel(ev, version, 'postgres');
 
           // Generate monotonic outbox id from event.timestamp.
           const newId = this.idGen.next(ev.timestamp!);
@@ -125,26 +132,19 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
               row.payload, // same bytea
               row.isCompressed, // boolean
               row.timestamp,
+              // if you track uncompressed size separately, pass it here; otherwise null/undefined is fine
             ]
           );
 
           // Track id bounds & timestamps for compatibility.
-          if (firstIdBn === null || newId < firstIdBn) {
-            firstIdBn = newId;
-          }
-          if (lastIdBn === null || newId > lastIdBn) {
-            lastIdBn = newId;
-          }
-          if (ev.timestamp! < firstTs) {
-            firstTs = ev.timestamp!;
-          }
-          if (ev.timestamp! > lastTs) {
-            lastTs = ev.timestamp!;
-          }
+          if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+          if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+          if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
+          if (ev.timestamp! > lastTs) lastTs = ev.timestamp!;
 
           // Build RAW wire record (no JSON parse — deserializer returns string payload).
           rawEvents.push(
-            await deserializeToOutboxRaw({
+            await toWireEventRecord({
               aggregateId: table,
               eventType: row.type,
               eventVersion: row.version,
@@ -190,9 +190,8 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   }
 
   public async deleteOutboxByIds(ids: string[]): Promise<void> {
-    if (ids.length === 0) {
-      return;
-    }
+    if (ids.length === 0) return;
+
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN');
@@ -212,15 +211,49 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     }
   }
 
+  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
+    if (aggregateIds.length === 0) return;
+
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    await qr.query('BEGIN'); // PG transactional block
+    try {
+      // 1) Per-aggregate event tables: drop everything above the given block height
+      for (const id of aggregateIds) {
+        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
+      }
+
+      // 2) Snapshots: remove snapshots created after the rollback height for these aggregates
+      const placeholders = aggregateIds.map((_, i) => `$${i + 2}`).join(',');
+      await qr.manager.query(
+        `DELETE FROM "snapshots" WHERE "blockHeight" > $1 AND "aggregateId" IN (${placeholders})`,
+        [blockHeight, ...aggregateIds]
+      );
+
+      // 3) Outbox: drop everything — safer after a chain reorg; repopulation will happen naturally
+      await qr.manager.query(`TRUNCATE TABLE "outbox"`);
+
+      await qr.query('COMMIT');
+    } catch (e) {
+      await qr.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      await qr.release();
+    }
+
+    // Reset streaming watermark so the next drain starts fresh
+    this.lastSeenId = 0n;
+  }
+
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
 
   public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
-    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < ?::bigint LIMIT 1`, [String(id)]);
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < $1::bigint LIMIT 1`, [String(id)]);
     return rows.length > 0;
   }
 
   public async hasAnyPendingAfterWatermark(): Promise<boolean> {
-    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > ?::bigint LIMIT 1`, [
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > $1::bigint LIMIT 1`, [
       String(this.lastSeenId),
     ]);
     return rows.length > 0;
@@ -259,10 +292,10 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
                   "isCompressed" as isCompressed,
                   "timestamp"   as timestamp,
                   "payload_uncompressed_bytes" as ulen
-          FROM "outbox"
-          WHERE id > ?::bigint
-          ORDER BY id ASC
-          LIMIT ${scanLimit}`,
+         FROM "outbox"
+         WHERE id > $1::bigint
+         ORDER BY id ASC
+         LIMIT ${scanLimit}`,
         [String(this.lastSeenId)]
       )) as Array<{
         id: string; // BIGINT comes as string from PG driver
@@ -277,9 +310,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         ulen: number;
       }>;
 
-      if (rows.length === 0) {
-        return 0;
-      }
+      if (rows.length === 0) return 0;
 
       // Pick first K rows that fit the transport budget (always at least one).
       const accepted: typeof rows = [];
@@ -292,9 +323,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           running += add;
           continue;
         }
-        if (running + add > transportCapBytes) {
-          break;
-        }
+        if (running + add > transportCapBytes) break;
         accepted.push(r);
         running += add;
       }
@@ -302,7 +331,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       const events: WireEventRecord[] = new Array(accepted.length);
       for (let i = 0; i < accepted.length; i++) {
         const r = accepted[i]!;
-        events[i] = await deserializeToOutboxRaw({
+        events[i] = await toWireEventRecord({
           aggregateId: r.aggregateId,
           eventType: r.eventType,
           eventVersion: r.eventVersion,
@@ -328,7 +357,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         const step = 10000;
         for (let i = 0; i < ids.length; i += step) {
           const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
-          const placeholders = chunk.map(() => '?::bigint').join(',');
+          const placeholders = chunk.map((_, idx) => `$${idx + 1}`).join(',');
           await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
         }
         await qr.query('COMMIT');
@@ -348,7 +377,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
-    const row = await serializeSnapshot(aggregate, 'postgres');
+    const row = await toSnapshotDataModel(aggregate, 'postgres');
     await this.dataSource.query(
       `INSERT INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
        VALUES ($1,$2,$3,$4,$5)
@@ -363,105 +392,110 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     }
   }
 
-  public async findLatestSnapshot(aggregateId: string): Promise<{ blockHeight: number } | null> {
+  /** Return latest snapshot row (full DB row) for aggregateId. */
+  public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "blockHeight"
+      `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = $1
        ORDER BY "blockHeight" DESC
        LIMIT 1`,
       [aggregateId]
     );
-    if (rows.length === 0) {
-      return null;
-    }
-    return { blockHeight: Number(rows[0].blockHeight) };
+    if (rows.length === 0) return null;
+
+    return {
+      id: String(rows[0].id ?? '0'),
+      aggregateId: rows[0].aggregateId,
+      blockHeight: Number(rows[0].blockHeight),
+      version: Number(rows[0].version),
+      payload: rows[0].payload,
+      isCompressed: !!rows[0].isCompressed,
+      createdAt: rows[0].createdAt ?? new Date().toISOString(),
+    };
   }
 
-  public async createSnapshotAtHeight<K extends T>(
-    model: K,
-    height: number
-  ): Promise<{ aggregateId: string; version: number; blockHeight: number; payload: any }> {
+  /** Return latest snapshot row (full DB row) ≤ given height. */
+  public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "aggregateId","blockHeight","version","payload","isCompressed"
+      `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = $1 AND "blockHeight" <= $2
        ORDER BY "blockHeight" DESC
        LIMIT 1`,
-      [model.aggregateId, height]
+      [aggregateId, height]
     );
-
-    if (rows.length === 0) {
-      return { aggregateId: model.aggregateId!, version: 0, blockHeight: 0, payload: {} };
-    }
-
-    const snap = await deserializeSnapshot(
-      {
-        id: '0',
-        aggregateId: rows[0].aggregateId,
-        blockHeight: Number(rows[0].blockHeight),
-        version: Number(rows[0].version),
-        payload: rows[0].payload,
-        isCompressed: !!rows[0].isCompressed,
-        createdAt: new Date(),
-      },
-      'postgres'
-    );
+    if (rows.length === 0) return null;
 
     return {
-      aggregateId: snap.aggregateId,
-      version: snap.version,
-      blockHeight: snap.blockHeight,
-      payload: snap.payload,
+      id: String(rows[0].id ?? '0'),
+      aggregateId: rows[0].aggregateId,
+      blockHeight: Number(rows[0].blockHeight),
+      version: Number(rows[0].version),
+      payload: rows[0].payload,
+      isCompressed: !!rows[0].isCompressed,
+      createdAt: rows[0].createdAt ?? new Date().toISOString(),
     };
   }
 
-  public async applyEventsToAggregate<K extends T>(model: K, fromVersion?: number): Promise<void> {
+  /**
+   * Stream events and apply them to the model using the DataSource QueryRunner.
+   * IMPORTANT:
+   * - Process *one row at a time* and call model.loadFromHistory([event]) immediately.
+   * - If `blockHeight` is provided → only finalized events with height ≤ H (exclude NULL).
+   * - If undefined → apply all tail events regardless of height (include NULL).
+   * - Strict version ASC order; streaming minimizes memory usage.
+   */
+  public async applyEventsToAggregate({
+    model,
+    blockHeight,
+    lastVersion = 0,
+  }: {
+    model: T;
+    blockHeight?: number;
+    lastVersion?: number;
+  }): Promise<void> {
     const table = model.aggregateId!;
-    const since = fromVersion ?? 0;
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    try {
+      const where =
+        blockHeight == null
+          ? `WHERE "version" > $1`
+          : `WHERE "version" > $1 AND "blockHeight" IS NOT NULL AND "blockHeight" <= $2`;
+      const params = blockHeight == null ? [lastVersion] : [lastVersion, blockHeight];
 
-    const rows = (await this.dataSource.query(
-      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-       FROM "${table}"
-       WHERE "version" > $1
-       ORDER BY "version" ASC`,
-      [since]
-    )) as Array<{
-      type: string;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: boolean;
-      version: number;
-      timestamp: number;
-    }>;
+      const sql = `
+        SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
+        FROM "${table}"
+        ${where}
+        ORDER BY "version" ASC
+      `;
 
-    const history: DomainEvent[] = [];
-    for (const r of rows) {
-      history.push(
-        await deserializeToDomainEvent(
-          table,
-          {
-            type: r.type,
-            requestId: r.requestId,
-            blockHeight: r.blockHeight!,
-            payload: r.payload,
-            isCompressed: !!r.isCompressed,
-            version: r.version,
-            timestamp: r.timestamp,
-          },
-          'postgres'
-        )
-      );
+      // TypeORM QueryRunner.stream → Node Readable of row objects.
+      const stream: NodeJS.ReadableStream = await qr.stream(sql, params);
+
+      // Apply each event immediately to avoid buffering.
+      for await (const r of stream as AsyncIterable<any>) {
+        const ev = await toDomainEvent(table, {
+          type: r.type,
+          requestId: r.requestId,
+          blockHeight: r.blockHeight,
+          payload: r.payload,
+          isCompressed: !!r.isCompressed,
+          version: r.version,
+          timestamp: r.timestamp,
+        });
+        // Apply single event at a time.
+        model.loadFromHistory([ev]);
+      }
+    } finally {
+      await qr.release().catch(() => undefined);
     }
-
-    model.loadFromHistory(history);
   }
 
   public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (aggregateIds.length === 0) {
-      return;
-    }
+    if (aggregateIds.length === 0) return;
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN');
@@ -497,24 +531,18 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       [aggregateId]
     )) as Array<{ id: number; blockHeight: number }>;
 
-    if (rows.length <= minKeep) {
-      return;
-    }
+    if (rows.length <= minKeep) return;
 
     const toKeep = new Set<number>();
     for (let i = 0; i < Math.min(minKeep, rows.length); i++) {
       toKeep.add(rows[i]!.id);
     }
     for (const r of rows) {
-      if (r.blockHeight >= protectFrom) {
-        toKeep.add(r.id);
-      }
+      if (r.blockHeight >= protectFrom) toKeep.add(r.id);
     }
 
     const toDelete = rows.filter((r) => !toKeep.has(r.id)).map((r) => r.id);
-    if (toDelete.length === 0) {
-      return;
-    }
+    if (toDelete.length === 0) return;
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -542,163 +570,189 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     );
   }
 
-  public async rehydrateAtHeight<K extends T>(model: K, blockHeight: number): Promise<void> {
-    // 1) load snapshot ≤ height
-    const snap = await this.createSnapshotAtHeight(model, blockHeight);
-    model.fromSnapshot({
-      aggregateId: snap.aggregateId,
-      version: snap.version,
-      blockHeight: snap.blockHeight,
-      payload: snap.payload,
-    });
-
-    // 2) apply events in (snap.blockHeight, height]
-    const table = model.aggregateId!;
-    const rows = (await this.dataSource.query(
-      `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-      FROM "${table}"
-      WHERE "blockHeight" IS NOT NULL
-        AND "version" > $1
-        AND "blockHeight" <= $2
-      ORDER BY "version" ASC`,
-      [snap.version, blockHeight]
-    )) as Array<{
-      type: string;
-      requestId: string;
-      blockHeight: number | null;
-      payload: Buffer;
-      isCompressed: boolean;
-      version: number;
-      timestamp: number;
-    }>;
-
-    const history: DomainEvent[] = [];
-    for (const r of rows) {
-      history.push(
-        await deserializeToDomainEvent(
-          table,
-          {
-            type: r.type,
-            requestId: r.requestId,
-            blockHeight: r.blockHeight!,
-            payload: r.payload,
-            isCompressed: !!r.isCompressed,
-            version: r.version,
-            timestamp: r.timestamp,
-          },
-          'postgres'
-        )
-      );
+  /** Mutate model into state at given blockHeight (snapshot ≤ H + events to H). */
+  public async rehydrateAtHeight(model: T, blockHeight: number): Promise<void> {
+    const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
+    if (snap) {
+      const parsed = await toSnapshotParsedPayload(snap, 'postgres');
+      model.fromSnapshot(parsed);
+      await this.applyEventsToAggregate({ model, blockHeight, lastVersion: parsed.version });
+    } else {
+      await this.applyEventsToAggregate({ model, blockHeight });
     }
-
-    model.loadFromHistory(history);
   }
 
-  public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
-    if (aggregateIds.length === 0) {
-      return;
+  /** Latest state: snapshot (if any) + tail events (no height cap). */
+  public async rehydrateLatest(model: T): Promise<void> {
+    const snap = await this.findLatestSnapshot(model.aggregateId);
+    if (snap) {
+      const parsed = await toSnapshotParsedPayload(snap, 'postgres');
+      model.fromSnapshot(parsed);
+      await this.applyEventsToAggregate({ model, lastVersion: parsed.version });
+    } else {
+      await this.applyEventsToAggregate({ model });
     }
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN'); // PG transactional block
-    try {
-      // 1) Per-aggregate event tables: drop everything above the given block height
-      for (const id of aggregateIds) {
-        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
-      }
-
-      // 2) Snapshots: remove snapshots created after the rollback height for these aggregates
-      const placeholders = aggregateIds.map((_, i) => `$${i + 2}`).join(',');
-      await qr.manager.query(
-        `DELETE FROM "snapshots" WHERE "blockHeight" > $1 AND "aggregateId" IN (${placeholders})`,
-        [blockHeight, ...aggregateIds]
-      );
-
-      // 3) Outbox: drop everything — safer after a chain reorg; repopulation will happen naturally
-      await qr.manager.query(`TRUNCATE TABLE "outbox"`);
-
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
-
-    // Reset streaming watermark so the next drain starts fresh
-    this.lastSeenId = 0n;
   }
 
-  public async fetchEventsForAggregates(
+  // ─────────────────────────────── READ API (events → JSON string) ───────────────────────────────
+
+  public async fetchEventsForManyAggregatesRead(
     aggregateIds: string[],
-    options?: { version?: number; blockHeight?: number; limit?: number; offset?: number }
-  ): Promise<DomainEvent[]> {
-    const out: DomainEvent[] = [];
-    const { version, blockHeight, limit, offset } = options ?? {};
+    options: FindEventsOptions = {}
+  ): Promise<EventReadRow[]> {
+    const out: EventReadRow[] = [];
+
+    const {
+      versionGte,
+      versionLte,
+      heightGte,
+      heightLte,
+      limit,
+      offset,
+      orderBy = 'version',
+      orderDir = 'asc',
+    } = options;
+
+    const orderCol = orderBy === 'createdAt' ? `"timestamp"` : `"version"`;
+    const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const limSql = limit != null ? `LIMIT ${Number(limit)}` : 'LIMIT 100';
+    const offSql = offset != null ? `OFFSET ${Number(offset)}` : '';
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
-      const params: Array<string | number | Buffer | boolean> = [];
-      let p = 1;
+      const params: any[] = [];
 
-      if (version != null) {
-        conds.push(`"version" = $${p++}`);
-        params.push(version);
+      if (versionGte != null) {
+        conds.push(`"version" >= $${params.length + 1}`);
+        params.push(versionGte);
       }
-      if (blockHeight != null) {
-        conds.push(`"blockHeight" = $${p++}`);
-        params.push(blockHeight);
+      if (versionLte != null) {
+        conds.push(`"version" <= $${params.length + 1}`);
+        params.push(versionLte);
+      }
+
+      if (heightGte != null) {
+        conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" >= $${params.length + 1}`);
+        params.push(heightGte);
+      }
+      if (heightLte != null) {
+        conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" <= $${params.length + 1}`);
+        params.push(heightLte);
       }
 
       const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-      const limitSql = limit != null ? `LIMIT ${Number(limit)}` : '';
-      const offsetSql = offset != null ? `OFFSET ${Number(offset)}` : '';
 
-      const rows = (await this.dataSource.query(
-        `SELECT "type","requestId","blockHeight","payload","isCompressed","version","timestamp"
-         FROM "${id}"
-         ${whereSql}
-         ORDER BY "version" ASC
-         ${limitSql}
-         ${offsetSql}`,
-        params
-      )) as Array<{
-        type: string;
-        requestId: string;
-        blockHeight: number | null;
-        payload: Buffer;
-        isCompressed: boolean;
-        version: number;
-        timestamp: number;
-      }>;
+      const sql = `
+        SELECT "type","payload","version","requestId","blockHeight","timestamp","isCompressed"
+        FROM "${id}"
+        ${whereSql}
+        ORDER BY ${orderCol} ${orderDirSql}
+        ${limSql}
+        ${offSql}
+      `;
 
-      for (const r of rows) {
-        out.push(
-          await deserializeToDomainEvent(
-            id,
-            {
-              type: r.type,
-              requestId: r.requestId,
-              blockHeight: r.blockHeight!,
-              payload: r.payload,
-              isCompressed: !!r.isCompressed,
-              version: r.version,
-              timestamp: r.timestamp,
-            },
-            'postgres'
-          )
-        );
+      const rows = await this.dataSource.query(sql, params);
+
+      for (let r of rows) {
+        out.push(await toEventReadRow(id, r, 'postgres'));
       }
     }
 
-    // Stable sort by (timestamp, version) for deterministic return order (if needed).
-    out.sort((a: any, b: any) => {
-      if (a.timestamp !== b.timestamp) {
-        return a.timestamp - b.timestamp;
-      }
-      return (a.version ?? 0) - (b.version ?? 0);
-    });
+    return out;
+  }
 
+  public async fetchEventsForOneAggregateRead(
+    aggregateId: string,
+    options: FindEventsOptions = {}
+  ): Promise<EventReadRow[]> {
+    return this.fetchEventsForManyAggregatesRead([aggregateId], options);
+  }
+
+  // ─────────────────────────────── STREAM READ API (Postgres only) ───────────────────────────────
+
+  /** Stream events for ONE aggregate as JSON-string DTOs via DataSource QueryRunner. */
+  public async *streamEventsForOneAggregateRead(
+    aggregateId: string,
+    options: FindEventsOptions = {}
+  ): AsyncGenerator<EventReadRow, void, unknown> {
+    const { versionGte, versionLte, heightGte, heightLte, orderBy = 'version', orderDir = 'asc' } = options;
+
+    const orderCol = orderBy === 'createdAt' ? `"timestamp"` : `"version"`;
+    const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+
+    const conds: string[] = [];
+    const params: any[] = [];
+
+    if (versionGte != null) {
+      conds.push(`"version" >= $${params.length + 1}`);
+      params.push(versionGte);
+    }
+    if (versionLte != null) {
+      conds.push(`"version" <= $${params.length + 1}`);
+      params.push(versionLte);
+    }
+
+    if (heightGte != null) {
+      conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" >= $${params.length + 1}`);
+      params.push(heightGte);
+    }
+    if (heightLte != null) {
+      conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" <= $${params.length + 1}`);
+      params.push(heightLte);
+    }
+
+    const whereSql = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT "type","payload","version","requestId","blockHeight","timestamp","isCompressed"
+      FROM "${aggregateId}"
+      ${whereSql}
+      ORDER BY ${orderCol} ${orderDirSql}
+    `;
+
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+    try {
+      const stream: NodeJS.ReadableStream = await qr.stream(sql, params);
+
+      for await (const r of stream as AsyncIterable<any>) {
+        // Map each DB row → EventReadRow (payload as JSON string; no JSON.parse here)
+        const dto = await toEventReadRow(aggregateId, r as EventDataModel, 'postgres');
+        yield dto;
+      }
+    } finally {
+      await qr.release().catch(() => undefined);
+    }
+  }
+
+  /** Stream events for MANY aggregates one by one. */
+  public async *streamEventsForManyAggregatesRead(
+    aggregateIds: string[],
+    options: FindEventsOptions = {}
+  ): AsyncGenerator<EventReadRow, void, unknown> {
+    for (const id of aggregateIds) {
+      for await (const row of this.streamEventsForOneAggregateRead(id, options)) {
+        yield row;
+      }
+    }
+  }
+
+  // ─────────────────────────────── MODEL READ AT HEIGHT ───────────────────────────────
+
+  public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
+    const id = model.aggregateId;
+    if (!id) return null;
+    await this.rehydrateAtHeight(model, blockHeight);
+    return toSnapshotReadRow(model);
+  }
+
+  public async getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]> {
+    if (!models.length) return [];
+    const out: SnapshotReadRow[] = [];
+    for (const m of models) {
+      const row = await this.getOneModelByHeightRead(m, blockHeight);
+      if (row) out.push(row);
+    }
     return out;
   }
 }

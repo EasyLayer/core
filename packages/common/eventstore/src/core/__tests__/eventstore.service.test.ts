@@ -68,7 +68,6 @@ describe('EventStoreService', () => {
       findLatestSnapshot: jest.fn(),
       createSnapshotAtHeight: jest.fn(),
       applyEventsToAggregate: jest.fn(),
-      fetchEventsForAggregates: jest.fn(),
       createSnapshot: jest.fn(),
       rollbackAggregates: jest.fn(),
       rehydrateAtHeight: jest.fn(),
@@ -181,15 +180,7 @@ describe('EventStoreService', () => {
     await svc.getAtBlockHeight(m as any, 5);
     expect(m.fromSnapshot).toHaveBeenCalledWith({ aggregateId:'a1', version:2, blockHeight:5, payload:{ x:1 } });
   });
-
-  it('fetchEventsForAggregates proxies to adapter', async () => {
-    const evs = [{}, {}] as any;
-    adapter.fetchEventsForAggregates.mockResolvedValue(evs);
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    const out = await svc.fetchEventsForAggregates(['a'], { limit: 10 });
-    expect(out).toBe(evs);
-  });
-
+  
   it('drain error schedules retry and stops after successful retry', async () => {
     const svc = new EventStoreService<any>(adapter as any, pub as any, {});
     adapter.fetchDeliverAckChunk

@@ -19,7 +19,7 @@ export type OutboxRowForWire = {
  * - Decompresses if needed and returns payload as a JSON string (no JSON.parse).
  * - Normalizes blockHeight: DB NULL → -1 (wire/domain convention).
  */
-export async function deserializeToOutboxRaw(row: OutboxRowForWire): Promise<WireEventRecord> {
+export async function toWireEventRecord(row: OutboxRowForWire): Promise<WireEventRecord> {
   const compressed = !!row.isCompressed;
   const payloadString = compressed
     ? await CompressionUtils.decompressBufferToString(row.payload)

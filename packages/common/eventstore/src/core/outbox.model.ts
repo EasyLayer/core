@@ -1,7 +1,7 @@
 import { EntitySchema } from 'typeorm';
 import type { DriverType } from './utils';
 
-export interface OutboxRowInternal {
+export interface OutboxDataModel {
   id: string | number; // bigserial/integer
   aggregateId: string;
   eventType: string;
@@ -14,7 +14,7 @@ export interface OutboxRowInternal {
   payload_uncompressed_bytes: number;
 }
 
-export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<OutboxRowInternal> => {
+export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<OutboxDataModel> => {
   const isPostgres = dbDriver === 'postgres';
 
   // IMPORTANT: primary key WITHOUT auto-generation
@@ -28,7 +28,7 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
   const binaryType = isPostgres ? 'bytea' : 'blob';
   const bytesType = isPostgres ? 'bigint' : 'integer';
 
-  return new EntitySchema<OutboxRowInternal>({
+  return new EntitySchema<OutboxDataModel>({
     name: 'outbox',
     tableName: 'outbox',
     columns: {
