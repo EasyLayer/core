@@ -621,7 +621,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
     });
   }
 
-  public async rehydrateAtHeight(model: T, blockHeight: number): Promise<void> {
+  public async restoreExactStateAtHeight(model: T, blockHeight: number): Promise<void> {
     const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
 
     if (snap) {
@@ -633,7 +633,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
     }
   }
 
-  public async rehydrateLatest(model: T): Promise<void> {
+  public async restoreExactStateLatest(model: T): Promise<void> {
     const snap = await this.findLatestSnapshot(model.aggregateId);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap);
@@ -690,8 +690,8 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
 
     const orderCol = orderBy === 'createdAt' ? '"timestamp"' : '"version"';
     const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-    const limSql = limit != null ? `LIMIT ${Number(limit)}` : 100;
-    const offSql = offset != null ? `OFFSET ${Number(offset)}` : '';
+    const effLimit = limit == null ? 100 : Number(limit);
+    const effOffset = offset == null ? 0 : Number(offset);
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
@@ -705,8 +705,6 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
         conds.push(`"version" <= ?`);
         params.push(versionLte);
       }
-
-      // Height filters should exclude NULL (mempool) to be meaningful.
       if (heightGte != null) {
         conds.push(`"blockHeight" IS NOT NULL AND "blockHeight" >= ?`);
         params.push(heightGte);
@@ -723,12 +721,11 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
         FROM "${id}"
         ${whereSql}
         ORDER BY ${orderCol} ${orderDirSql}
-        ${limSql}
-        ${offSql}`,
-        params
+        LIMIT ? OFFSET ?`,
+        [...params, effLimit, effOffset]
       );
 
-      for (let r of rows) {
+      for (const r of rows) {
         out.push(await toEventReadRow(id, r, 'sqlite'));
       }
     }
@@ -766,7 +763,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
   public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
     const id = model.aggregateId;
     if (!id) return null;
-    await this.rehydrateAtHeight(model, blockHeight);
+    await this.restoreExactStateAtHeight(model, blockHeight);
     return toSnapshotReadRow(model);
   }
 

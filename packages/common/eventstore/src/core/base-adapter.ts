@@ -142,10 +142,10 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
   }): Promise<void>;
 
   /** Apply assembled state on model for a given height. */
-  abstract rehydrateAtHeight(model: T, height: number): Promise<void>;
+  abstract restoreExactStateAtHeight(model: T, height: number): Promise<void>;
 
   /** Rehydrate to latest (no height cap): snapshot (if any) + apply tail events. */
-  abstract rehydrateLatest(model: T): Promise<void>;
+  abstract restoreExactStateLatest(model: T): Promise<void>;
 
   // ─────────────────────────────── READ API (events / snapshots) ───────────────────────────────
 

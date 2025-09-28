@@ -131,14 +131,6 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
     await this.adapter.rollbackAggregates(ids, blockHeight);
 
-    for (const m of modelsToRollback) {
-      if (modelsToSave && modelsToSave.some((s) => s.aggregateId === m.aggregateId)) {
-        continue;
-      }
-      await this.adapter.rehydrateAtHeight(m, blockHeight);
-      if (m.aggregateId) this.eventStoreReadService.cache.set(m.aggregateId, m);
-    }
-
     if (modelsToSave?.length) {
       await this.save(modelsToSave);
     }

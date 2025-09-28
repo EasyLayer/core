@@ -72,7 +72,7 @@ export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
     if (cached) return cached;
 
     // Single adapter call: rehydrate to the latest persisted height (snapshot + tail events).
-    await this.adapter.rehydrateLatest(model);
+    await this.adapter.restoreExactStateLatest(model);
 
     this._cache.set(id, model);
     return model;

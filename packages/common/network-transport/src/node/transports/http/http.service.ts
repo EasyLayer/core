@@ -84,12 +84,7 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
 
         const result = await this.queryBus.execute(buildQuery(body));
 
-        const reply: Message = {
-          action: Actions.QueryResponse,
-          payload: { ok: true, data: result },
-          timestamp: Date.now(),
-        };
-        return res.status(200).json(reply.payload);
+        return res.status(200).json({ ok: true, data: result });
       } catch (e: any) {
         this.log.debug(`HTTP /query error: ${e?.message ?? e}`);
 

@@ -571,7 +571,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   }
 
   /** Mutate model into state at given blockHeight (snapshot ≤ H + events to H). */
-  public async rehydrateAtHeight(model: T, blockHeight: number): Promise<void> {
+  public async restoreExactStateAtHeight(model: T, blockHeight: number): Promise<void> {
     const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap, 'postgres');
@@ -583,7 +583,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   }
 
   /** Latest state: snapshot (if any) + tail events (no height cap). */
-  public async rehydrateLatest(model: T): Promise<void> {
+  public async restoreExactStateLatest(model: T): Promise<void> {
     const snap = await this.findLatestSnapshot(model.aggregateId);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap, 'postgres');
@@ -742,7 +742,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
     const id = model.aggregateId;
     if (!id) return null;
-    await this.rehydrateAtHeight(model, blockHeight);
+    await this.restoreExactStateAtHeight(model, blockHeight);
     return toSnapshotReadRow(model);
   }
 
