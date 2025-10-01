@@ -1,2 +1,2 @@
 export { ArithmeticService } from './arithmetic.service';
-export * from './bignumber.service';
+export * from './money.bignumber';

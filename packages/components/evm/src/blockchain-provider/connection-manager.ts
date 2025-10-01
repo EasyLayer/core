@@ -1,9 +1,10 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { BaseNodeProvider, ProviderNodeOptions } from './node-providers';
 
 @Injectable()
 export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
+  log = new Logger(ConnectionManager.name);
   private _providers: Map<string, BaseNodeProvider> = new Map();
   private activeProviderName!: string;
 
@@ -12,10 +13,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
   private reconnectionAttempts: Map<string, number> = new Map();
   private readonly maxReconnectionAttempts = 3;
 
-  constructor(
-    providers: BaseNodeProvider[] = [],
-    private readonly log: AppLogger
-  ) {
+  constructor(providers: BaseNodeProvider[] = []) {
     providers.forEach((provider: BaseNodeProvider) => {
       const name = provider.uniqName;
       if (this._providers.has(name)) {
@@ -44,7 +42,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       try {
         if (await this.tryConnectProvider(provider)) {
           this.activeProviderName = provider.uniqName;
-          this.log.info(`Connected to provider: ${provider.constructor.name}`, {
+          this.log.log(`Connected to provider: ${provider.constructor.name}`, {
             args: {
               activeProviderName: this.activeProviderName,
               hasWebSocket: provider.hasWebSocketSupport,
@@ -68,13 +66,13 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     for (const provider of this._providers.values()) {
-      this.log.debug('Disconnecting provider', {
+      this.log.verbose('Disconnecting provider', {
         args: { providerName: provider.uniqName },
       });
       try {
         await provider.disconnect();
       } catch (error) {
-        this.log.warn('Error disconnecting provider during cleanup', {
+        this.log.debug('Error disconnecting provider during cleanup', {
           args: { error, providerName: provider.uniqName },
         });
       }
@@ -86,7 +84,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
    * This method is called when any provider operation fails
    */
   public async handleProviderFailure(providerName: string, error: any, methodName: string): Promise<BaseNodeProvider> {
-    this.log.warn('Provider operation failed, attempting recovery', {
+    this.log.debug('Provider operation failed, attempting recovery', {
       args: {
         providerName,
         methodName,
@@ -108,7 +106,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
     // Try to reconnect the current provider first
     if (attempts < this.maxReconnectionAttempts) {
-      this.log.debug('Attempting to reconnect current provider', {
+      this.log.verbose('Attempting to reconnect current provider', {
         args: { providerName, attempt: attempts + 1 },
       });
 
@@ -117,7 +115,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
         if (error.message?.includes('WebSocket') || error.message?.includes('websocket')) {
           if (failedProvider.hasWebSocketSupport) {
             await failedProvider.reconnectWebSocket();
-            this.log.info('WebSocket reconnection successful', {
+            this.log.debug('WebSocket reconnection successful', {
               args: { providerName },
             });
           }
@@ -125,7 +123,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
           // Full provider reconnection
           await failedProvider.disconnect();
           if (await this.tryConnectProvider(failedProvider)) {
-            this.log.info('Provider reconnection successful', {
+            this.log.debug('Provider reconnection successful', {
               args: { providerName },
             });
           }
@@ -136,7 +134,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
         this.reconnectionAttempts.delete(providerName);
         return failedProvider;
       } catch (reconnectError) {
-        this.log.warn('Provider reconnection failed', {
+        this.log.debug('Provider reconnection failed', {
           args: {
             providerName,
             attempt: attempts + 1,
@@ -185,7 +183,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
           this.failedProviders.delete(nextProvider.uniqName);
           this.reconnectionAttempts.delete(nextProvider.uniqName);
 
-          this.log.info('Successfully switched to backup provider', {
+          this.log.debug('Successfully switched to backup provider', {
             args: {
               oldProvider,
               newProvider: this.activeProviderName,
@@ -197,7 +195,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
           return nextProvider;
         }
       } catch (error) {
-        this.log.warn('Failed to switch to provider', {
+        this.log.debug('Failed to switch to provider', {
           args: {
             providerName: nextProvider.uniqName,
             error: error || 'Unknown error',
@@ -211,7 +209,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
 
     // If all providers have failed, reset failure state and try again
     if (this.failedProviders.size >= allProviders.length) {
-      this.log.warn('All providers have failed, resetting failure state', {
+      this.log.debug('All providers have failed, resetting failure state', {
         args: { totalProviders: allProviders.length },
       });
 
@@ -257,7 +255,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
       this.failedProviders.delete(name);
       this.reconnectionAttempts.delete(name);
 
-      this.log.info(`Manually switched to provider: ${provider.constructor.name}`, {
+      this.log.debug(`Manually switched to provider: ${provider.constructor.name}`, {
         args: {
           name,
           hasWebSocket: provider.hasWebSocketSupport,
@@ -294,7 +292,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
         try {
           await this.switchToNextAvailableProvider();
         } catch (error) {
-          this.log.error('Failed to switch to backup provider after removal', {
+          this.log.debug('Failed to switch to backup provider after removal', {
             args: { removedProvider: name, error },
           });
           this.activeProviderName = '';
@@ -309,7 +307,7 @@ export class ConnectionManager implements OnModuleInit, OnModuleDestroy {
     try {
       await provider.disconnect();
     } catch (error) {
-      this.log.error('Error disconnecting provider during removal', {
+      this.log.debug('Error disconnecting provider during removal', {
         args: { error, name },
       });
     }

@@ -1,4 +1,3 @@
-export { EventStoreModule } from './eventstore.module';
-export { EventStoreWriteRepository } from './eventstore-write.repository';
-export { EventStoreReadRepository } from './eventstore-read.repository';
-export { QueryFailedError } from 'typeorm';
+export { EventStoreModule } from './node/eventstore.module';
+export { EventStoreWriteService, EventStoreReadService } from './core';
+export type { EventStoreConfiguration } from './core';

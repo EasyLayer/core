@@ -7,11 +7,12 @@
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
-    "clear:dist": "rimraf dist && rimraf .rollup.cache",
+    "clear:dist": "rimraf dist",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
     "lint:fix": "eslint -c eslint.config.mjs \"src/**/*.ts\" --fix",
     "format": "prettier -с prettier.config.mjs --write \"src/**/*.ts\"",
-    "build:esm": "rollup --config"
+    "build:cjs": "tsc -b tsconfig.cjs.json",
+    "build:esm": "tsc -b tsconfig.esm.json"
   },
   "author": "Yaroslav Pavliuk",
   "license": "",
@@ -23,9 +24,7 @@
     "uuid": "9.0.1"
   },
   "devDependencies": {
-    "@rollup/plugin-typescript": "11.1.6",
     "@types/node": "20.10.4",
-    "rollup": "4.17.2",
     "typescript": "5.3.3"
   }
 }

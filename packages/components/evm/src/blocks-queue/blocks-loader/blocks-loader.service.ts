@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { AppLogger } from '@easylayer/common/logger';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
@@ -13,6 +13,7 @@ import {
 
 @Injectable()
 export class BlocksQueueLoaderService implements OnModuleDestroy {
+  log = new Logger(BlocksQueueLoaderService.name);
   private _isLoading: boolean = false;
   private _timer: ExponentialTimer | null = null;
   private _currentStrategy: BlocksLoadingStrategy | null = null;
@@ -20,13 +21,12 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   private readonly _strategies: Map<StrategyNames, BlocksLoadingStrategy> = new Map();
 
   constructor(
-    private readonly log: AppLogger,
     private readonly blockchainProviderService: BlockchainProviderService,
     private readonly config: any
   ) {
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
-    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 30000);
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 3000);
   }
 
   get isLoading(): boolean {
@@ -60,7 +60,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     // Create strategies with queue
     this.createStrategies(queue);
 
-    this.log.info('Loading strategy created', {
+    this.log.debug('Loading strategy created', {
       args: { strategy: this.config.queueLoaderStrategyName },
     });
 
@@ -100,7 +100,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       {
         interval: 1000, // Start with 1000ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
-        multiplier: 10, // Exponential backoff multiplier
+        multiplier: 2, // Exponential backoff multiplier
       }
     );
 

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Injectable, Inject, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Inject, OnModuleDestroy, Logger } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import { AppLogger } from '@easylayer/common/logger';
 import { Block } from '../../blockchain-provider';
@@ -8,20 +8,25 @@ import type { BlocksCommandExecutor } from '../interfaces';
 
 @Injectable()
 export class BlocksQueueIteratorService implements OnModuleDestroy {
+  log = new Logger(BlocksQueueIteratorService.name);
   private _queue!: BlocksQueue<Block>;
   private _isIterating: boolean = false;
   private batchProcessedPromise!: Promise<void>;
   protected _resolveNextBatch!: () => void;
   private _blocksBatchSize: number = 1024;
   private _timer: ExponentialTimer | null = null;
+  private readonly _monitoringInterval: number;
 
   constructor(
-    private readonly log: AppLogger,
     @Inject('BlocksCommandExecutor')
     private readonly blocksCommandExecutor: BlocksCommandExecutor,
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
+
+    // Calculate monitoring interval once in constructor
+    // Half of block time, minimum 30 seconds
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 4, 3000);
 
     // TODO: This should be removed when we figure out where to initialize the queue correctly.
     // Now, without this line, we can get a situation where the queue is not initialized
@@ -90,9 +95,9 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         }
       },
       {
-        interval: 500,
-        maxInterval: 3000,
-        multiplier: 2,
+        interval: 1000, // Start with 1000ms for first attempts
+        maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
+        multiplier: 2, // Exponential backoff multiplier
       }
     );
 

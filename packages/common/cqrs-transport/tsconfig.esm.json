@@ -1,0 +1,34 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist/esm",
+    "incremental": true,
+    "composite": true,
+    "module": "ESNext",
+    "target": "ES2020",
+    "moduleResolution": "Bundler",
+    "tsBuildInfoFile": "dist/esm/tsconfig.tsbuildinfo",
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
+  },
+  "references": [
+    { "path": "../cqrs/tsconfig.esm.json" },
+    { "path": "../logger/tsconfig.esm.json" },
+    { "path": "../network-transport/tsconfig.esm.json" }
+  ],
+  "include": ["src"],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

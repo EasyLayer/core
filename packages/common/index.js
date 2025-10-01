@@ -7,7 +7,6 @@ module.exports = {
     ...require('./exponential-interval-async/dist'),
     ...require('./logger/dist'),
     ...require('./network-transport/dist'),
-    ...require('./secure-storage/dist'),
     ...require('./shared-interfaces/dist'),
-    ...require('./context/dist')
+    ...require('./framework/dist')
 };

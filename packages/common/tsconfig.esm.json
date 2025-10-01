@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "references": [
+    {"path": "./arithmetic/tsconfig.esm.json"},
+    {"path": "./shared-interfaces/tsconfig.esm.json"},
+    {"path": "./exponential-interval-async/tsconfig.esm.json"},
+    {"path": "./cqrs/tsconfig.esm.json"},
+    {"path": "./logger/tsconfig.esm.json"},
+    {"path": "./cqrs-transport/tsconfig.esm.json"},
+    {"path": "./network-transport/tsconfig.esm.json"},
+    {"path": "./eventstore/tsconfig.esm.json"},
+    {"path": "./framework/tsconfig.esm.json"}
+  ],
+  "include": ["."],
+  "exclude": [
+    "dist",
+    "**/*.test.ts",
+    "**/__tests__",
+  ],
+}

@@ -27,8 +27,8 @@ export class Network extends AggregateRoot {
     blockHeight: number;
     options?: {
       snapshotsEnabled?: boolean;
-      pruneOldSnapshots?: boolean;
-      allowEventsPruning?: boolean;
+      allowPruning?: boolean;
+      snapshotInterval?: number;
     };
   }) {
     super(aggregateId, blockHeight, options);
@@ -42,33 +42,6 @@ export class Network extends AggregateRoot {
   }
 
   // ===== GETTERS =====
-
-  // Getter for current block height in the chain
-  public get currentBlockHeight(): number | undefined {
-    return this.chain.lastBlockHeight;
-  }
-
-  /**
-   * Gets current chain statistics
-   * Complexity: O(1)
-   */
-  public getChainStats(): {
-    size: number;
-    maxSize: number;
-    currentHeight?: number;
-    firstHeight?: number;
-    isEmpty: boolean;
-    isFull: boolean;
-  } {
-    return {
-      size: this.chain.size,
-      maxSize: this.__maxSize,
-      currentHeight: this.chain.lastBlockHeight,
-      firstHeight: this.chain.head?.block.blockNumber,
-      isEmpty: this.chain.size === 0,
-      isFull: this.chain.size >= this.__maxSize,
-    };
-  }
 
   /**
    * Gets the last block in chain
@@ -102,19 +75,24 @@ export class Network extends AggregateRoot {
     return this.chain.toArray();
   }
 
-  protected toJsonPayload(): any {
+  // ===== SNAPSHOTS =====
+
+  protected serializeUserState(): Record<string, any> {
     return {
-      // Convert Blockchain to an array of blocks for serialization
-      chain: this.chain.toArray(),
       maxSize: this.__maxSize,
+      chain: this.chain.toArray(), // LightBlock[]
     };
   }
 
-  protected fromSnapshot(state: any): void {
-    if (state.chain && Array.isArray(state.chain)) {
+  protected restoreUserState(state: any): void {
+    if (typeof state?.maxSize === 'number') {
+      this.__maxSize = state.maxSize;
+    }
+
+    if (state?.chain && Array.isArray(state?.chain)) {
       this.chain = new Blockchain({
-        maxSize: state.maxSize || this.__maxSize,
-        baseBlockHeight: this._lastBlockHeight,
+        maxSize: this.__maxSize,
+        baseBlockHeight: this.lastBlockHeight,
       });
       this.chain.fromArray(state.chain);
     }
@@ -123,23 +101,29 @@ export class Network extends AggregateRoot {
   }
 
   public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
-    await this.apply(
-      new EvmNetworkInitializedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: startHeight,
-      })
+    this.apply(
+      new EvmNetworkInitializedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: startHeight,
+        },
+        {}
+      )
     );
   }
 
   // Method to clear all blockchain data(for database cleaning)
   public async clearChain({ requestId }: { requestId: string }) {
-    await this.apply(
-      new EvmNetworkClearedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: -1,
-      })
+    this.apply(
+      new EvmNetworkClearedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: -1,
+        },
+        {}
+      )
     );
   }
 
@@ -148,13 +132,15 @@ export class Network extends AggregateRoot {
       throw new BlockchainValidationError();
     }
 
-    return await this.apply(
-      new EvmNetworkBlocksAddedEvent({
-        aggregateId: this.aggregateId,
-        requestId,
-        blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
-        blocks,
-      })
+    return this.apply(
+      new EvmNetworkBlocksAddedEvent(
+        {
+          aggregateId: this.aggregateId,
+          requestId,
+          blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
+        },
+        { blocks }
+      )
     );
   }
 
@@ -187,13 +173,15 @@ export class Network extends AggregateRoot {
       const isForkPoint = remoteBlock.hash === localBlock.hash && remoteBlock.parentHash === localBlock.parentHash;
 
       if (isForkPoint) {
-        return await this.apply(
-          new EvmNetworkReorganizedEvent({
-            aggregateId: this.aggregateId,
-            blockHeight: reorgHeight,
-            requestId,
-            blocks,
-          })
+        return this.apply(
+          new EvmNetworkReorganizedEvent(
+            {
+              aggregateId: this.aggregateId,
+              blockHeight: reorgHeight,
+              requestId,
+            },
+            { blocks }
+          )
         );
       }
     }
@@ -210,9 +198,7 @@ export class Network extends AggregateRoot {
     });
   }
 
-  private onEvmNetworkInitializedEvent({ payload }: EvmNetworkInitializedEvent) {
-    const { blockHeight } = payload;
-
+  private onEvmNetworkInitializedEvent({ blockHeight, payload }: EvmNetworkInitializedEvent) {
     // IMPORTANT: In cases where the user specified a height less
     // than what was already saved in the model
     this.chain.truncateToBlock(Number(blockHeight));
@@ -242,8 +228,7 @@ export class Network extends AggregateRoot {
     );
   }
 
-  private onEvmNetworkReorganizedEvent({ payload }: EvmNetworkReorganizedEvent) {
-    const { blockHeight } = payload;
+  private onEvmNetworkReorganizedEvent({ blockHeight, payload }: EvmNetworkReorganizedEvent) {
     // Here we cut full at once in height
     // This method is idempotent
     this.chain.truncateToBlock(Number(blockHeight));

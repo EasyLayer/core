@@ -1,7 +1,7 @@
 {
   "name": "@easylayer/common",
   "version": "0.10.0",
-  "description": "",
+  "description": "Meta-package that routes subpath exports to per-subpackage builds.",
   "type": "commonjs",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -14,44 +14,49 @@
       "types": "./*.d.ts"
     },
     "./arithmetic": {
-      "module": "./arithmetic/dist/esm/index.mjs",
+      "browser": "./arithmetic/dist/esm/browser/index.js",
+      "module": "./arithmetic/dist/esm/index.js",
       "default": "./arithmetic/dist/index.js"
     },
     "./shared-interfaces": {
-      "module": "./shared-interfaces/dist/esm/index.mjs",
+      "browser": "./shared-interfaces/dist/esm/browser/index.js",
+      "module": "./shared-interfaces/dist/esm/index.js",
       "default": "./shared-interfaces/dist/index.js"
     },
     "./exponential-interval-async": {
-      "module": "./exponential-interval-async/dist/esm/index.mjs",
+      "browser": "./exponential-interval-async/dist/esm/browser/index.js",
+      "module": "./exponential-interval-async/dist/esm/index.js",
       "default": "./exponential-interval-async/dist/index.js"
     },
     "./cqrs": {
-      "module": "./cqrs/dist/esm/index.mjs",
+      "browser": "./cqrs/dist/esm/browser/index.js",
+      "module": "./cqrs/dist/esm/index.js",
       "default": "./cqrs/dist/index.js"
     },
     "./logger": {
-      "module": "./logger/dist/esm/index.mjs",
+      "browser": "./logger/dist/esm/index.js",
+      "module": "./logger/dist/esm/index.js",
       "default": "./logger/dist/index.js"
     },
     "./cqrs-transport": {
-      "module": "./cqrs-transport/dist/esm/index.mjs",
+      "browser": "./cqrs-transport/dist/esm/browser/index.js",
+      "module": "./cqrs-transport/dist/esm/index.js",
       "default": "./cqrs-transport/dist/index.js"
     },
     "./eventstore": {
-      "module": "./eventstore/dist/esm/index.mjs",
+      "browser": "./eventstore/dist/esm/browser/index.js",
+      "module": "./eventstore/dist/esm/index.js",
       "default": "./eventstore/dist/index.js"
     },
-    "./secure-storage": {
-      "module": "./secure-storage/dist/esm/index.mjs",
-      "default": "./secure-storage/dist/index.js"
-    },
     "./network-transport": {
-      "module": "./network-transport/dist/esm/index.mjs",
+      "browser": "./network-transport/dist/esm/browser/index.js",
+      "module": "./network-transport/dist/esm/index.js",
       "default": "./network-transport/dist/index.js"
     },
-    "./context": {
-      "module": "./context/dist/esm/index.mjs",
-      "default": "./context/dist/index.js"
+    "./framework": {
+      "browser": "./framework/dist/esm/browser/index.js",
+      "module": "./framework/dist/esm/index.js",
+      "default": "./framework/dist/index.js"
     }
   },
   "files": [
@@ -67,16 +72,15 @@
     "cqrs-transport/dist",
     "eventstore/dist",
     "network-transport/dist",
-    "secure-storage/dist",
-    "context/dist"
+    "framework/dist"
   ],
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
     "clear:dist": "rimraf dist",
     "build:cjs": "tsc -b tsconfig.cjs.json",
-    "build:esm:all": "./build-esm-all.sh",
-    "build": "yarn build:cjs && yarn build:esm:all",
+    "build:esm": "tsc -b tsconfig.esm.json",
+    "build": "yarn build:cjs && yarn build:esm",
     "prepublishOnly": "yarn clear:dist && yarn build"
   },
   "author": "Yaroslav Pavliuk",
@@ -84,36 +88,29 @@
   "packageManager": "yarn@4.5.0",
   "dependencies": {
     "@nestjs/common": "10.2.10",
-    "@nestjs/core": "10.2.10",
-    "@nestjs/cqrs": "10.2.6",
-    "@nestjs/microservices": "10.2.10",
-    "@nestjs/platform-socket.io": "10.2.10",
     "@nestjs/swagger": "7.1.17",
     "@nestjs/typeorm": "10.0.2",
-    "@nestjs/websockets": "10.2.10",
+    "async-mutex": "0.5.0",
     "better-sqlite3": "11.2.1",
-    "better-sqlite3-multiple-ciphers": "11.1.2",
     "bignumber.js": "9.1.2",
     "bn.js": "5.2.1",
     "bunyan": "1.8.15",
     "chalk": "4.1.2",
+    "cors": "2.8.5",
+    "electron": "38.1.0",
+    "localforage": "1.10.0",
     "lodash": "4.17.21",
-    "p-queue": "6.6.2",
     "pg": "8.12.0",
-    "pg-copy-streams": "6.0.6",
-    "pg-error-enum": "0.7.1",
-    "pg-query-stream": "4.9.6",
-    "piscina": "4.1.0",
     "reflect-metadata": "0.1.14",
     "rxjs": "7.8.1",
-    "socket.io": "4.8.1",
+    "sql.js": "1.13.0",
     "sqlite3": "5.1.7",
     "stream-json": "1.8.0",
     "typeorm": "0.3.20",
-    "typeorm-transactional": "0.5.0",
     "uuid": "9.0.1"
   },
   "devDependencies": {
+    "@types/electron": "1.6.12",
     "@types/node": "20.10.4",
     "rimraf": "5.0.5",
     "ts-node": "10.9.2",

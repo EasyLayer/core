@@ -1,6 +1,5 @@
-import { SystemEvent, BasicEvent, EventBasePayload } from '@easylayer/common/cqrs';
+import { BasicEvent } from '@easylayer/common/cqrs';
 
-interface EvmNetworkInitializedEventPayload extends EventBasePayload {}
+interface EvmNetworkInitializedEventPayload {}
 
-@SystemEvent()
 export class EvmNetworkInitializedEvent extends BasicEvent<EvmNetworkInitializedEventPayload> {}

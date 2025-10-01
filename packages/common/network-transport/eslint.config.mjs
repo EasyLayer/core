@@ -1,5 +1,11 @@
 import baseConfig from '../../../eslint.config.mjs';
 
 export default [
-  ...baseConfig
+  ...baseConfig,
+  {
+    files: ['**/http.service.ts'],
+    rules: {
+      'no-restricted-syntax': 'off',
+    },
+  },
 ];

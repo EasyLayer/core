@@ -3,10 +3,7 @@
   "compilerOptions": {
     "noEmit": false,
     "rootDir": "src",
-    "outDir": "dist",
-    "declaration": true,
-    "sourceMap": false,
-    "declarationMap": false
+    "outDir": "dist"
   },
   "references": [
     { "path": "../../common/cqrs/tsconfig.cjs.json" },
@@ -16,6 +13,7 @@
   ],
   "include": ["src"],
   "exclude": [
+    "src/browser",
     "dist",
     "**/*.test.ts",
     "**/__tests__",
