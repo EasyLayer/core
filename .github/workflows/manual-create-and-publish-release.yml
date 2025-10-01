@@ -47,45 +47,75 @@ jobs:
       - name: Generate Release Notes from CHANGELOG.md
         id: notes
         run: |
+          set -euo pipefail
           VERSION="${{ env.VERSION }}"
           echo "Looking for changelog section for version: $VERSION"
-          
-          # Check for different header formats in CHANGELOG.md
-          # For patch versions: ## <small>0.6.21 (2025-06-15)</small>
-          # For minor/major versions: ## 0.7.0 (2025-06-15)
-          if grep -q "^## <small>${VERSION} " CHANGELOG.md; then
-            echo "Found patch version format with <small> tags"
-            TAG_HEADER="## <small>${VERSION} "
-            END_PATTERN="^## <small>"
-          elif grep -q "^## ${VERSION} " CHANGELOG.md; then
-            echo "Found minor/major version format without <small> tags"
-            TAG_HEADER="## ${VERSION} "  
-            END_PATTERN="^## "
-          else
+
+          # Escape VERSION for use inside regex (treat it as a literal)
+          escape_regex() {
+            # Escapes characters that are special in ERE and sed
+            printf '%s' "$1" | sed -e 's/[]\/$*.^|[]/\\&/g' -e 's/(/\\(/g' -e 's/)/\\)/g' -e 's/+ /\\+ /g'
+          }
+          VER_ESC="$(escape_regex "$VERSION")"
+
+          # Generic semver (with optional prerelease/build), e.g. 1.2.3, 1.2.3-alpha.0, 1.2.3-rc.1+build.5
+          VER_ANY='[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.+-]+)?'
+
+          # Header patterns we support:
+          # 1) ## 1.2.3 (date)
+          # 2) ## <small>1.2.3 (date)</small>
+          # 3) # [1.2.3](link) (date)  OR  # [1.2.3] (date)
+          # 4) ## [1.2.3] (date)
+          #
+          # Notes:
+          # - Allow header levels from 1 to 3 (#, ##, ###) to be safe
+          # - Allow optional <small> ... </small>
+          # - Allow optional [version] with optional (link)
+          # - Require opening "(" for the date at the end (we don't validate the date format here)
+
+          HEADER_FOR_VERSION="^#{1,3}[[:space:]]*(<small>)?[[:space:]]*(\\[${VER_ESC}\\](\\([^)]*\\))?|${VER_ESC})([[:space:]]*</small>)?[[:space:]]*\\("
+          HEADER_FOR_ANY="^#{1,3}[[:space:]]*(<small>)?[[:space:]]*(\\[${VER_ANY}\\](\\([^)]*\\))?|${VER_ANY})([[:space:]]*</small>)?[[:space:]]*\\("
+
+          if ! grep -Eq "$HEADER_FOR_VERSION" CHANGELOG.md; then
             echo "❌ Could not find changelog section for version ${VERSION}"
-            echo "Available changelog sections:"
-            grep "^## " CHANGELOG.md | head -5
+            echo "Available changelog-like sections (top 10):"
+            grep -En "$HEADER_FOR_ANY" CHANGELOG.md | head -10 || true
             exit 1
           fi
-          
-          # Extract release notes between current version header and next version header
-          NOTES=$(sed -n "/^${TAG_HEADER}/,/${END_PATTERN}/p" CHANGELOG.md \
-            | sed '1d;$d' \
-            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-          
+
+          # Find the starting line of this version's header
+          START_LINE="$(grep -nE "$HEADER_FOR_VERSION" CHANGELOG.md | head -1 | cut -d: -f1)"
+          echo "Found header at line: $START_LINE"
+
+          # Find the next version header after START_LINE
+          NEXT_REL="$(tail -n +"$((START_LINE+1))" CHANGELOG.md | grep -nE "$HEADER_FOR_ANY" | head -1 | cut -d: -f1 || true)"
+
+          if [ -n "$NEXT_REL" ]; then
+            END_LINE="$((START_LINE + NEXT_REL - 2))"
+          else
+            END_LINE="$(wc -l < CHANGELOG.md)"
+          fi
+
+          # Extract the notes between headers (exclude the header line itself)
+          NOTES="$(sed -n "$((START_LINE+1))","$END_LINE"p CHANGELOG.md \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
           if [ -z "$NOTES" ]; then
             echo "❌ Could not extract release notes for version ${VERSION}"
             exit 1
           fi
-          
+
           echo "✅ Successfully extracted release notes"
           echo "Release notes preview:"
-          echo "$NOTES" | head -3
-          
-          # Set output for next step
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" | head -10
+
+          # Output for next step
+          {
+            echo "body<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       
       - name: Publish Release Packages
         id: publish_release_packages
