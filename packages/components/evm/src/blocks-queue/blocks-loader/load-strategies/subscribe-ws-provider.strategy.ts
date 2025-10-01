@@ -1,4 +1,4 @@
-import type { AppLogger } from '@easylayer/common/logger';
+import type { Logger } from '@nestjs/common';
 import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from '.';
@@ -11,7 +11,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
   private _subscription?: Promise<void> & { unsubscribe: () => void };
 
   constructor(
-    private readonly log: AppLogger,
+    private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: any

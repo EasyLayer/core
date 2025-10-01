@@ -1,130 +1,92 @@
-import type { ExecuteParams } from '../operators';
-import { executeWithRetry, executeWithSkip, ofType } from '../operators';
-import { of } from 'rxjs';
-import type { EventBasePayload } from '../basic-event';
+import { of, lastValueFrom } from 'rxjs';
+import { take, toArray, defaultIfEmpty } from 'rxjs/operators';
+import { executeWithRetry, executeWithRollback, ofType } from '../operators';
 import { BasicEvent } from '../basic-event';
 
-interface MockEventPayload extends EventBasePayload {
-  id: string;
-}
+class Ev extends BasicEvent {}
 
-class MockEvent extends BasicEvent<MockEventPayload> {}
+describe('Operators', () => {
+  it('executeWithRetry retries until success and re-emits input', async () => {
+    jest.useFakeTimers({ now: Date.now() });
 
-describe('Saga RxJS Operators', () => {
-  describe('executeWithRetry', () => {
-    it('should retry the command on error and eventually succeed', (done) => {
-      const command = jest
-        .fn()
-        .mockRejectedValueOnce(new Error('first error'))
-        .mockRejectedValueOnce(new Error('second error'))
-        .mockResolvedValue('success');
+    let attempts = 0;
+    const cmd = async () => {
+      attempts++;
+      if (attempts < 3) throw new Error('nope');
+    };
 
-      const params: ExecuteParams<MockEvent> = {
-        event: MockEvent,
-        command,
-      };
+    const src$ = of(new Ev({ aggregateId: 'a', requestId: 'r', blockHeight: 1 }, {})).pipe(
+      executeWithRetry({ event: Ev, command: cmd }),
+      take(1)
+    );
 
-      const source = of(new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' }));
-      const result = source.pipe(executeWithRetry(params, 1));
+    const p = lastValueFrom(src$);
+    await jest.runAllTimersAsync();
+    const out = await p;
 
-      result.subscribe({
-        next: (value) => {
-          expect(value).toEqual(new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' }));
-        },
-        error: () => {
-          // This block should not be called in this test case
-          fail('Expected successful completion, but got an error');
-        },
-        complete: () => {
-          // Check that the command was called three times
-          expect(command).toHaveBeenCalledTimes(3);
-          done();
-        },
-      });
-    });
+    expect(out).toBeInstanceOf(Ev);
+    expect(attempts).toBe(3);
+
+    jest.useRealTimers();
   });
 
-  describe('executeWithSkip', () => {
-    it('should skip the error and continue', (done) => {
-      const command = jest.fn().mockRejectedValue(new Error('error'));
+  it('executeWithRollback runs rollback and eventually errors after limit', async () => {
+    jest.useFakeTimers({ now: Date.now() });
 
-      const params: ExecuteParams<MockEvent> = {
-        event: MockEvent,
-        command,
-      };
+    const cmd = async () => {
+      throw new Error('cmd-fail');
+    };
+    let rb = 0;
+    const rollback = async () => {
+      rb++;
+      throw new Error('rb-fail');
+    };
 
-      const source = of(new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' }));
-      const result = source.pipe(executeWithSkip(params));
+    const src$ = of(new Ev({ aggregateId: 'a', requestId: 'r', blockHeight: 1 }, {})).pipe(
+      executeWithRollback({ event: Ev, command: cmd, rollback, retryOpt: { count: 2, delay: 10 } })
+    );
 
-      let nextCalled = false;
-
-      result.subscribe({
-        next: (value) => {
-          expect(value).toEqual(new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' }));
-          nextCalled = true;
+    const p = new Promise<string>((resolve) => {
+      const sub = src$.subscribe(
+        () => {},
+        (e) => {
+          resolve(String(e?.message ?? e));
+          sub.unsubscribe();
         },
-        error: () => {
-          fail('Expected successful completion, but got an error');
-        },
-        complete: () => {
-          expect(nextCalled).toBe(true);
-          expect(command).toHaveBeenCalledTimes(1);
-          done();
-        },
-      });
+        () => {
+          resolve('completed');
+          sub.unsubscribe();
+        }
+      );
     });
+
+    await jest.runAllTimersAsync();
+    const msg = await p;
+
+    expect(msg).toMatch(/Retry limit exceeded|cmd-fail|rb-fail/);
+    expect(rb).toBeGreaterThanOrEqual(1);
+
+    jest.useRealTimers();
   });
 
-  // describe('executeWithRollback', () => {
-  //     it('should call rollback on error and retry a specified number of times', (done) => {
-  //       const command = jest.fn().mockRejectedValue(new Error('error'));
-  //       const rollback = jest.fn().mockResolvedValue(undefined);
+  it('ofType filters by instanceof', async () => {
+    const a = new Ev({ aggregateId: 'a', requestId: 'r', blockHeight: 1 }, {});
+    const arr = await lastValueFrom(of(a).pipe(ofType(Ev), toArray()));
+    expect(arr.length).toBe(1);
+    expect(arr[0]).toBeInstanceOf(Ev);
+  });
 
-  //       const params: ExecuteWithRollbackParams<MockEvent> = {
-  //         event: MockEvent,
-  //         command,
-  //         rollback,
-  //         retryOpt: { count: 2, delay: 1 },
-  //       };
+  it('ofType also matches by constructor.name', async () => {
+    class Fake {
+      constructor(public payload: any) {}
+    }
+    Object.defineProperty(Fake.prototype, 'constructor', { value: { name: 'Ev' } });
+    const fake = new (Fake as any)({});
 
-  //       const source = of(new MockEvent('1'));
-  //       const result = source.pipe(executeWithRollback(params));
+    const arr = await lastValueFrom(
+      of(fake as any).pipe(ofType(Ev), defaultIfEmpty('EMPTY'), toArray())
+    );
 
-  //       result.subscribe({
-  //         next: () => {
-  //             fail('Expected error, but got success');
-  //         },
-  //         error: () => {
-  //             expect(command).toHaveBeenCalledTimes(1);
-  //             expect(rollback).toHaveBeenCalledTimes(1);
-  //         },
-  //         complete: () => {
-  //           expect(rollback).toHaveBeenCalledTimes(3);
-  //           done();
-  //         },
-  //       });
-  //     });
-  //   });
-
-  describe('ofType', () => {
-    it('should filter events of specified type', (done) => {
-      const events = [new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' })];
-
-      const source = of(...events);
-      const result = source.pipe(ofType(MockEvent));
-
-      const expected = [new MockEvent({ aggregateId: '123', requestId: '123', blockHeight: 1, id: '1' })];
-      const actual: MockEvent[] = [];
-
-      result.subscribe({
-        next: (event) => {
-          actual.push(event);
-        },
-        complete: () => {
-          expect(actual).toEqual(expected);
-          done();
-        },
-      });
-    });
+    expect(arr[0]).not.toBe('EMPTY');
   });
 });

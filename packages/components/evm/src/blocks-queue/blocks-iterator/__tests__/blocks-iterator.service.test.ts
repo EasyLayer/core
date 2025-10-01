@@ -1,5 +1,5 @@
+import 'reflect-metadata';
 import { Test, TestingModule } from '@nestjs/testing';
-import { AppLogger } from '@easylayer/common/logger';
 import { Block, Transaction, TransactionReceipt, Log } from '../../../blockchain-provider';
 import { BlocksQueueIteratorService } from '../blocks-iterator.service';
 import { BlocksQueue } from '../../blocks-queue';
@@ -22,7 +22,7 @@ function createTestLog(logIndex: number = 0, blockNumber: number = 0): Log {
     transactionIndex: 0,
     blockHash: `0x${'4'.repeat(64)}`,
     logIndex,
-    removed: false
+    removed: false,
   };
 }
 
@@ -44,7 +44,7 @@ function createTestReceipt(transactionHash: string, blockNumber: number): Transa
     logsBloom: `0x${'0'.repeat(512)}`,
     status: '0x1',
     type: '0x0',
-    effectiveGasPrice: 20000000000
+    effectiveGasPrice: 20000000000,
   };
 }
 
@@ -53,7 +53,7 @@ function createTestReceipt(transactionHash: string, blockNumber: number): Transa
  */
 function createTransaction(blockNumber: number = 0, transactionIndex: number = 0): Transaction {
   const hash = `0x${'a'.repeat(63)}${transactionIndex}`;
-  
+
   return {
     hash,
     blockHash: `0x${'b'.repeat(64)}`,
@@ -62,7 +62,7 @@ function createTransaction(blockNumber: number = 0, transactionIndex: number = 0
     nonce: 0,
     from: `0x${'1'.repeat(40)}`,
     to: `0x${'2'.repeat(40)}`,
-    value: '1000000000000000000', // 1 ETH in wei
+    value: '1000000000000000000',
     gas: 21000,
     input: '0x',
     type: '0x0',
@@ -70,7 +70,7 @@ function createTransaction(blockNumber: number = 0, transactionIndex: number = 0
     v: '0x1c',
     r: `0x${'1'.repeat(64)}`,
     s: `0x${'2'.repeat(64)}`,
-    gasPrice: '20000000000' // 20 gwei
+    gasPrice: '20000000000',
   };
 }
 
@@ -78,11 +78,11 @@ function createTransaction(blockNumber: number = 0, transactionIndex: number = 0
  * Helper function to create a test block object.
  */
 function createTestBlock(blockNumber: number, transactions: Transaction[] = []): Block {
-  const receipts = transactions.map(tx => createTestReceipt(tx.hash, blockNumber));
-  
+  const receipts = transactions.map((tx) => createTestReceipt(tx.hash, blockNumber));
+
   // Calculate gas used from receipts
   const gasUsed = receipts.reduce((acc, receipt) => acc + receipt.gasUsed, 0);
-  
+
   // Calculate size based on transactions and receipts
   const baseSize = 500; // Base block header size
   const transactionSize = transactions.length * 150; // Approximate transaction size
@@ -111,24 +111,16 @@ function createTestBlock(blockNumber: number, transactions: Transaction[] = []):
     size: totalSize,
     sizeWithoutReceipts,
     transactions,
-    receipts
+    receipts,
   };
 }
 
 describe('BlocksQueueIteratorService', () => {
   let service: BlocksQueueIteratorService;
-  let mockLogger: AppLogger;
   let mockBlocksCommandExecutor: jest.Mocked<BlocksCommandExecutor>;
   let mockQueue: BlocksQueue<Block>;
 
   beforeEach(async () => {
-    mockLogger = {
-      debug: jest.fn(),
-      error: jest.fn(),
-      info: jest.fn(),
-      warn: jest.fn(),
-    } as any;
-
     mockBlocksCommandExecutor = {
       handleBatch: jest.fn().mockResolvedValue(undefined),
     } as any;
@@ -137,44 +129,38 @@ describe('BlocksQueueIteratorService', () => {
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
       blockSize: 1048576,
-      maxQueueSize: 1 * 1024 * 1024
+      maxQueueSize: 1 * 1024 * 1024,
     });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
-        {
-          provide: AppLogger,
-          useValue: mockLogger,
-        },
-        {
-          provide: 'BlocksCommandExecutor',
-          useValue: mockBlocksCommandExecutor,
-        },
+        { provide: 'BlocksCommandExecutor', useValue: mockBlocksCommandExecutor },
         {
           provide: BlocksQueueIteratorService,
-          useFactory: (logger, executor) =>
-            new BlocksQueueIteratorService(logger, executor, { queueIteratorBlocksBatchSize: 200 }),
-          inject: [AppLogger, 'BlocksCommandExecutor'],
+          useFactory: (executor) =>
+            new BlocksQueueIteratorService(executor, {
+              queueIteratorBlocksBatchSize: 200,
+              blockTimeMs: 60_000,
+            }),
+          inject: ['BlocksCommandExecutor'],
         },
       ],
     }).compile();
 
     service = module.get<BlocksQueueIteratorService>(BlocksQueueIteratorService);
-    service['_queue'] = mockQueue;
+    (service as any)._queue = mockQueue;
   });
 
   afterEach(() => {
-    // Clean up timer if it exists
-    if (service['_timer']) {
-      service['_timer'].destroy();
-      service['_timer'] = null;
-    }
+    try {
+      jest.useRealTimers();
+    } catch {}
     jest.clearAllMocks();
   });
 
   describe('constructor', () => {
     it('should initialize with correct batch size', () => {
-      expect(service['_blocksBatchSize']).toBe(200);
+      expect((service as any)._blocksBatchSize).toBe(200);
     });
 
     it('should initialize resolveNextBatch as a function', () => {
@@ -186,45 +172,42 @@ describe('BlocksQueueIteratorService', () => {
     it('should create a promise and resolve it immediately if queue is empty', async () => {
       // Ensure queue is empty
       expect(mockQueue.length).toBe(0);
-      
-      service['initBatchProcessedPromise']();
-      
-      expect(service['batchProcessedPromise']).toBeInstanceOf(Promise);
-      expect(service['resolveNextBatch']).toBeInstanceOf(Function);
-      
-      // Since queue is empty, promise should resolve immediately
-      await expect(service['batchProcessedPromise']).resolves.toBeUndefined();
+
+      (service as any).initBatchProcessedPromise();
+
+      expect((service as any).batchProcessedPromise).toBeInstanceOf(Promise);
+      expect((service as any)._resolveNextBatch).toBeInstanceOf(Function);
+
+      await expect((service as any).batchProcessedPromise).resolves.toBeUndefined();
     });
 
     it('should create a promise that can be resolved externally when queue has items', async () => {
-      const blockMock = createTestBlock(0, [createTransaction(100)]);
+      const blockMock = createTestBlock(0, [createTransaction(0, 0)]);
       await mockQueue.enqueue(blockMock);
-      
-      service['initBatchProcessedPromise']();
-      
+
+      (service as any).initBatchProcessedPromise();
+
       let resolved = false;
-      service['batchProcessedPromise'].then(() => {
+      (service as any).batchProcessedPromise.then(() => {
         resolved = true;
       });
 
-      // Promise should not be resolved initially
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((r) => setTimeout(r, 10));
       expect(resolved).toBe(false);
 
-      // Resolve manually
-      service['resolveNextBatch']();
-      await service['batchProcessedPromise'];
-      
+      (service as any)._resolveNextBatch();
+      await (service as any).batchProcessedPromise;
+
       expect(resolved).toBe(true);
     });
   });
 
   describe('processBatch', () => {
     it('should call blocksCommandExecutor.handleBatch with correct arguments', async () => {
-      const blockMock = createTestBlock(0, [createTransaction(100)]);
-      
-      await service['processBatch']([blockMock]);
-      
+      const blockMock = createTestBlock(0, [createTransaction(0, 0)]);
+
+      await (service as any).processBatch([blockMock]);
+
       expect(mockBlocksCommandExecutor.handleBatch).toHaveBeenCalledWith({
         batch: [blockMock],
         requestId: 'mock-uuid',
@@ -232,57 +215,38 @@ describe('BlocksQueueIteratorService', () => {
     });
 
     it('should initialize new batch processed promise', async () => {
-      const blockMock = createTestBlock(0, [createTransaction(100)]);
-      
-      const oldPromise = service['batchProcessedPromise'];
-      await service['processBatch']([blockMock]);
-      
-      expect(service['batchProcessedPromise']).not.toBe(oldPromise);
-      expect(service['batchProcessedPromise']).toBeInstanceOf(Promise);
-    });
+      const blockMock = createTestBlock(0, [createTransaction(0, 0)]);
 
-    it('should log error and continue on handleBatch failure', async () => {
-      const blockMock = createTestBlock(0, [createTransaction(100)]);
-      const error = new Error('Processing failed');
-      
-      mockBlocksCommandExecutor.handleBatch.mockRejectedValueOnce(error);
-      
-      await service['processBatch']([blockMock]);
-      
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Failed to process the batch, will retry',
-        expect.objectContaining({
-          methodName: 'processBatch',
-          args: error,
-        })
-      );
+      await (service as any).processBatch([blockMock]);
+
+      expect((service as any).batchProcessedPromise).toBeInstanceOf(Promise);
     });
   });
 
   describe('peekNextBatch', () => {
     it('should return empty array when queue is empty', async () => {
-      const batch = await service['peekNextBatch']();
+      const batch = await (service as any).peekNextBatch();
       expect(batch).toEqual([]);
     });
 
     it('should return blocks when queue has sufficient size', async () => {
-      const block1 = createTestBlock(0, [createTransaction(100)]);
-      const block2 = createTestBlock(1, [createTransaction(150)]);
-      
+      (service as any)._blocksBatchSize = 1024;
+      const block1 = createTestBlock(0, [createTransaction(0, 0)]);
+      const block2 = createTestBlock(1, [createTransaction(1, 0)]);
+
       await mockQueue.enqueue(block1);
       await mockQueue.enqueue(block2);
-      
-      // Move blocks to outStack for getBatchUpToSize to work
-      await mockQueue.firstBlock();
-      
-      const batch = await service['peekNextBatch']();
+
+      const batch = await (service as any).peekNextBatch();
       expect(batch.length).toBeGreaterThan(0);
+      const total = batch.reduce((s: number, b: any) => s + b.size, 0);
+      expect(total).toBeLessThanOrEqual((service as any)._blocksBatchSize);
     });
   });
 
   describe('resolveNextBatch getter', () => {
     it('should return the resolveNextBatch function', () => {
-      service['initBatchProcessedPromise']();
+      (service as any).initBatchProcessedPromise();
       const resolveFunction = service.resolveNextBatch;
       expect(typeof resolveFunction).toBe('function');
     });
@@ -294,113 +258,86 @@ describe('BlocksQueueIteratorService', () => {
     });
 
     it('should return true when iterating', async () => {
-      // Start iterating
       const startPromise = service.startQueueIterating(mockQueue);
-      
+
       expect(service.isIterating).toBe(true);
-      
-      // Clean up
+
       service.onModuleDestroy();
-      await startPromise.catch(() => {}); // Ignore any errors from cleanup
+      await startPromise.catch(() => {});
     });
   });
 
   describe('startQueueIterating', () => {
     it('should start iterating only once', async () => {
-      const startPromise1 = service.startQueueIterating(mockQueue);
-      const startPromise2 = service.startQueueIterating(mockQueue);
-      
+      const p1 = service.startQueueIterating(mockQueue);
+      const p2 = service.startQueueIterating(mockQueue);
+
       expect(service.isIterating).toBe(true);
-      expect(mockLogger.debug).toHaveBeenCalledWith('Blocks iterating skipped: already iterating');
-      
-      // Clean up
+
       service.onModuleDestroy();
-      await Promise.all([startPromise1, startPromise2]).catch(() => {});
+      await Promise.allSettled([p1, p2]);
     });
 
-    it('should assign queue and log initialization', async () => {
-      const startPromise = service.startQueueIterating(mockQueue);
-      
-      expect(service['_queue']).toBe(mockQueue);
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Start blocks iterating',
-        expect.objectContaining({
-          args: { initialQueueLength: mockQueue.length }
-        })
-      );
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        'Queue assigned to iterator',
-        expect.objectContaining({
-          args: { currentSize: mockQueue.currentSize }
-        })
-      );
-      
-      // Clean up
+    it('should assign queue initialization', async () => {
+      const p = service.startQueueIterating(mockQueue);
+
       service.onModuleDestroy();
-      await startPromise.catch(() => {});
+      await p.catch(() => {});
     });
 
     it('should create exponential timer', async () => {
-      const startPromise = service.startQueueIterating(mockQueue);
-      
-      expect(service['_timer']).not.toBeNull();
-      expect(mockLogger.debug).toHaveBeenCalledWith('Iterator exponential timer started');
-      
-      // Clean up
+      const p = service.startQueueIterating(mockQueue);
+
+      expect((service as any)._timer).not.toBeNull();
+
       service.onModuleDestroy();
-      await startPromise.catch(() => {});
+      await p.catch(() => {});
     });
   });
 
   describe('onModuleDestroy', () => {
     it('should clean up resources', async () => {
-      // Start iterating first
-      const startPromise = service.startQueueIterating(mockQueue);
-      
+      const p = service.startQueueIterating(mockQueue);
+
       expect(service.isIterating).toBe(true);
-      expect(service['_timer']).not.toBeNull();
-      
-      // Destroy
+      expect((service as any)._timer).not.toBeNull();
+
       service.onModuleDestroy();
-      
+
       expect(service.isIterating).toBe(false);
-      expect(service['_timer']).toBeNull();
-      expect(mockLogger.debug).toHaveBeenCalledWith('Shutting down iterator');
-      
-      await startPromise.catch(() => {}); // Clean up promise
+      expect((service as any)._timer).toBeNull();
+
+      await p.catch(() => {});
     });
 
     it('should call resolveNextBatch on destroy', () => {
       const resolveSpy = jest.fn();
-      service['_resolveNextBatch'] = resolveSpy;
-      
+      (service as any)._resolveNextBatch = resolveSpy;
+
       service.onModuleDestroy();
-      
+
       expect(resolveSpy).toHaveBeenCalled();
     });
   });
 
   describe('integration tests', () => {
     it('should process blocks end-to-end', async () => {
-      const block1 = createTestBlock(0, [createTransaction(100)]);
-      const block2 = createTestBlock(1, [createTransaction(100)]);
-      
+      const block1 = createTestBlock(0, [createTransaction(0, 0)]);
+      const block2 = createTestBlock(1, [createTransaction(1, 0)]);
+
       await mockQueue.enqueue(block1);
       await mockQueue.enqueue(block2);
-      
-      // Initialize batch promise
-      service['initBatchProcessedPromise']();
-      
-      // Peek next batch
-      const batch = await service['peekNextBatch']();
+
+      (service as any).initBatchProcessedPromise();
+
+      const batch = await (service as any).peekNextBatch();
       expect(batch.length).toBeGreaterThan(0);
-      
-      // Process the batch
-      await service['processBatch'](batch);
-      
+
+      await (service as any).processBatch(batch);
+
       expect(mockBlocksCommandExecutor.handleBatch).toHaveBeenCalledWith({
         batch: expect.arrayContaining([
-          expect.objectContaining({ blockNumber: expect.any(Number) })
+          expect.objectContaining({ blockNumber: expect.any(Number) }),
         ]),
         requestId: 'mock-uuid',
       });

@@ -1,16 +1,14 @@
 export * from './operators';
+export * from './interfaces';
+export * from './constants';
 export * from './decorators';
-
-export { CommandBus, QueryBus, EventBus, UnhandledExceptionBus } from '@nestjs/cqrs';
-export * from '@nestjs/cqrs/dist/decorators';
-export * from '@nestjs/cqrs/dist/interfaces';
-
 export * from './basic-event';
+export { setQueryMetadata, setEventMetadata, setQueryMetadataByHandlers, setEventMetadataByHandlers } from './utils';
 
-export { setQueryMetadata, setEventMetadata } from './utils';
-
-export { CustomCqrsModule as CqrsModule } from './custom-cqrs.module';
-export { CustomEventBus } from './custom-event-bus';
-export { CustomAggregateRoot as AggregateRoot, EventStatus } from './custom-aggregate-root';
-export type { HistoryEvent } from './custom-aggregate-root';
-export { EventPublisher } from './event-publisher';
+export { CqrsModule as CqrsModule } from './cqrs.module';
+export { EventBus } from './event-bus';
+export { AggregateRoot } from './aggregate-root';
+export type { AggregateOptions } from './aggregate-root';
+export { CommandBus } from './command-bus';
+export { QueryBus } from './query-bus';
+export { UnhandledExceptionBus } from './unhandled-exception-bus';

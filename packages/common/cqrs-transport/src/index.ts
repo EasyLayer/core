@@ -1,3 +1,2 @@
-export { CqrsTransportModule } from './cqrs-transport.module';
-export { Subscriber } from './subscriber';
-export { Publisher } from './publisher';
+export * from './cqrs-transport.module';
+export * from './core/event-record.interface';
