@@ -1,3 +1,7 @@
+## [1.0.2](https://github.com/EasyLayer/core/compare/v1.0.0...v1.0.2) (2025-10-01)
+
+
+
 ## [1.0.1](https://github.com/EasyLayer/core/compare/v1.0.0...v1.0.1) (2025-10-01)
 
 
