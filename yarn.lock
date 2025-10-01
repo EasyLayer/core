@@ -735,7 +735,7 @@ __metadata:
   resolution: "@easylayer/bitcoin@workspace:packages/components/bitcoin"
   dependencies:
     "@bitcoinerlab/secp256k1": "npm:1.2.0"
-    "@easylayer/common": "npm:0.9.5"
+    "@easylayer/common": "npm:0.10.0"
     "@nestjs/common": "npm:10.2.10"
     "@nestjs/swagger": "npm:7.1.17"
     "@nestjs/testing": "npm:10.2.10"
@@ -771,7 +771,7 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@easylayer/common@npm:0.9.5, @easylayer/common@workspace:packages/common":
+"@easylayer/common@npm:0.10.0, @easylayer/common@workspace:packages/common":
   version: 0.0.0-use.local
   resolution: "@easylayer/common@workspace:packages/common"
   dependencies:
@@ -875,7 +875,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@easylayer/evm@workspace:packages/components/evm"
   dependencies:
-    "@easylayer/common": "npm:0.9.5"
+    "@easylayer/common": "npm:0.10.0"
     "@ethereumjs/rlp": "npm:10.0.0"
     "@ethereumjs/trie": "npm:6.2.1"
     "@nestjs/common": "npm:10.2.10"
