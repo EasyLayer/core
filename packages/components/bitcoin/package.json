@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/bitcoin",
-  "version": "0.10.0",
+  "version": "1.0.0",
   "description": "",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -38,7 +38,7 @@
   "packageManager": "yarn@4.5.0",
   "dependencies": {
     "@bitcoinerlab/secp256k1": "1.2.0",
-    "@easylayer/common": "0.10.0",
+    "@easylayer/common": "1.0.0",
     "@nestjs/common": "10.2.10",
     "@nestjs/swagger": "7.1.17",
     "@noble/secp256k1": "3.0.0",

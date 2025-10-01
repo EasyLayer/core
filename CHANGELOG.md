@@ -1,3 +1,7 @@
+# [1.0.0](https://github.com/EasyLayer/core/compare/v0.10.0...v1.0.0) (2025-10-01)
+
+
+
 ## 0.10.0 (2025-08-13)
 
 * feat: implemented new blockchain provider design; refactored mempool aggregate; ([546c684](https://github.com/EasyLayer/core/commit/546c684))
