@@ -50,6 +50,12 @@ echo "✨  New version is v$version_num"
 echo "📝  Generating CHANGELOG.md"
 generate_changelog
 
+echo "🧩 Updating yarn.lock to reflect new workspace versions"
+# Disable immutable & hardened just for this one command
+YARN_ENABLE_IMMUTABLE_INSTALLS=0 \
+YARN_ENABLE_HARDENED_MODE=0 \
+  yarn install --mode=update-lockfile --check-cache
+
 # Commit all changes in a single commit (version bump, CHANGELOG, docs)
 echo "🚀  Committing all changes"
 git add \
