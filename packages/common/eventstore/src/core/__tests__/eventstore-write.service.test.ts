@@ -1,6 +1,6 @@
 import 'reflect-metadata';
-import { EventStoreService } from '../eventstore.service';
-import { PublisherProvider } from '@easylayer/common/cqrs-transport';
+import { EventStoreWriteService } from '../eventstore-write.service';
+import type { PublisherProvider } from '@easylayer/common/cqrs-transport';
 
 jest.mock('@easylayer/common/exponential-interval-async', () => {
   return {
@@ -32,7 +32,6 @@ class TestAgg {
   canMakeSnapshot() { return this.canSnap; }
   getSnapshotRetention() { return { minKeep: 2, keepWindow: 0 }; }
   resetSnapshotCounter = jest.fn();
-  fromSnapshot = jest.fn();
 }
 
 function mkPersist(rawEvents: any[] = []) {
@@ -46,13 +45,12 @@ function mkPersist(rawEvents: any[] = []) {
   };
 }
 
-describe('EventStoreService', () => {
-  let log: any;
+describe('EventStoreWriteService', () => {
   let pub: PublisherProvider & { publisher: { publishWireStreamBatchWithAck: jest.Mock } };
   let adapter: any;
+  let readSvc: any;
 
   beforeEach(() => {
-    log = { debug: jest.fn(), warn: jest.fn() };
     pub = {
       publisher: {
         publishWireStreamBatchWithAck: jest.fn().mockResolvedValue(undefined),
@@ -65,24 +63,19 @@ describe('EventStoreService', () => {
       hasAnyPendingAfterWatermark: jest.fn(),
       deleteOutboxByIds: jest.fn().mockResolvedValue(undefined),
       fetchDeliverAckChunk: jest.fn(),
-      findLatestSnapshot: jest.fn(),
-      createSnapshotAtHeight: jest.fn(),
-      applyEventsToAggregate: jest.fn(),
       createSnapshot: jest.fn(),
       rollbackAggregates: jest.fn(),
-      rehydrateAtHeight: jest.fn(),
-      getDriverType: jest.fn(()=>'postgres'),
+    };
+
+    readSvc = {
+      cache: {
+        set: jest.fn(),
+        del: jest.fn(),
+      },
     };
   });
 
-  it('onModuleInit drains once', async () => {
-    adapter.fetchDeliverAckChunk.mockResolvedValueOnce(0);
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    await svc.onModuleInit();
-    expect(adapter.fetchDeliverAckChunk).toHaveBeenCalled();
-  });
-
-  it('save fast-path publishes raw events, deletes outbox ids, snapshots and resets counter', async () => {
+  it('save publishes raw events, deletes outbox ids, creates snapshot and resets counter', async () => {
     const a = new TestAgg('a1', 10, 1, true);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(
       mkPersist([{ modelName:'m',eventType:'E',eventVersion:1,requestId:'r',blockHeight:1,payload:'{}',timestamp:1 }])
@@ -90,16 +83,17 @@ describe('EventStoreService', () => {
     adapter.hasBacklogBefore.mockResolvedValue(false);
     adapter.hasAnyPendingAfterWatermark.mockResolvedValue(false);
 
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
+    expect(readSvc.cache.set).toHaveBeenCalledWith('a1', a);
     expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledTimes(1);
     expect(adapter.deleteOutboxByIds).toHaveBeenCalledWith(['1','2']);
     expect(adapter.createSnapshot).toHaveBeenCalledWith(a, { minKeep: 2, keepWindow: 0 });
     expect(a.resetSnapshotCounter).toHaveBeenCalled();
   });
 
-  it('save strict-drain when backlog exists', async () => {
+  it('save uses strict drain when backlog exists', async () => {
     const a = new TestAgg('a1', 10, 1, false);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(true);
@@ -110,98 +104,42 @@ describe('EventStoreService', () => {
       })
       .mockResolvedValueOnce(0);
 
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
     expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledTimes(1);
     expect(adapter.deleteOutboxByIds).not.toHaveBeenCalled();
+    expect(adapter.fetchDeliverAckChunk).toHaveBeenCalledTimes(2);
   });
 
-  it('save strict-drain when pending after watermark', async () => {
+  it('save uses strict drain when pending after watermark', async () => {
     const a = new TestAgg('a1', 10, 1, false);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(false);
     adapter.hasAnyPendingAfterWatermark.mockResolvedValue(true);
     adapter.fetchDeliverAckChunk.mockResolvedValueOnce(0);
 
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
     expect(pub.publisher.publishWireStreamBatchWithAck).not.toHaveBeenCalled();
     expect(adapter.fetchDeliverAckChunk).toHaveBeenCalled();
   });
 
-  it('rollback clears cache, rolls back and rehydrates, then saves modelsToSave', async () => {
+  it('rollback clears cache, rolls back, and saves modelsToSave', async () => {
     const m1 = new TestAgg('a1', 10, 1);
     const m2 = new TestAgg('a2', 20, 2);
     const ms = new TestAgg('b1', 1, 1);
-    adapter.rehydrateAtHeight.mockResolvedValue(undefined);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(false);
     adapter.hasAnyPendingAfterWatermark.mockResolvedValue(false);
 
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    await svc.save(m1 as any);
-
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.rollback({ modelsToRollback: [m1 as any, m2 as any], blockHeight: 5, modelsToSave: [ms as any] });
 
+    expect(readSvc.cache.del).toHaveBeenCalledWith('a1');
+    expect(readSvc.cache.del).toHaveBeenCalledWith('a2');
     expect(adapter.rollbackAggregates).toHaveBeenCalledWith(['a1','a2'], 5);
-    expect(adapter.rehydrateAtHeight).toHaveBeenCalledTimes(2);
-  });
-
-  it('getOne returns from cache on second call', async () => {
-    const m = new TestAgg('a1', 0, 0);
-    adapter.findLatestSnapshot.mockResolvedValue(null);
-    adapter.applyEventsToAggregate.mockResolvedValue(undefined);
-
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    await svc.getOne(m as any);
-    await svc.getOne(m as any);
-    expect(adapter.applyEventsToAggregate).toHaveBeenCalledTimes(1);
-  });
-
-  it('getOne hydrates from snapshot when available', async () => {
-    const m = new TestAgg('a1', 0, 0);
-    adapter.findLatestSnapshot.mockResolvedValue({ blockHeight: 7 });
-    adapter.createSnapshotAtHeight.mockResolvedValue({ aggregateId:'a1', version:3, blockHeight:7, payload:{ s:1 } });
-    adapter.applyEventsToAggregate.mockResolvedValue(undefined);
-
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    await svc.getOne(m as any);
-
-    expect(m.fromSnapshot).toHaveBeenCalledWith({ aggregateId:'a1', version:3, blockHeight:7, payload:{ s:1 } });
-    expect(adapter.applyEventsToAggregate).toHaveBeenCalledWith(m, m.version);
-  });
-
-  it('getAtBlockHeight reconstructs at given height', async () => {
-    const m = new TestAgg('a1', 0, 0);
-    adapter.createSnapshotAtHeight.mockResolvedValue({ aggregateId:'a1', version:2, blockHeight:5, payload:{ x:1 } });
-    const svc = new EventStoreService<any>( adapter as any, pub as any, {});
-    await svc.getAtBlockHeight(m as any, 5);
-    expect(m.fromSnapshot).toHaveBeenCalledWith({ aggregateId:'a1', version:2, blockHeight:5, payload:{ x:1 } });
-  });
-  
-  it('drain error schedules retry and stops after successful retry', async () => {
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    adapter.fetchDeliverAckChunk
-      .mockRejectedValueOnce(new Error('boom'))
-      .mockResolvedValueOnce(0);
-
-    await expect((svc as any).drainOutboxCompletely()).rejects.toThrow(/boom/);
-
-    const timer = (svc as any).retryTimer;
-    expect(timer).toBeTruthy();
-
-    await timer.trigger();
-    expect((timer as any)._didReset).toBe(true);
-    expect((timer as any)._destroyed).toBe(true);
-    expect((svc as any).retryTimer).toBeNull();
-  });
-
-  it('onModuleDestroy destroys retry timer', () => {
-    const svc = new EventStoreService<any>(adapter as any, pub as any, {});
-    (svc as any).retryTimer = { destroy: jest.fn() };
-    svc.onModuleDestroy();
-    expect((svc as any).retryTimer).toBeNull();
+    expect(adapter.persistAggregatesAndOutbox).toHaveBeenCalledWith([ms]);
   });
 });

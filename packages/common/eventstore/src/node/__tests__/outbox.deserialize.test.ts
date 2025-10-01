@@ -1,6 +1,6 @@
 import 'reflect-metadata';
-import { deserializeToOutboxRaw } from '../outbox.deserialize';
-import { CompressionUtils } from '../../node/compression';
+import { toWireEventRecord } from '../outbox.deserialize';
+import { CompressionUtils } from '../compression';
 
 jest.mock('../compression', () => ({
   CompressionUtils: {
@@ -8,46 +8,46 @@ jest.mock('../compression', () => ({
   },
 }));
 
-describe('deserializeToOutboxRaw()', () => {
+describe('toWireEventRecord()', () => {
   beforeEach(() => {
     jest.resetAllMocks();
   });
 
   it('reads plain payload buffer without decompression', async () => {
     const row: any = {
-      aggregateId: 'A',
-      eventType: 'E',
-      eventVersion: 5n as any,
-      requestId: 'r',
-      blockHeight: 10,
-      payload: Buffer.from(JSON.stringify({ a: 1 }), 'utf8'),
+      aggregateId: 'M',
+      eventType: 'X',
+      eventVersion: 1,
+      requestId: 'q',
+      blockHeight: 2,
+      payload: Buffer.from('{"ok":true}', 'utf8'),
       isCompressed: false,
-      timestamp: 1234567890123n as any,
+      timestamp: 1,
     };
-    const rec = await deserializeToOutboxRaw(row);
-    expect(rec.modelName).toBe('A');
-    expect(rec.eventType).toBe('E');
-    expect(rec.eventVersion).toBe(5);
-    expect(rec.requestId).toBe('r');
-    expect(rec.blockHeight).toBe(10);
-    expect(typeof rec.payload).toBe('string');
-    expect(rec.payload).toBe(row.payload.toString('utf8'));
-    expect(rec.timestamp).toBe(Number(row.timestamp));
+    const rec = await toWireEventRecord(row);
+    expect(rec.modelName).toBe('M');
+    expect(rec.eventType).toBe('X');
+    expect(rec.eventVersion).toBe(1);
+    expect(rec.requestId).toBe('q');
+    expect(rec.blockHeight).toBe(2);
+    expect(rec.payload).toBe('{"ok":true}');
+    expect(rec.timestamp).toBe(1);
+    expect(CompressionUtils.decompressBufferToString).not.toHaveBeenCalled();
   });
 
-  it('decompresses when isCompressed is true', async () => {
+  it('uses decompress for compressed payload, keeps JSON string', async () => {
     (CompressionUtils.decompressBufferToString as jest.Mock).mockResolvedValue("{'ok':true}");
     const row: any = {
       aggregateId: 'M',
       eventType: 'X',
-      eventVersion: 2,
+      eventVersion: 1,
       requestId: 'q',
-      blockHeight: 7,
-      payload: Buffer.from('z'),
+      blockHeight: 2,
+      payload: Buffer.from('X'),
       isCompressed: true,
-      timestamp: 111,
+      timestamp: 1,
     };
-    const rec = await deserializeToOutboxRaw(row);
+    const rec = await toWireEventRecord(row);
     expect(CompressionUtils.decompressBufferToString).toHaveBeenCalled();
     expect(rec.payload).toBe("{'ok':true}");
   });
@@ -63,7 +63,7 @@ describe('deserializeToOutboxRaw()', () => {
       isCompressed: false,
       timestamp: 1,
     };
-    const rec = await deserializeToOutboxRaw(row);
+    const rec = await toWireEventRecord(row);
     expect(rec.blockHeight).toBe(-1);
   });
 });

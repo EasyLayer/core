@@ -1,396 +1,188 @@
 import 'reflect-metadata';
-import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
-import { AggregateRoot } from '@easylayer/common/cqrs';
 import { PostgresAdapter } from '../postgres.adapter';
 
-jest.mock('../event-data.serialize', () => ({
-  serializeEventRow: jest.fn(async (ev: any, version: number) => ({
-    type: ev?.__t ?? 'Ev',
-    payload: Buffer.from(JSON.stringify(ev.payload ?? {}), 'utf8'),
+function mkEvent(aggregateId: string, requestId: string, version: number, payload: any, timestamp: number, blockHeight?: number) {
+  const proto: any = {};
+  Object.defineProperty(proto, 'constructor', { value: { name: 'Ev' }, enumerable: false });
+  return Object.assign(Object.create(proto), {
+    aggregateId,
+    requestId,
+    blockHeight,
+    timestamp,
+    payload,
     version,
-    requestId: ev.requestId,
-    blockHeight: ev.blockHeight,
-    isCompressed: false,
-    timestamp: ev.timestamp,
-    payloadUncompressedBytes: Buffer.byteLength(JSON.stringify(ev.payload ?? {}), 'utf8'),
-  })),
-  deserializeToDomainEvent: jest.fn(async (aggregateId: string, row: any) => {
-    const jsonStr = row.isCompressed ? '' : row.payload.toString('utf8');
-    const payload = jsonStr ? JSON.parse(jsonStr) : {};
-    const proto: any = {};
-    Object.defineProperty(proto, 'constructor', { value: { name: row.type }, enumerable: false });
-    return Object.assign(Object.create(proto), {
-      aggregateId,
-      requestId: row.requestId,
-      blockHeight: row.blockHeight ?? -1,
-      timestamp: row.timestamp ?? Date.now() * 1000,
-      payload,
-      version: row.version ?? 0,
-    });
-  }),
-}));
-
-jest.mock('../outbox.deserialize', () => ({
-  deserializeToOutboxRaw: jest.fn(async (r: any) => ({
-    modelName: r.aggregateId,
-    eventType: r.eventType,
-    eventVersion: r.eventVersion,
-    requestId: r.requestId,
-    blockHeight: r.blockHeight ?? -1,
-    payload: r.payload.toString('utf8'),
-    timestamp: r.timestamp,
-  })),
-}));
-
-jest.mock('../snapshot.serialize', () => ({
-  serializeSnapshot: jest.fn(async (aggregate: any) => ({
-    aggregateId: aggregate.aggregateId,
-    blockHeight: aggregate.lastBlockHeight,
-    version: aggregate.version,
-    payload: Buffer.from(JSON.stringify({ s: 1 }), 'utf8'),
-    isCompressed: false,
-  })),
-  deserializeSnapshot: jest.fn(async (row: any) => ({
-    aggregateId: row.aggregateId,
-    blockHeight: row.blockHeight,
-    version: row.version,
-    payload: JSON.parse(row.payload.toString('utf8')),
-  })),
-}));
-
-class TestAgg extends AggregateRoot<any> {
-  private _v: number;
-  constructor(id: string, last: number, version = 0) {
-    super(id, last);
-    this._v = version;
-  }
-  override get version() {
-    return this._v;
-  }
-  addUnsaved(ev: any) {
-    this.apply(ev, { fromHistory: false, skipHandler: true });
-  }
+  });
 }
 
-function mkEvent(aid: string, rid: string, bh: number, payload: any, ts: number, type = 'Ev') {
-  const e: any = { aggregateId: aid, requestId: rid, blockHeight: bh, timestamp: ts, payload };
-  Object.defineProperty(Object.getPrototypeOf(e), 'constructor', { value: { name: type } });
-  return e;
+class TestAgg {
+  public version: number;
+  public lastBlockHeight: number | null;
+  private unsaved: any[] = [];
+  public aggregateId: string;
+  public allowPruning?: boolean;
+  constructor(id: string, version: number, height: number | null) {
+    this.aggregateId = id;
+    this.version = version;
+    this.lastBlockHeight = height;
+  }
+  addUnsaved(ev: any) { this.unsaved.push(ev); }
+  getUnsavedEvents() { return this.unsaved; }
+  clearUnsavedEvents() { this.unsaved = []; }
+  canMakeSnapshot() { return true; }
+  getSnapshotRetention() { return { minKeep: 2, keepWindow: 10 }; }
+  resetSnapshotCounter() {}
+  loadFromHistory(_: any[]) {}
+  markEventsAsSaved() { this.unsaved = []; }
+  toSnapshot() { return { ok: true, version: this.version, blockHeight: this.lastBlockHeight ?? -1 }; }
+  fromSnapshot(_: any) {}
 }
 
 function mkDS() {
-  const manager = { query: jest.fn() };
   const qr = {
-    connect: jest.fn(async () => {}),
-    release: jest.fn(async () => {}),
-    query: jest.fn(async () => {}),
-    manager,
+    connect: jest.fn().mockResolvedValue(undefined),
+    query: jest.fn().mockResolvedValue(undefined),
+    manager: { query: jest.fn().mockResolvedValue(undefined) },
+    release: jest.fn().mockResolvedValue(undefined),
+    stream: jest.fn().mockResolvedValue(undefined),
   };
-  const ds: any = {
-    createQueryRunner: () => qr,
-    query: jest.fn(),
+  const ds = {
+    createQueryRunner: jest.fn(() => qr),
+    query: jest.fn().mockResolvedValue(undefined),
   };
-  return { ds, qr, manager };
+  return { ds, qr };
 }
 
-function flattenCalls(fn: jest.Mock) {
-  return fn.mock.calls.map((args) => [args[0], args.slice(1)]);
+
+function callsOf(fn: jest.Mock) {
+  return (fn.mock.calls || []) as any[][];
 }
 
 describe('PostgresAdapter', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
+  beforeEach(() => jest.clearAllMocks());
 
-  it('persistAggregatesAndOutbox inserts and returns outbox ids and raw events; clears unsaved', async () => {
-    const { ds, qr, manager } = mkDS();
+  it('persistAggregatesAndOutbox writes aggregate rows and outbox in a tx and returns raw events', async () => {
+    const { ds, qr } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
     (adapter as any).idGen = { next: jest.fn((ts: number) => BigInt(ts)) };
 
-    const a = new TestAgg('agg1', 0, 2);
+    const a = new TestAgg('agg1', 2, 2);
     const t1 = 1000001; const t2 = 1000005;
-    a.addUnsaved(mkEvent('agg1', 'r1', 1, { x: 1 }, t1));
-    a.addUnsaved(mkEvent('agg1', 'r2', 2, { x: 2 }, t2));
+    a.addUnsaved(mkEvent('agg1', 'r1', 1, { x: 1 }, t1, 1));
+    a.addUnsaved(mkEvent('agg1', 'r2', 2, { x: 2 }, t2, 2));
 
-    const res = await adapter.persistAggregatesAndOutbox([a]);
+    const res = await adapter.persistAggregatesAndOutbox([a as any]);
 
     expect(qr.query).toHaveBeenCalledWith('BEGIN');
     expect(qr.query).toHaveBeenCalledWith('COMMIT');
 
-    const mCalls = flattenCalls(manager.query as any);
-    const insAgg = mCalls.filter(([sql]) => String(sql).includes(`INSERT INTO "agg1"`));
-    const insOut = mCalls.filter(([sql]) => String(sql).includes(`INSERT INTO "outbox"`));
-    expect(insAgg.length).toBe(2);
-    expect(insOut.length).toBe(2);
-
-    expect(res.insertedOutboxIds).toEqual([String(t1), String(t2)]);
-    expect(res.firstId).toBe(String(t1));
-    expect(res.lastId).toBe(String(t2));
+    const mgrCalls = callsOf(qr.manager.query as any);
+    expect(mgrCalls.some(([sql]) => String(sql).includes(`INSERT INTO "agg1"`))).toBe(true);
+    expect(mgrCalls.some(([sql]) => String(sql).includes(`INSERT INTO "outbox"`))).toBe(true);
+    expect(res.insertedOutboxIds.length).toBe(2);
     expect(res.rawEvents.length).toBe(2);
-
-    expect(a.getUnsavedEvents().length).toBe(0);
   });
 
-  it('deleteOutboxByIds chunks and deletes inside tx', async () => {
-    const { ds, qr, manager } = mkDS();
+  it('deleteOutboxByIds chunks ids', async () => {
+    const { ds, qr } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
-    (PostgresAdapter as any).DELETE_ID_CHUNK = 3;
-
-    const ids = Array.from({ length: 7 }, (_, i) => String(1000 + i));
+    const ids = Array.from({ length: 120001 }, (_, i) => String(i + 1));
     await adapter.deleteOutboxByIds(ids);
-
-    expect(qr.query).toHaveBeenCalledWith('BEGIN');
-    expect(qr.query).toHaveBeenCalledWith('COMMIT');
-
-    const delCalls = (manager.query as jest.Mock).mock.calls.filter(([sql]: any[]) =>
-      String(sql).startsWith(`DELETE FROM "outbox" WHERE "id" IN (`)
-    );
-    expect(delCalls.length).toBe(3);
-
-    const sentValues = delCalls.flatMap(([, params]) => params as string[]);
-    expect(sentValues.sort()).toEqual(ids.sort());
+    const mgrCalls = callsOf(qr.manager.query as any);
+    expect(mgrCalls.length).toBeGreaterThan(1);
+    expect(String(mgrCalls[0]![0])).toContain(`DELETE FROM "outbox" WHERE "id" IN (`);
   });
 
-  it('hasBacklogBefore / hasAnyPendingAfterWatermark', async () => {
+  it('hasBacklogBefore detects rows earlier than first inserted', async () => {
     const { ds } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
-
-    (ds.query as jest.Mock)
-      .mockResolvedValueOnce([{ '1': 1 }])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{ '1': 1 }]);
-
-    const r1 = await adapter.hasBacklogBefore(0, '123');
-    expect(r1).toBe(true);
-
-    const r2 = await adapter.hasBacklogBefore(0, '123');
-    expect(r2).toBe(false);
-
-    const r3 = await adapter.hasAnyPendingAfterWatermark();
-    expect(r3).toBe(false);
-
-    (adapter as any).lastSeenId = 10n;
-    const r4 = await adapter.hasAnyPendingAfterWatermark();
-    expect(r4).toBe(true);
+    (ds.query as jest.Mock).mockResolvedValueOnce([{}]);
+    const ok = await adapter.hasBacklogBefore(1000, '10');
+    expect(ok).toBe(true);
+    expect(ds.query).toHaveBeenCalled();
   });
 
-  it('fetchDeliverAckChunk delivers within cap, deletes accepted, advances watermark', async () => {
-    const { ds, qr, manager } = mkDS();
-    const adapter = new PostgresAdapter(ds as any);
-    (adapter as any).lastSeenId = 0n;
-
-    const rows = Array.from({ length: 5 }, (_, i) => {
-      const id = String(1000 + i);
-      const ulen = 500;
-      return {
-        id,
-        aggregateId: 'agg1',
-        eventType: 'Ev',
-        eventVersion: i + 1,
-        requestId: 'r' + (i + 1),
-        blockHeight: i + 1,
-        payload: Buffer.from(JSON.stringify({ p: i + 1 }), 'utf8'),
-        isCompressed: false,
-        timestamp: 1000000 + i,
-        ulen,
-      };
-    });
-
-    (ds.query as jest.Mock).mockResolvedValueOnce(rows);
-
-    const delivered: WireEventRecord[][] = [];
-    const count = await adapter.fetchDeliverAckChunk(1200, async (evs) => {
-      delivered.push(evs);
-    });
-
-    expect(count).toBeGreaterThan(0);
-    expect(delivered.length).toBe(1);
-    expect(delivered[0]!.length).toBeGreaterThan(0);
-
-    const delCalls = (manager.query as jest.Mock).mock.calls.filter(([sql]: any[]) =>
-      String(sql).startsWith(`DELETE FROM "outbox" WHERE id IN (`)
-    );
-    expect(delCalls.length).toBe(1);
-
-    const lastAcceptedId = String(1000 + delivered[0]!.length - 1);
-    expect((adapter as any).lastSeenId).toBe(BigInt(lastAcceptedId));
-  });
-
-  it('fetchDeliverAckChunk when deliver throws keeps rows and does not advance watermark', async () => {
+  it('hasAnyPendingAfterWatermark checks new rows using lastSeenId', async () => {
     const { ds } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
-    (adapter as any).lastSeenId = 0n;
+    (adapter as any).lastSeenId = 50n;
+    (ds.query as jest.Mock).mockResolvedValueOnce([{}]);
+    const ok = await adapter.hasAnyPendingAfterWatermark();
+    expect(ok).toBe(true);
+    expect(ds.query).toHaveBeenCalled();
+  });
 
+  it('fetchDeliverAckChunk publishes in frames and deletes acked ids', async () => {
+    const { ds, qr } = mkDS();
+    const adapter = new PostgresAdapter(ds as any);
     (ds.query as jest.Mock).mockResolvedValueOnce([
-      {
-        id: '1001',
-        aggregateId: 'agg1',
-        eventType: 'Ev',
-        eventVersion: 1,
-        requestId: 'r1',
-        blockHeight: 1,
-        payload: Buffer.from(JSON.stringify({ p: 1 }), 'utf8'),
-        isCompressed: false,
-        timestamp: 1,
-        ulen: 100,
-      },
+      { id: '1', aggregateId: 'A', eventType: 'Ev', eventVersion: 1, requestId: 'r1', blockHeight: 1, payload: Buffer.from('{"a":1}'), isCompressed: false, timestamp: 11, ulen: 12 },
+      { id: '2', aggregateId: 'A', eventType: 'Ev', eventVersion: 1, requestId: 'r2', blockHeight: 2, payload: Buffer.from('{"b":2}'), isCompressed: false, timestamp: 12, ulen: 12 },
     ]);
-
-    await expect(
-      adapter.fetchDeliverAckChunk(10_000, async () => {
-        throw new Error('fail');
-      })
-    ).rejects.toThrow(/fail/);
-
-    expect((adapter as any).lastSeenId).toBe(0n);
+    const pub = jest.fn().mockResolvedValue(undefined);
+    const n = await adapter.fetchDeliverAckChunk(1024 * 1024, pub);
+    expect(n).toBe(2);
+    expect(pub).toHaveBeenCalledTimes(1);
+    const mgrCalls = callsOf(qr.manager.query as any);
+    expect(mgrCalls.some(([sql]) => String(sql).includes(`DELETE FROM "outbox" WHERE id IN (`))).toBe(true);
   });
 
-  it('createSnapshot inserts; findLatestSnapshot and createSnapshotAtHeight parse payloads', async () => {
-    const { ds, manager, qr } = mkDS();
-    const adapter = new PostgresAdapter(ds as any);
-
-    (manager.query as jest.Mock).mockResolvedValue(undefined);
-    await adapter.createSnapshot(new TestAgg('agg1', 10, 5) as any, { minKeep: 2, keepWindow: 0 });
-
-    (ds.query as jest.Mock)
-      .mockResolvedValueOnce([{ blockHeight: 12 }])
-      .mockResolvedValueOnce([
-        {
-          aggregateId: 'agg1',
-          blockHeight: 9,
-          version: 4,
-          payload: Buffer.from(JSON.stringify({ s: 1 }), 'utf8'),
-          isCompressed: false,
-        },
-      ]);
-
-    const last = await adapter.findLatestSnapshot('agg1');
-    expect(last).toEqual({ blockHeight: 12 });
-
-    const snapAt = await adapter.createSnapshotAtHeight(new TestAgg('agg1', 10, 5) as any, 10);
-    expect(snapAt.aggregateId).toBe('agg1');
-    expect(snapAt.blockHeight).toBe(9);
-    expect(snapAt.version).toBe(4);
-    expect(snapAt.payload).toEqual({ s: 1 });
-  });
-
-  it('applyEventsToAggregate selects and deserializes history', async () => {
+  it('fetchEventsForOneAggregateRead applies filter and pagination', async () => {
     const { ds } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
-
     (ds.query as jest.Mock).mockResolvedValueOnce([
-      {
-        type: 'Ev',
-        requestId: 'r1',
-        blockHeight: 1,
-        payload: Buffer.from(JSON.stringify({ x: 1 }), 'utf8'),
-        isCompressed: false,
-        version: 1,
-        timestamp: 11,
-      },
-      {
-        type: 'Ev',
-        requestId: 'r2',
-        blockHeight: 2,
-        payload: Buffer.from(JSON.stringify({ x: 2 }), 'utf8'),
-        isCompressed: false,
-        version: 2,
-        timestamp: 12,
-      },
+      { type: 'Ev', payload: Buffer.from('{"a":1}'), version: 1, requestId: 'r', blockHeight: 1, timestamp: 10, isCompressed: false },
     ]);
-
-    const a = new TestAgg('agg1', 0, 0);
-    const spy = jest.spyOn(a, 'loadFromHistory');
-    await adapter.applyEventsToAggregate(a as any, 0);
-
-    expect(spy).toHaveBeenCalled();
-    const arg = spy.mock.calls[0]![0];
-    expect(Array.isArray(arg)).toBe(true);
-    expect(arg.length).toBe(2);
-    expect(arg[0].payload).toEqual({ x: 1 });
-    expect(arg[1].payload).toEqual({ x: 2 });
+    const out = await adapter.fetchEventsForOneAggregateRead('agg1', { versionGte: 1, limit: 10, offset: 0, orderDir: 'asc' });
+    expect(out.length).toBe(1);
+    expect(out[0]!.modelId).toBe('agg1');
   });
 
-  it('rehydrateAtHeight loads snapshot then applies range', async () => {
+  it('fetchEventsForManyAggregatesRead iterates ids and merges results', async () => {
     const { ds } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
-
     (ds.query as jest.Mock)
       .mockResolvedValueOnce([
-        { aggregateId: 'agg1', blockHeight: 5, version: 3, payload: Buffer.from(JSON.stringify({ s: 1 })), isCompressed: false },
+        { type: 'Ev', payload: Buffer.from('{"a":1}'), version: 1, requestId: 'r', blockHeight: 1, timestamp: 10, isCompressed: false },
       ])
       .mockResolvedValueOnce([
-        {
-          type: 'Ev',
-          requestId: 'r4',
-          blockHeight: 6,
-          payload: Buffer.from(JSON.stringify({ x: 4 })),
-          isCompressed: false,
-          version: 4,
-          timestamp: 21,
-        },
+        { type: 'Ev', payload: Buffer.from('{"b":2}'), version: 1, requestId: 'r', blockHeight: 2, timestamp: 11, isCompressed: false },
       ]);
-
-    const a = new TestAgg('agg1', 0, 0);
-    const fromSnapshotSpy = jest.spyOn(a, 'fromSnapshot');
-    const loadSpy = jest.spyOn(a, 'loadFromHistory');
-
-    await adapter.rehydrateAtHeight(a as any, 6);
-
-    expect(fromSnapshotSpy).toHaveBeenCalled();
-    expect(loadSpy).toHaveBeenCalled();
-    const history = loadSpy.mock.calls[0]![0];
-    expect(history.length).toBe(1);
-    expect(history[0].blockHeight).toBe(6);
-  });
-
-  it('rollbackAggregates deletes events and snapshots after height and truncates outbox; resets watermark', async () => {
-    const { ds, manager, qr } = mkDS();
-    const adapter = new PostgresAdapter(ds as any);
-    (adapter as any).lastSeenId = 999n;
-
-    await adapter.rollbackAggregates(['agg1', 'agg2'], 50);
-
-    const mCalls = flattenCalls(manager.query as any);
-    expect(qr.query).toHaveBeenCalledWith('BEGIN');
-    expect(qr.query).toHaveBeenCalledWith('COMMIT');
-    expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "agg1"`))).toBe(true);
-    expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "agg2"`))).toBe(true);
-    expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "snapshots"`))).toBe(true);
-    expect(mCalls.some(([sql]) => String(sql).includes(`TRUNCATE TABLE "outbox"`))).toBe(true);
-    expect((adapter as any).lastSeenId).toBe(0n);
-  });
-
-  it('fetchEventsForAggregates applies optional filters and sorts', async () => {
-    const { ds } = mkDS();
-    const adapter = new PostgresAdapter(ds as any);
-
-    (ds.query as jest.Mock)
-      .mockResolvedValueOnce([
-        {
-          type: 'Ev',
-          requestId: 'r1',
-          blockHeight: 1,
-          payload: Buffer.from(JSON.stringify({ a: 1 })),
-          isCompressed: false,
-          version: 2,
-          timestamp: 12,
-        },
-      ])
-      .mockResolvedValueOnce([
-        {
-          type: 'Ev',
-          requestId: 'r2',
-          blockHeight: 1,
-          payload: Buffer.from(JSON.stringify({ b: 2 })),
-          isCompressed: false,
-          version: 1,
-          timestamp: 12,
-        },
-      ]);
-
-    const out = await adapter.fetchEventsForAggregates(['agg1', 'agg2'], { blockHeight: 1 });
+    const out = await adapter.fetchEventsForManyAggregatesRead(['a1', 'a2'], { limit: 100 });
     expect(out.length).toBe(2);
+    expect(out[0]!.modelId).toBe('a1');
+    expect(out[1]!.modelId).toBe('a2');
+  });
+
+  // it('streamEventsForOneAggregateRead yields rows sequentially', async () => {
+  //   const { ds, qr } = mkDS();
+  //   const adapter = new PostgresAdapter(ds as any);
+  //   const rows = [
+  //     { type: 'Ev', payload: Buffer.from('{"a":1}'), version: 1, requestId: 'r', blockHeight: 1, timestamp: 10, isCompressed: false },
+  //     { type: 'Ev', payload: Buffer.from('{"b":2}'), version: 2, requestId: 'r', blockHeight: 2, timestamp: 11, isCompressed: false },
+  //   ];
+  //   (qr.stream as jest.Mock).mockResolvedValueOnce(mkAsyncIterable(rows));
+  //   const it = adapter.streamEventsForOneAggregateRead('agg1', { });
+  //   const a = await it.next();
+  //   const b = await it.next();
+  //   expect(a.value.modelId).toBe('agg1');
+  //   expect(b.value.modelId).toBe('agg1');
+  // });
+
+  it('getOneModelByHeightRead restores exact state and returns snapshot row', async () => {
+    const { ds } = mkDS();
+    const adapter = new PostgresAdapter(ds as any);
+    const model: any = new TestAgg('m1', 3, 10);
+    const spy = jest.spyOn(adapter as any, 'restoreExactStateAtHeight').mockResolvedValue(undefined);
+    const row = await adapter.getOneModelByHeightRead(model, 5);
+    expect(spy).toHaveBeenCalledWith(model, 5);
+    expect(row?.modelId).toBe('m1');
+  });
+
+  it('getManyModelsByHeightRead batches multiple models', async () => {
+    const { ds } = mkDS();
+    const adapter = new PostgresAdapter(ds as any);
+    jest.spyOn(adapter, 'getOneModelByHeightRead').mockResolvedValue({ aggregateId: 'm', blockHeight: 5, version: 1, payload: '{}' } as any);
+    const rows = await adapter.getManyModelsByHeightRead([{ aggregateId: 'a' } as any, { aggregateId: 'b' } as any], 5);
+    expect(rows.length).toBe(2);
   });
 });

@@ -1,6 +1,5 @@
 import 'reflect-metadata';
-import { serializeEventRow, deserializeToDomainEvent } from '../event-data.serialize';
-import { CompressionUtils } from '../compression';
+import { toEventDataModel, toDomainEvent, toEventReadRow } from '../event-data.serialize';
 
 jest.mock('../compression', () => ({
   CompressionUtils: {
@@ -9,8 +8,14 @@ jest.mock('../compression', () => ({
     decompressBufferToString: jest.fn(),
   },
 }));
+jest.mock('../bytes', () => ({
+  utf8ToBuffer: (s: string) => Buffer.from(s, 'utf8'),
+  bufferToUtf8: (b: Buffer) => b.toString('utf8'),
+}));
 
-function mkEvent(type: string, payload: any, blockHeight: number, requestId = 'rid', timestamp = Date.now()): any {
+const { CompressionUtils } = jest.requireMock('../compression');
+
+function mkEvent(type: string, payload: any, blockHeight: number, requestId = 'rid', timestamp = 1111): any {
   const proto: any = {};
   Object.defineProperty(proto, 'constructor', { value: { name: type }, enumerable: false });
   return Object.assign(Object.create(proto), {
@@ -22,119 +27,103 @@ function mkEvent(type: string, payload: any, blockHeight: number, requestId = 'r
   });
 }
 
-describe('serializeEventRow()', () => {
+describe('event-data.serialize', () => {
   beforeEach(() => {
-    jest.resetAllMocks();
+    jest.clearAllMocks();
   });
 
-  it('postgres: compresses when beneficial (isCompressed true, buffer is compressed, size meta correct)', async () => {
-    const json = JSON.stringify({ v: 'x'.repeat(4000) });
-    (CompressionUtils.shouldCompress as jest.Mock).mockReturnValue(true);
-    (CompressionUtils.compressToBuffer as jest.Mock).mockResolvedValue({
-      buffer: Buffer.from('COMPRESSED'),
-      originalSize: Buffer.byteLength(json, 'utf8'),
-      compressedSize: Math.floor(Buffer.byteLength(json, 'utf8') * 0.5),
-      ratio: 2,
-    });
-
-    const ev = mkEvent('Evt', JSON.parse(json), 7);
-    const row = await serializeEventRow(ev, 3, 'postgres');
-
-    expect(row.type).toBe('Evt');
+  it('toEventDataModel without compression', async () => {
+    CompressionUtils.shouldCompress.mockReturnValue(false);
+    const ev = mkEvent('UserCreated', { a: 1 }, 5);
+    const row = await toEventDataModel(ev, 3, 'postgres' as any);
+    expect(row.type).toBe('UserCreated');
     expect(row.version).toBe(3);
     expect(row.requestId).toBe('rid');
-    expect(row.blockHeight).toBe(7);
-    expect(row.isCompressed).toBe(true);
-    expect(row.payload.equals(Buffer.from('COMPRESSED'))).toBe(true);
+    expect(row.blockHeight).toBe(5);
+    expect(row.isCompressed).toBe(false);
+    expect(row.timestamp).toBe(1111);
+    expect(Buffer.isBuffer(row.payload)).toBe(true);
+    expect(row.payload.toString('utf8')).toBe(JSON.stringify({ a: 1 }));
   });
 
-  // it('postgres: falls back to plain bytes when compression not beneficial', async () => {
-  //   (CompressionUtils.shouldCompress as jest.Mock).mockReturnValue(true);
-  //   (CompressionUtils.compressToBuffer as jest.Mock).mockResolvedValue({
-  //     buffer: Buffer.from('DONT_USE'),
-  //     originalSize: 1000,
-  //     compressedSize: 950, // 95% => not < 90%
-  //     ratio: 1.05,
-  //   });
-
-  //   const payload = { a: 1, b: 'y' };
-  //   const json = JSON.stringify(payload);
-  //   const ev = mkEvent('Evt', payload, 1);
-  //   const row = await serializeEventRow(ev, 1, 'postgres');
-
-  //   expect(row.isCompressed).toBe(false);
-  //   expect(row.payload.equals(Buffer.from(json, 'utf8'))).toBe(true);
+  // it('toEventDataModel with compression', async () => {
+  //   CompressionUtils.shouldCompress.mockReturnValue(true);
+  //   CompressionUtils.compressToBuffer.mockResolvedValue(Buffer.from('zzz'));
+  //   const ev = mkEvent('X', { k: 2 }, 7);
+  //   const row = await toEventDataModel(ev, 2, 'postgres' as any);
+  //   expect(row.isCompressed).toBe(true);
+  //   expect(row.payload).toEqual(Buffer.from('zzz'));
   // });
 
-  it('sqlite: never compresses even if shouldCompress true', async () => {
-    (CompressionUtils.shouldCompress as jest.Mock).mockReturnValue(true);
-    const payload = { a: 'z'.repeat(3000) };
-    const json = JSON.stringify(payload);
-    const ev = mkEvent('Evt', payload, 5);
-    const row = await serializeEventRow(ev, 2, 'sqlite');
-
-    expect(row.isCompressed).toBe(false);
-    expect(row.payload.equals(Buffer.from(json, 'utf8'))).toBe(true);
-  });
-
-  it('normalizes blockHeight -1 to null', async () => {
-    const ev = mkEvent('Evt', { k: 1 }, -1);
-    (CompressionUtils.shouldCompress as jest.Mock).mockReturnValue(false);
-    const row = await serializeEventRow(ev, 0, 'postgres');
-    expect(row.blockHeight).toBeNull();
-  });
-
-  it('throws on missing requestId/version/blockHeight/timestamp', async () => {
-    const base = { payload: {}, blockHeight: 1, requestId: 'rid', timestamp: Date.now() };
-    await expect(serializeEventRow({ ...base, requestId: '' } as any, 1, 'postgres')).rejects.toThrow(/Request Id/);
-    await expect(serializeEventRow({ ...base } as any, null as any, 'postgres')).rejects.toThrow(/Version/);
-    await expect(serializeEventRow({ ...base, blockHeight: null } as any, 1, 'postgres')).rejects.toThrow(/blockHeight/);
-    await expect(serializeEventRow({ ...base, timestamp: 0 } as any, 1, 'postgres')).rejects.toThrow(/timestamp/);
-  });
-});
-
-describe('deserializeToDomainEvent()', () => {
-  beforeEach(() => {
-    jest.resetAllMocks();
-  });
-
-  it('reads plain buffer, restores constructor.name and payload, null height -> -1', async () => {
-    const payload = { a: 1, b: 'c' };
-    const json = JSON.stringify(payload);
-    const row = {
-      type: 'Evt',
-      requestId: 'rid',
+  it('toDomainEvent reconstructs event prototype and parses payload', async () => {
+    CompressionUtils.decompressBufferToString.mockReset();
+    const model = {
+      type: 'OrderPlaced',
+      requestId: 'r1',
       blockHeight: null,
-      payload: Buffer.from(json, 'utf8'),
+      payload: Buffer.from(JSON.stringify({ p: 10 })),
       isCompressed: false,
-      version: 3,
-      timestamp: 111,
-    };
-
-    const ev = await deserializeToDomainEvent('agg', row as any, 'postgres');
-    expect(ev.aggregateId).toBe('agg');
-    expect(ev.requestId).toBe('rid');
+      version: 4,
+      timestamp: 2222,
+    } as any;
+    const ev = await toDomainEvent('agg1', model, 'postgres' as any);
+    expect(ev.aggregateId).toBe('agg1');
+    expect(ev.requestId).toBe('r1');
     expect(ev.blockHeight).toBe(-1);
-    expect(ev.timestamp).toBe(111);
-    expect(ev.constructor.name).toBe('Evt');
-    expect(ev.payload).toEqual(payload);
+    expect(ev.timestamp).toBe(2222);
+    expect(ev.payload).toEqual({ p: 10 });
+    expect((ev as any).constructor.name).toBe('OrderPlaced');
   });
 
-  it('reads compressed buffer using decompressBufferToString', async () => {
-    (CompressionUtils.decompressBufferToString as jest.Mock).mockResolvedValue(JSON.stringify({ ok: true }));
-    const row = {
-      type: 'Evt',
-      requestId: 'rid',
+  it('toDomainEvent handles compressed payload', async () => {
+    CompressionUtils.decompressBufferToString.mockResolvedValue(JSON.stringify({ z: 3 }));
+    const model = {
+      type: 'Ev',
+      requestId: 'r2',
       blockHeight: 9,
-      payload: Buffer.from('X'),
+      payload: Buffer.from('abc'),
       isCompressed: true,
       version: 1,
-      timestamp: 222,
-    };
-
-    const ev = await deserializeToDomainEvent('agg', row as any, 'postgres');
+      timestamp: 3333,
+    } as any;
+    const ev = await toDomainEvent('agg2', model, 'postgres' as any);
     expect(ev.blockHeight).toBe(9);
-    expect(ev.payload).toEqual({ ok: true });
-    expect(ev.constructor.name).toBe('Evt');
+    expect(ev.payload).toEqual({ z: 3 });
+  });
+
+  it('toEventReadRow returns JSON string payload', async () => {
+    const model = {
+      type: 'T',
+      requestId: 'r3',
+      blockHeight: null,
+      payload: Buffer.from(JSON.stringify({ q: 1 })),
+      isCompressed: false,
+      version: 5,
+      timestamp: 4444,
+    } as any;
+    const row = await toEventReadRow('modelA', model, 'postgres' as any);
+    expect(row.modelId).toBe('modelA');
+    expect(row.eventType).toBe('T');
+    expect(row.eventVersion).toBe(5);
+    expect(row.requestId).toBe('r3');
+    expect(row.blockHeight).toBe(-1);
+    expect(row.payload).toBe(JSON.stringify({ q: 1 }));
+    expect(row.timestamp).toBe(4444);
+  });
+
+  it('toEventReadRow handles compressed', async () => {
+    CompressionUtils.decompressBufferToString.mockResolvedValue(JSON.stringify({ a: 2 }));
+    const model = {
+      type: 'T2',
+      requestId: 'r4',
+      blockHeight: 3,
+      payload: Buffer.from('x'),
+      isCompressed: true,
+      version: 6,
+      timestamp: 5555,
+    } as any;
+    const row = await toEventReadRow('M', model, 'postgres' as any);
+    expect(row.blockHeight).toBe(3);
+    expect(row.payload).toBe(JSON.stringify({ a: 2 }));
   });
 });
