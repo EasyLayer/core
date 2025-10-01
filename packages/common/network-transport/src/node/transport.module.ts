@@ -5,7 +5,7 @@ import type {
   HttpServiceOptions,
   IpcChildOptions,
   IpcParentOptions,
-  WsServerOptions,
+  WsServiceOptions,
   ElectronIpcMainOptions,
 } from './transports';
 import {
@@ -25,7 +25,7 @@ export type ServerTransportConfig =
   | HttpServiceOptions
   | IpcChildOptions
   | IpcParentOptions
-  | WsServerOptions
+  | WsServiceOptions
   | ElectronIpcMainOptions;
 
 export interface TransportModuleOptions {
@@ -58,7 +58,7 @@ export class NetworkTransportModule {
         map.push({ kind, token: IpcParentTransportService });
       }
       if (kind === 'ws') {
-        imports.push(WsTransportModule.forRoot(t as WsServerOptions));
+        imports.push(WsTransportModule.forRoot(t as WsServiceOptions));
         map.push({ kind, token: WsTransportService });
       }
       if (kind === 'electron-ipc-main') {

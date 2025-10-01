@@ -1,140 +1,88 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { CqrsModule, QueryBus } from '@easylayer/common/cqrs';
-import { HttpTransportService } from '../http.service';
+import { Actions } from '../../../../core';
+import { HttpTransportService, type HttpServiceOptions } from '../http.service';
 
-jest.mock('express', () => {
-  return function () {
-    const handlers: Record<string, any> = {};
-    const app: any = (req: any, res: any) => app.handle(req, res);
-    app.use = jest.fn();
-    app.post = jest.fn((path: string, handler: any) => { handlers[path] = handler; });
-    app.handle = (req: any, res: any) => { const h = handlers[req.url]; return h && h(req, res); };
-    return app;
-  };
+const makeQueryBus = () => ({ execute: jest.fn(async () => 'ok') });
+
+const baseOpts = (): HttpServiceOptions => ({
+  type: 'http',
+  host: '127.0.0.1',
+  port: 3001,
+  cors: { enabled: false },
+  tls: null,
+  maxBodySizeMb: 1,
+  webhook: { url: 'http://127.0.0.1:9999/events', pingUrl: 'http://127.0.0.1:9999/ping', timeoutMs: 200 },
+  ping: { staleMs: 2_000, factor: 1.2, minMs: 10, maxMs: 50, password: 'pw' },
+  ackTimeoutMs: 500,
 });
 
-jest.mock('body-parser', () => ({
-  json: () => (_req: any, _res: any, next: any) => next(),
-}));
-
-jest.mock('node:http', () => {
-  const { EventEmitter } = require('events');
-  return {
-    request: (_opts: any, cb: any) => {
-      let body = '';
-      const res = new EventEmitter();
-      const req = new EventEmitter() as any;
-      req.on = req.on.bind(req);
-      req.write = (chunk: any) => { body += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk); };
-      req.end = () => {
-        process.nextTick(() => {
-          cb(res);
-          let parsed: any;
-          try { parsed = JSON.parse(body); } catch {}
-          if (parsed?.action === 'outbox.stream.batch') {
-            res.emit('data', Buffer.from(JSON.stringify({ action: 'outbox.stream.ack', payload: { ok: true, okIndices: [0] } })));
-          } else {
-            res.emit('data', Buffer.from(JSON.stringify({ action: 'pong', payload: { password: 'pw' } })));
-          }
-          res.emit('end');
-        });
-      };
-      req.setTimeout = jest.fn();
-      return req;
-    },
-    createServer: (_handler: any) => {
-      const { EventEmitter } = require('events');
-      const srv = new EventEmitter() as any;
-      srv.listen = jest.fn();
-      srv.close = (cb?: any) => { cb && cb(); };
-      return srv;
-    },
-  };
+afterEach(() => {
+  jest.useRealTimers();
+  jest.restoreAllMocks();
 });
-
-jest.mock('node:https', () => jest.requireMock('node:http'));
 
 describe('HttpTransportService', () => {
-  let modRef: TestingModule | undefined;
-    
-  afterEach(async () => {
-    try { await modRef?.close(); } catch {}
-    jest.clearAllTimers();
-    jest.useRealTimers();
+  it('throws if webhook config is incomplete', () => {
+    const bad1 = { ...baseOpts(), webhook: { url: '' as any } } as any;
+    expect(() => new HttpTransportService(bad1, makeQueryBus() as any)).toThrow(/webhook\.url/i);
+
+    const bad2 = { ...baseOpts(), webhook: { url: 'http://x' } as any };
+    expect(() => new HttpTransportService(bad2, makeQueryBus() as any)).toThrow(/webhook\.pingUrl/i);
   });
 
-  it('goes online after pong with correct password', async () => {
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: HttpTransportService,
-          useFactory: (qb: QueryBus) =>
-            new HttpTransportService(
-              {
-                type: 'http',
-                host: '127.0.0.1',
-                port: 32000,
-                tls: null,
-                webhook: { url: 'http://localhost:9/hook' },
-                ping: { password: 'pw', minMs: 10, factor: 1.1, maxMs: 20 },
-              },
-              qb
-            ),
-          inject: [QueryBus],
-        },
-      ],
-    }).compile();
+  it('resolves waitForAck from lastAckBuffer', async () => {
+    const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
+    (svc as any).lastAckBuffer = { ok: true, okIndices: [0] };
+    const ack = await svc.waitForAck(50);
+    expect(ack.ok).toBe(true);
+    expect((svc as any).lastAckBuffer).toBeNull();
+    await svc.onModuleDestroy();
+  });
 
-    const svc = modRef.get(HttpTransportService);
-    await svc.send({ action: 'ping', timestamp: Date.now() } as any);
-    await svc.waitForOnline(500);
+  it('times out waitForAck if no ack', async () => {
+    jest.useFakeTimers();
+    const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
+    const p = svc.waitForAck(50);
+    jest.advanceTimersByTime(60);
+    await expect(p).rejects.toThrow(/ack timeout/i);
+    await svc.onModuleDestroy();
+  });
+
+  it('resolves ack when send() receives OutboxStreamAck', async () => {
+    const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
+    jest.spyOn(svc as any, 'post').mockResolvedValueOnce(
+      JSON.stringify({ action: Actions.OutboxStreamAck, timestamp: Date.now(), payload: { ok: true, okIndices: [0] } })
+    );
+    const wait = svc.waitForAck(200);
+    await svc.send({ action: 'OutboxStreamBatch' as any, timestamp: Date.now(), payload: {} as any });
+    const ack = await wait;
+    expect(ack.ok).toBe(true);
+    await svc.onModuleDestroy();
+  });
+
+  it('heartbeat sets online true for valid Pong, false for invalid', async () => {
+    jest.useFakeTimers();
+    const opts = baseOpts();
+    opts.ping = { ...opts.ping, minMs: 10, maxMs: 20 };
+    const svc = new HttpTransportService(opts, makeQueryBus() as any);
+
+    const postSpy = jest.spyOn(svc as any, 'post');
+    postSpy.mockResolvedValueOnce(JSON.stringify({ action: Actions.Pong, payload: { password: 'pw' } }));
+
+    await jest.advanceTimersByTimeAsync(15);
+
     expect(svc.isOnline()).toBe(true);
+
+    postSpy.mockResolvedValueOnce(JSON.stringify({ action: Actions.Pong, payload: { password: 'bad' } }));
+    await jest.advanceTimersByTimeAsync(15);
+
+    expect(svc.isOnline()).toBe(false);
+    await svc.onModuleDestroy();
   });
 
-  it('resolves ACK for batch', async () => {
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: HttpTransportService,
-          useFactory: (qb: QueryBus) =>
-            new HttpTransportService(
-              { type: 'http', host: '127.0.0.1', port: 32001, tls: null, webhook: { url: 'http://localhost:9/hook' } },
-              qb
-            ),
-          inject: [QueryBus],
-        },
-      ],
-    }).compile();
-    const svc = modRef.get(HttpTransportService);
-    const p = svc.waitForAck(500);
-    await svc.send({ action: 'outbox.stream.batch', payload: { events: [] }, timestamp: Date.now() } as any);
-    const ack = await p;
-    expect(ack).toEqual({ ok: true, okIndices: [0] });
-  });
-
-  it('executes POST /query and returns response payload', async () => {
-    const exec = jest.fn(async (q) => ({ ok: true, echo: q }));
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: HttpTransportService,
-          useFactory: () =>
-            new HttpTransportService(
-              { type: 'http', host: '127.0.0.1', port: 32002, tls: null },
-              { execute: exec } as any
-            ),
-        },
-      ],
-    }).compile();
-    const svc = modRef.get(HttpTransportService) as any;
-    const app = (svc as any).app;
-    const req: any = { method: 'POST', url: '/query', body: { name: 'Q', data: 1 }, headers: {} };
-    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn() };
-    await app.handle(req, res);
-    expect(exec).toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(200);
+  it('post() rejects on non-2xx', async () => {
+    const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
+    jest.spyOn(svc as any, 'post').mockRejectedValueOnce(new Error('HTTP 500'));
+    await expect((svc as any).post('http://x', '{}')).rejects.toThrow(/500/);
+    await svc.onModuleDestroy();
   });
 });

@@ -30,10 +30,13 @@ export class Publisher implements OnModuleDestroy {
 
   async publishWireStreamBatchWithAck(events: WireEventRecord[]): Promise<void> {
     if (!events.length) return;
+    // 1) Emit locally no matter what (fire-and-forget, but with stable copy)
+    // const batch = events.length > 1 ? events.slice() : events;
+    queueMicrotask(() => this.emitSystemEventsLocally(events));
+
+    // 2) Try remote send+ACK; if offline, let the error occur,
+    // and outbox retries will deliver later. The local issue has already occurred.
     await this.outboxBatchSender.streamWireWithAck(events);
-    // fix the slice so that external mutation of the array does not break local emission
-    const batch = events.length > 1 ? events.slice() : events;
-    queueMicrotask(() => this.emitSystemEventsLocally(batch));
   }
 
   private emitSystemEventsLocally(events: WireEventRecord[]): void {

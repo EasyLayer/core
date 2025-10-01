@@ -1,59 +1,110 @@
+import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
-import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
-import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import { QueryBus } from '@easylayer/common/cqrs';
-import { Actions } from '../../../core';
-import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
+import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
+import type { TransportPort, Message, OutboxStreamAckPayload } from '../../../core';
+import { Actions, buildQuery } from '../../../core';
+
+// -- helpers ------------------------------------------------------------------
+function delay(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function normalize(raw: unknown): Message | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw) as Message;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'object') return raw as Message;
+  return null;
+}
+function assertIpcParentBinding(child: ChildProcess) {
+  const p: any = process;
+  if (p && p.channel) throw new Error('IPC parent: running inside a child; use ipc-child transport here');
+  if (!child || typeof child?.send !== 'function') throw new Error('IPC parent: child.send is not available');
+  if ((child as any).channel == null)
+    throw new Error('IPC parent: child has no IPC channel (stdio must include "ipc")');
+}
 
 export interface IpcParentOptions {
   type: 'ipc-parent';
   child: ChildProcess;
-  timeouts?: { ackMs?: number; onlineMs?: number; pingStaleMs?: number };
-  ping?: { factor?: number; minMs?: number; maxMs?: number; password?: string }; // optional
+  /** Optional shared secret echoed in Pong to validate peer. */
+  password?: string;
+  timeouts?: {
+    onlineMs?: number; // default 2000
+    pingStaleMs?: number; // default 15000
+    ackMs?: number; // default 2000
+  };
+  ping?: {
+    intervalMs?: number; // default 800
+    multiplier?: number; // default 1.6
+    maxIntervalMs?: number; // default 4000
+  };
 }
 
+/**
+ * IPC transport bound to a PARENT process (single child peer).
+ */
 @Injectable()
 export class IpcParentTransportService implements TransportPort, OnModuleDestroy {
   public readonly kind = 'ipc-parent' as const;
+
   private readonly log = new Logger(IpcParentTransportService.name);
 
   private online = false;
   private lastPongAt = 0;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
   private pendingAck: {
+    id: string;
     resolve: (v: OutboxStreamAckPayload) => void;
     reject: (e: any) => void;
     timer: NodeJS.Timeout;
   } | null = null;
+  private ackBuffer: { id: string; payload: OutboxStreamAckPayload } | null = null;
+  private currentBatchCorrelationId: string | null = null;
 
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
 
-  private readonly child: ChildProcess;
-  private readonly onChildMessage = (msg: unknown) => this.onRaw(msg);
+  // exact handler ref to detach
+  private childMessageHandler!: (raw: unknown) => void;
 
   constructor(
     private readonly opts: IpcParentOptions,
     private readonly queryBus: QueryBus
   ) {
-    this.child = opts.child;
-
-    this.child.on('message', this.onChildMessage);
-    this.child.once('exit', () => {
+    assertIpcParentBinding(opts.child);
+    this.childMessageHandler = this.onChildMessage.bind(this);
+    this.opts.child.on('message', this.childMessageHandler);
+    this.opts.child.once('exit', () => {
       this.online = false;
+      this.log.warn('IPC parent: child exited');
     });
-
-    this.startPingLoop();
+    this.startHeartbeat();
   }
 
+  /* eslint-disable no-empty */
   async onModuleDestroy(): Promise<void> {
-    this.stopPingLoop();
-    this.child.off('message', this.onChildMessage);
+    try {
+      this.opts.child.off('message', this.childMessageHandler);
+    } catch {}
+    this.stopHeartbeat();
+    if (this.pendingAck) {
+      clearTimeout(this.pendingAck.timer);
+      this.pendingAck.reject(new Error('IPC parent: transport destroyed'));
+      this.pendingAck = null;
+    }
   }
+  /* eslint-enable no-empty */
 
-  // ----- BATCH/PING SECTION -----
+  // --------------------------------------------------------------------------
+  // TransportPort
+  // --------------------------------------------------------------------------
   isOnline(): boolean {
     const stale = this.opts.timeouts?.pingStaleMs ?? 15_000;
     return this.online && Date.now() - this.lastPongAt < stale;
@@ -61,106 +112,111 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
 
   async waitForOnline(deadlineMs = this.opts.timeouts?.onlineMs ?? 2_000): Promise<void> {
     const start = Date.now();
-    while (!this.isOnline()) {
+    while (Date.now() - start < deadlineMs) {
+      if (this.isOnline()) return;
       this.heartbeatReset?.();
-      if (this.isOnline()) break;
-      if (Date.now() - start >= deadlineMs) throw new Error('IPC parent: not online');
-      await delay(100);
+      await delay(1000);
     }
+    throw new Error(`${this.kind.toUpperCase()}: peer is offline (no valid Pong)`);
   }
 
   async send(msg: Message | string): Promise<void> {
-    if (!this.child || typeof this.child.send !== 'function')
-      throw new Error('IPC parent: child.send is not available');
-    this.child.send(msg as any);
-    this.log.debug(`IPC parent send action=${typeof msg === 'string' ? '<string>' : (msg as Message).action}`);
+    // Always ensure correlationId for object messages
+    if (typeof msg === 'object') {
+      if (!msg.correlationId) (msg as any).correlationId = randomUUID();
+
+      // Track correlationId only for batches to pair with waitForAck()
+      if (msg.action === Actions.OutboxStreamBatch) {
+        this.currentBatchCorrelationId = (msg as any).correlationId!;
+      }
+    }
+
+    try {
+      this.opts.child.send?.(msg as any);
+      if (typeof msg === 'object') {
+        this.log.verbose(`ipc-parent -> ${msg.action} cid=${(msg as any).correlationId}`);
+      } else {
+        this.log.verbose('ipc-parent -> <string>');
+      }
+    } catch (e: any) {
+      this.log.warn(`IPC parent send error: ${e?.message ?? e}`);
+    }
   }
 
   async waitForAck(deadlineMs = this.opts.timeouts?.ackMs ?? 2_000): Promise<OutboxStreamAckPayload> {
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
-      return ack;
+    const id = this.currentBatchCorrelationId;
+    if (!id) throw new Error('IPC parent: waitForAck called without a preceding batch send');
+
+    if (this.ackBuffer && this.ackBuffer.id === id) {
+      const out = this.ackBuffer.payload;
+      this.ackBuffer = null;
+      this.currentBatchCorrelationId = null;
+      return out;
     }
+    if (this.pendingAck) throw new Error('IPC parent: another ACK is pending');
+
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingAck = null;
-        reject(new Error('IPC parent: ACK timeout'));
-      }, deadlineMs);
-      this.pendingAck = {
-        resolve: (v) => {
-          clearTimeout(timer);
+      const timer = setTimeout(
+        () => {
           this.pendingAck = null;
-          resolve(v);
+          this.currentBatchCorrelationId = null;
+          reject(new Error('IPC parent: ack timeout'));
         },
-        reject: (e) => {
-          clearTimeout(timer);
-          this.pendingAck = null;
-          reject(e);
-        },
-        timer,
-      };
+        Math.max(1, deadlineMs)
+      );
+      this.pendingAck = { id, resolve, reject, timer };
     });
   }
 
-  private startPingLoop(): void {
-    const multiplier = this.opts.ping?.factor ?? 1.6;
-    const interval = this.opts.ping?.minMs ?? 400;
-    const maxInterval = this.opts.ping?.maxMs ?? 4_000;
-
-    this.heartbeatController = exponentialIntervalAsync(
-      async (reset) => {
-        this.heartbeatReset = reset;
-
-        // Ping does not include password.
-        const ping: Message = {
-          action: Actions.Ping,
-          timestamp: Date.now(),
-          correlationId: randomUUID(),
-        };
-        try {
-          this.child.send?.(ping as any);
-          this.log.verbose('IPC parent ping published');
-        } catch (e: any) {
-          this.log.debug(`IPC parent ping error: ${e?.message ?? e}`);
-        }
-      },
-      { interval, multiplier, maxInterval }
-    );
-  }
-
-  private stopPingLoop(): void {
-    this.heartbeatController?.destroy?.();
-    this.heartbeatController = null;
-    this.heartbeatReset = null;
-  }
-
-  private onRaw(raw: unknown): void {
-    const msg = this.normalize(raw);
+  // --------------------------------------------------------------------------
+  // Inbound (child -> parent)
+  // --------------------------------------------------------------------------
+  private async onChildMessage(raw: unknown): Promise<void> {
+    const msg = normalize(raw);
     if (!msg) return;
 
     switch (msg.action) {
+      case Actions.Ping: {
+        // Not expected from child; still reply Pong defensively
+        await this.send({
+          action: Actions.Pong,
+          correlationId: msg.correlationId || randomUUID(),
+          timestamp: Date.now(),
+          payload: this.opts.password ? { password: this.opts.password } : undefined,
+        });
+        return;
+      }
+
       case Actions.Pong: {
-        const pw = (msg.payload as any)?.password;
-        const ok = this.opts.ping?.password ? pw === this.opts.ping.password : true;
+        const ok = this.opts.password ? (msg.payload as any)?.password === this.opts.password : true;
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
-          this.log.verbose('IPC parent pong accepted');
+        } else {
+          this.log.warn('IPC parent: pong rejected (invalid password)');
         }
         return;
       }
 
       case Actions.OutboxStreamAck: {
-        const ack = msg.payload as any as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
+        const id = msg.correlationId;
+        if (!id) return;
+        const ack = (msg.payload ?? {}) as OutboxStreamAckPayload;
+        if (this.pendingAck && this.pendingAck.id === id) {
+          clearTimeout(this.pendingAck.timer);
+          const { resolve } = this.pendingAck;
+          this.pendingAck = null;
+          this.currentBatchCorrelationId = null;
+          resolve(ack);
+        } else if (!this.pendingAck && this.currentBatchCorrelationId === id) {
+          this.ackBuffer = { id, payload: ack };
+        }
         return;
       }
 
-      // ----- QUERY SECTION -----
       case Actions.QueryRequest: {
-        void this.handleQuery(msg);
+        const { name, dto } = (msg.payload as any) || {};
+        await this.handleQuery(name, dto, msg.correlationId);
         return;
       }
 
@@ -169,47 +225,48 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     }
   }
 
-  // ----- QUERY SECTION -----
-  private async handleQuery(msg: Message): Promise<void> {
-    const name = (msg.payload as any)?.name;
-    const data = (msg.payload as any)?.data;
-    if (typeof name !== 'string') return;
+  private async handleQuery(name: string, dto: any, cid?: string) {
+    const base: Omit<Message, 'payload'> = {
+      action: Actions.QueryResponse,
+      timestamp: Date.now(),
+      correlationId: cid || randomUUID(),
+    } as any;
 
     try {
-      const query = { name, data } as any;
-      const result = await this.queryBus.execute(query);
-      const reply: Message = {
-        action: Actions.QueryResponse,
-        payload: { ok: true, data: result },
-        correlationId: msg.correlationId,
-        timestamp: Date.now(),
-      };
-      this.child.send?.(reply as any);
+      if (!name || typeof name !== 'string') throw new Error('Invalid query payload');
+      const data = await this.queryBus.execute(buildQuery({ name, dto }));
+      const resp: Message = { ...base, payload: { ok: true, data } } as any;
+      await this.send(resp);
     } catch (e: any) {
-      const reply: Message = {
-        action: Actions.QueryResponse,
-        payload: { ok: false, err: String(e?.message ?? e) },
-        correlationId: msg.correlationId,
-        timestamp: Date.now(),
-      };
-      this.child.send?.(reply as any);
+      const resp: Message = { ...base, payload: { ok: false, err: String(e?.message ?? e) } } as any;
+      await this.send(resp);
     }
   }
 
-  private normalize(raw: unknown): Message | null {
-    if (!raw) return null;
-    if (typeof raw === 'string') {
-      try {
-        return JSON.parse(raw) as Message;
-      } catch {
-        return null;
-      }
-    }
-    if (typeof raw === 'object') return raw as Message;
-    return null;
-  }
-}
+  // --------------------------------------------------------------------------
+  // Heartbeat (parent → child)
+  // --------------------------------------------------------------------------
+  private startHeartbeat(): void {
+    const interval = Math.max(100, this.opts.ping?.intervalMs ?? 800);
+    const multiplier = Math.max(1.0, this.opts.ping?.multiplier ?? 1.6);
+    const maxInterval = Math.max(interval, this.opts.ping?.maxIntervalMs ?? 4_000);
 
-function delay(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+    this.heartbeatController = exponentialIntervalAsync(
+      async (reset) => {
+        this.heartbeatReset = reset;
+        await this.send({
+          action: Actions.Ping,
+          correlationId: randomUUID(),
+          timestamp: Date.now(),
+        });
+      },
+      { interval, multiplier, maxInterval }
+    );
+  }
+
+  private stopHeartbeat(): void {
+    this.heartbeatController?.destroy?.();
+    this.heartbeatController = null;
+    this.heartbeatReset = null;
+  }
 }

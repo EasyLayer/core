@@ -1,38 +1,60 @@
-import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
-import * as fs from 'node:fs';
-import * as http from 'node:http';
-import * as https from 'node:https';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, Server as HttpServer } from 'http';
+import { createServer as createHttpsServer, Server as HttpsServer } from 'https';
+import * as fs from 'node:fs';
+import type { QueryBus } from '@easylayer/common/cqrs';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
-import { QueryBus } from '@easylayer/common/cqrs';
-import { Actions } from '../../../core';
-import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
+import { Actions, buildQuery } from '../../../core';
+import type { Message, OutboxStreamAckPayload, TransportPort } from '../../../core';
 
-export interface WsServerOptions {
+export interface WsServiceOptions {
   type: 'ws';
-  host: string; // required
-  port: number; // required
-  tls?: { key: string; cert: string; ca?: string } | null; // if set -> wss
-  password?: string; // optional; if absent, first valid pong binds the client
-  ping?: { staleMs?: number; factor?: number; minMs?: number; maxMs?: number };
+  host: string;
+  port: number;
+  path?: string; // default: '/ws'
+  token?: string; // optional shared secret for handshake (Sec-WebSocket-Protocol)
+  clientId?: string; // if provided, we log/match expected client id
+  tls?: { key: string; cert: string; ca?: string } | null;
+  /** ACK wait timeout; must exceed client processing timeout (client default = 3000ms). */
+  ackTimeoutMs?: number; // default: 4500
+  /** App-level heartbeat (exponential backoff). */
+  ping?: { factor?: number; minMs?: number; maxMs?: number; staleMs?: number; password?: string };
+  /** Max message size (bytes). */
+  maxWireBytes?: number; // default: 1 MiB
 }
 
 /**
- * WS/WSS transport with a single accepted client.
+ * WebSocket transport (server-side)
+ * -----------------------------------------------------------------------------
+ * - Accepts exactly one client at a time (new connection replaces the previous).
+ * - Auth via Sec-WebSocket-Protocol: token,clientId (optional).
+ * - Sends app-level Ping with exponential backoff; marks peer online only after a valid Pong.
+ * - Streams Outbox batches and waits for a single OutboxStreamAck per batch.
+ * - Handles Query exclusively via WS messages (QueryRequest -> QueryResponse).
  */
 @Injectable()
 export class WsTransportService implements TransportPort, OnModuleDestroy {
   public readonly kind = 'ws' as const;
 
   private readonly log = new Logger(WsTransportService.name);
-  private readonly server: http.Server | https.Server;
+  private readonly server: HttpServer | HttpsServer;
   private readonly wss: WebSocketServer;
 
-  private client: WebSocket | null = null;
-  private clientId: string | undefined;
+  private socket: WebSocket | null = null;
+  private socketClientId: string | null = null;
+
+  private readonly path: string;
+  private readonly token?: string;
+  private readonly expectedClientId?: string;
+  private readonly ackTimeoutMs: number;
+  private readonly maxWireBytes: number;
 
   private online = false;
   private lastPongAt = 0;
+
+  private heartbeatController: { destroy: () => void } | null = null;
+  private heartbeatReset: (() => void) | null = null;
 
   private lastAckBuffer: OutboxStreamAckPayload | null = null;
   private pendingAck: {
@@ -41,235 +63,266 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     timer: NodeJS.Timeout;
   } | null = null;
 
-  private heartbeatController: { destroy: () => void } | null = null;
-  private heartbeatReset: (() => void) | null = null;
-
-  private pendingHandshakeClient: WebSocket | null = null; // candidate until valid pong
-
   constructor(
-    private readonly opts: WsServerOptions,
+    private readonly opts: WsServiceOptions,
     private readonly queryBus: QueryBus
   ) {
     if (!opts.host || !opts.port) throw new Error('WS: host/port are required');
 
-    this.server = opts.tls
-      ? https.createServer({
-          key: fs.readFileSync(opts.tls.key),
-          cert: fs.readFileSync(opts.tls.cert),
-          ca: opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined,
-        })
-      : http.createServer();
+    this.path = opts.path ?? '/ws';
+    this.token = opts.token;
+    this.expectedClientId = opts.clientId;
+    this.ackTimeoutMs = Math.max(1, opts.ackTimeoutMs ?? 4_500);
+    this.maxWireBytes = Math.max(1024, opts.maxWireBytes ?? 1024 * 1024);
 
-    this.wss = new WebSocketServer({ server: this.server });
+    // Bare HTTP(S) server only for upgrade; no HTTP routes.
+    if (opts.tls) {
+      const key = fs.readFileSync(opts.tls.key);
+      const cert = fs.readFileSync(opts.tls.cert);
+      const ca = opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined;
+      this.server = createHttpsServer({ key, cert, ca });
+    } else {
+      this.server = createServer();
+    }
 
-    this.wss.on('connection', (socket) => {
-      // Only one logical client is allowed; keep new connection as a candidate until it proves via pong.
-      this.pendingHandshakeClient = socket;
-      this.clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    this.wss = new WebSocketServer({ server: this.server, path: this.path, maxPayload: this.maxWireBytes });
+    this.wss.on('connection', (ws, req) => this.onConnection(ws, req));
+    this.wss.on('error', (err) => this.log.error('wss error', err as any));
+    this.server.listen(opts.port, opts.host, () =>
+      this.log.log(`WS server listening at ${opts.host}:${opts.port}${this.path}`)
+    );
 
-      socket.on('message', (data) => this.onRaw(data, socket));
-      socket.on('close', () => {
-        if (this.client === socket) {
-          this.client = null;
-          this.online = false;
-        }
-        if (this.pendingHandshakeClient === socket) this.pendingHandshakeClient = null;
-      });
-    });
-
-    this.server.listen(opts.port, opts.host);
-    this.log.log(`WS server listening at ${opts.host}:${opts.port}`);
-
+    // Heartbeat with exponential backoff
     this.startHeartbeat();
   }
 
   async onModuleDestroy(): Promise<void> {
     this.stopHeartbeat();
-    this.wss.clients.forEach((c) => c.close());
-    await new Promise<void>((resolve) => {
-      this.wss.close();
-      this.server.close(() => resolve());
-    });
+    this.closeSocket(1001, 'shutdown');
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  // ----- BATCH/PING SECTION -----
+  // ---- TransportPort API ----------------------------------------------------
   isOnline(): boolean {
     const stale = this.opts.ping?.staleMs ?? 15_000;
-    return !!this.client && this.online && Date.now() - this.lastPongAt < stale;
+    return (
+      this.online && Date.now() - this.lastPongAt < stale && !!this.socket && this.socket.readyState === WebSocket.OPEN
+    );
   }
 
+  /**
+   * Waits until a valid Pong marks the peer online, or fails on deadline.
+   * Strict semantics: an OPEN socket is NOT enough — we require app-level Pong.
+   */
   async waitForOnline(deadlineMs = 2_000): Promise<void> {
     const start = Date.now();
-    while (!this.isOnline()) {
+    while (Date.now() - start < deadlineMs) {
+      if (this.isOnline()) return;
+      // Nudge heartbeat to emit next Ping earlier
       this.heartbeatReset?.();
-      if (this.isOnline()) break;
-      if (Date.now() - start >= deadlineMs) throw new Error('WS: not online');
-      await delay(120);
+      await delay(1000);
     }
+    throw new Error('WS: peer is offline (no valid Pong)');
   }
 
   async send(msg: Message | string): Promise<void> {
-    const s = this.client;
-    if (!s || s.readyState !== s.OPEN) throw new Error('WS: no active client');
+    const ws = this.socket;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('WS: no active client');
 
-    const frame = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    this.log.debug(`WS send action=${typeof msg === 'string' ? '<string>' : (msg as Message).action}`);
+    const body = typeof msg === 'string' ? msg : JSON.stringify(msg);
+    if (Buffer.byteLength(body) > this.maxWireBytes) throw new Error('WS: payload too large');
 
-    await new Promise<void>((resolve, reject) => s.send(frame, (err) => (err ? reject(err) : resolve())));
+    await new Promise<void>((resolve, reject) => ws.send(body, (err) => (err ? reject(err) : resolve())));
   }
 
-  async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
+  async waitForAck(deadlineMs?: number): Promise<OutboxStreamAckPayload> {
+    const finalDeadline = Math.max(1, deadlineMs ?? this.ackTimeoutMs);
     if (this.lastAckBuffer) {
       const ack = this.lastAckBuffer;
       this.lastAckBuffer = null;
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const t = setTimeout(() => {
         this.pendingAck = null;
         reject(new Error('WS: ACK timeout'));
-      }, deadlineMs);
+      }, finalDeadline);
       this.pendingAck = {
         resolve: (v) => {
-          clearTimeout(timer);
+          clearTimeout(t);
           this.pendingAck = null;
           resolve(v);
         },
         reject: (e) => {
-          clearTimeout(timer);
+          clearTimeout(t);
           this.pendingAck = null;
           reject(e);
         },
-        timer,
+        timer: t,
       };
     });
   }
 
+  /* eslint-disable no-empty */
+  // ---- WS lifecycle ---------------------------------------------------------
+  private onConnection(ws: WebSocket, req: any) {
+    try {
+      const { token, clientId } = parseAuth(req, this.token);
+      if (this.expectedClientId && clientId !== this.expectedClientId) {
+        this.log.warn(`Unexpected clientId: got=${clientId}, want=${this.expectedClientId}`);
+      }
+
+      // Enforce single active client: close previous if any
+      if (this.socket && this.socket !== ws) this.closeSocket(1000, 'replaced');
+      this.socket = ws;
+      this.socketClientId = clientId ?? null;
+
+      // IMPORTANT: Do not mark online on connection; require a valid Pong.
+      this.online = false;
+      this.lastPongAt = 0;
+
+      ws.on('message', (data) => this.onMessage(String(data)));
+      ws.on('close', (code, reason) => this.onClose(code, String(reason)));
+      ws.on('error', (err) => this.onError(err));
+
+      this.log.log(`WS client connected: clientId=${clientId ?? '<n/a>'}`);
+
+      // Ask heartbeat to ping sooner after a new connection
+      this.heartbeatReset?.();
+    } catch (e: any) {
+      this.log.warn(`WS connection rejected: ${String(e?.message ?? e)}`);
+      try {
+        ws.close(1008, 'unauthorized');
+      } catch {}
+    }
+  }
+  /* eslint-enable no-empty */
+
+  private onMessage(text: string) {
+    let msg: Message | null = null;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!msg || typeof (msg as any).action !== 'string') return;
+
+    switch (msg.action) {
+      case Actions.Pong: {
+        const want = this.opts.ping?.password;
+        const got = (msg.payload as any)?.password;
+        if (!want || want === got) {
+          this.online = true;
+          this.lastPongAt = Date.now();
+        } else {
+          this.online = false; // invalid pong
+        }
+        break;
+      }
+      case Actions.OutboxStreamAck: {
+        const ack = (msg.payload ?? {}) as OutboxStreamAckPayload;
+        if (this.pendingAck) this.pendingAck.resolve(ack);
+        else this.lastAckBuffer = ack;
+        break;
+      }
+      case Actions.QueryRequest: {
+        const { name, dto } = (msg.payload as any) || {};
+        this.handleQuery(name, dto);
+        break;
+      }
+      default:
+        // ignore anything else
+        break;
+    }
+  }
+
+  private async handleQuery(name: string, dto: any) {
+    const ws = this.socket;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    const base: Omit<Message, 'payload'> = { action: Actions.QueryResponse, timestamp: Date.now() } as any;
+    try {
+      if (!name || typeof name !== 'string') throw new Error('Invalid query payload');
+      const data = await this.queryBus.execute(buildQuery({ name, dto }));
+      const resp: Message = { ...base, payload: { ok: true, data } } as any;
+      ws.send(JSON.stringify(resp));
+    } catch (e: any) {
+      const resp: Message = { ...base, payload: { ok: false, err: String(e?.message ?? e) } } as any;
+      ws.send(JSON.stringify(resp));
+    }
+  }
+
+  private onClose(code: number, reason: string) {
+    this.online = false;
+    if (this.pendingAck) {
+      this.pendingAck.reject(new Error(`WS closed: ${code} ${reason || ''}`.trim()));
+      this.pendingAck = null;
+    }
+    this.socket = null;
+    this.socketClientId = null;
+    this.log.warn(`WS client disconnected: ${code} ${reason || ''}`.trim());
+  }
+
+  private onError(err: any) {
+    this.log.warn(`WS error: ${String(err?.message ?? err)}`);
+  }
+
+  /* eslint-disable no-empty */
+  private closeSocket(code = 1000, reason?: string) {
+    try {
+      this.socket?.close(code, reason);
+    } catch {}
+    this.socket = null;
+    this.socketClientId = null;
+    this.online = false;
+  }
+  /* eslint-enable no-empty */
+
+  // ---- Heartbeat with exponential backoff -----------------------------------
   private startHeartbeat() {
     const multiplier = this.opts.ping?.factor ?? 1.6;
     const interval = this.opts.ping?.minMs ?? 600;
-    const maxInterval = this.opts.ping?.maxMs ?? 5000;
+    const maxInterval = this.opts.ping?.maxMs ?? 5_000;
 
     this.heartbeatController = exponentialIntervalAsync(
       async (reset) => {
         this.heartbeatReset = reset;
-
-        // Send ping to current client and candidate; ping has no password.
-        const targets: (WebSocket | null)[] = [this.client, this.pendingHandshakeClient];
-        const ping: Message = {
-          action: Actions.Ping,
-          clientId: this.clientId,
-          timestamp: Date.now(),
-        };
-
-        await Promise.all(
-          targets.map(async (s) => {
-            if (!s || s.readyState !== s.OPEN) return;
-            try {
-              s.send(JSON.stringify(ping));
-              this.log.verbose('WS ping published');
-            } catch (e: any) {
-              this.log.debug(`WS ping error: ${e?.message ?? e}`);
-            }
-          })
-        );
+        const ws = this.socket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          this.online = false;
+          return; // wait for next tick
+        }
+        const ping: Message = { action: Actions.Ping, timestamp: Date.now() } as any;
+        try {
+          ws.send(JSON.stringify(ping));
+        } catch (e) {
+          this.online = false;
+          this.log.warn(`WS ping failed: ${String((e as any)?.message ?? e)}`);
+        }
       },
-      { interval, multiplier, maxInterval }
+      { multiplier, interval, maxInterval }
     );
   }
 
   private stopHeartbeat() {
-    this.heartbeatController?.destroy?.();
-    this.heartbeatController = null;
-    this.heartbeatReset = null;
-  }
-
-  private onRaw(raw: unknown, socket: WebSocket) {
-    const msg = this.normalize(raw);
-    if (!msg) return;
-
-    switch (msg.action) {
-      case Actions.Pong: {
-        const pw = (msg.payload as any)?.password;
-        const ok = this.opts.password ? pw === this.opts.password : true;
-        if (ok) {
-          // If no password is configured, bind the first pong sender as the client.
-          if (!this.client && this.pendingHandshakeClient === socket) {
-            this.client = socket;
-            this.pendingHandshakeClient = null;
-          }
-          this.lastPongAt = Date.now();
-          this.online = true;
-          this.log.verbose('WS pong accepted');
-        }
-        return;
-      }
-      case Actions.OutboxStreamAck: {
-        const ack = msg.payload as any as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
-        return;
-      }
-      // ----- QUERY SECTION -----
-      case Actions.QueryRequest: {
-        if (socket !== this.client) return;
-        void this.handleQuery(msg);
-        return;
-      }
-      default:
-        return;
-    }
-  }
-
-  private async handleQuery(msg: Message): Promise<void> {
-    const name = (msg.payload as any)?.name;
-    const data = (msg.payload as any)?.data;
-    if (typeof name !== 'string') return;
-
     try {
-      const query = { name, data } as any;
-      const result = await this.queryBus.execute(query);
-      const reply: Message = {
-        action: Actions.QueryResponse,
-        payload: { ok: true, data: result },
-        clientId: this.clientId,
-        requestId: msg.requestId,
-        timestamp: Date.now(),
-      };
-      await this.send(reply);
-    } catch (e: any) {
-      const reply: Message = {
-        action: Actions.QueryResponse,
-        payload: { ok: false, err: String(e?.message ?? e) },
-        clientId: this.clientId,
-        requestId: msg.requestId,
-        timestamp: Date.now(),
-      };
-      await this.send(reply);
+      this.heartbeatController?.destroy();
+    } finally {
+      this.heartbeatController = null;
     }
-  }
-
-  private normalize(raw: unknown): Message | null {
-    if (!raw) return null;
-    if (typeof raw === 'string') {
-      try {
-        return JSON.parse(raw) as Message;
-      } catch {
-        return null;
-      }
-    }
-    if (Buffer.isBuffer(raw)) {
-      try {
-        return JSON.parse(raw.toString('utf8')) as Message;
-      } catch {
-        return null;
-      }
-    }
-    if (typeof raw === 'object') return raw as Message;
-    return null;
   }
 }
 
+// -- helpers ------------------------------------------------------------------
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+function parseAuth(req: any, expectedToken?: string): { token?: string; clientId?: string } {
+  // Prefer Sec-WebSocket-Protocol: "token,clientId". Accept query fallback.
+  const proto = (req.headers?.['sec-websocket-protocol'] as string | undefined)?.trim();
+  const qp = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const token = proto?.split(',')[0]?.trim() || qp.get('token') || undefined;
+  const clientId = proto?.split(',')[1]?.trim() || qp.get('clientId') || undefined;
+  if (expectedToken && token !== expectedToken) throw new Error('unauthorized');
+  return { token, clientId: clientId || undefined };
 }

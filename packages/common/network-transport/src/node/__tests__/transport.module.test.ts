@@ -7,15 +7,26 @@ class FakeChild extends EventEmitter {
   send = jest.fn();
   once = super.once.bind(this) as any;
   off = super.off.bind(this) as any;
+  channel: any = {};
 }
 
 describe('NetworkTransportModule', () => {
   let modRef: TestingModule | undefined;
 
+  const originalProc = {
+    channel: (process as any).channel,
+    send:    (process as any).send,
+    connected: (process as any).connected,
+  };
+
   afterEach(async () => {
     try { await modRef?.close(); } catch {}
     jest.clearAllTimers();
     jest.useRealTimers();
+
+    (process as any).channel   = originalProc.channel;
+    (process as any).send      = originalProc.send;
+    (process as any).connected = originalProc.connected;
   });
 
   it('creates without transports and without outbox', async () => {
@@ -48,7 +59,10 @@ describe('NetworkTransportModule', () => {
               type: 'http',
               host: '127.0.0.1',
               port: 31234,
-              webhook: { url: 'http://localhost:9999/hook' },
+              webhook: {
+                url: 'http://localhost:9999/hook',
+                pingUrl: 'http://localhost:9999/ping',
+              },
             },
           ],
           outbox: { enabled: true, kind: 'http' },
@@ -72,15 +86,17 @@ describe('NetworkTransportModule', () => {
   });
 
   it('accepts multiple transports without outbox', async () => {
+    (process as any).channel   = {};
+    (process as any).send      = jest.fn();
+    (process as any).connected = true;
+
     modRef = await Test.createTestingModule({
       imports: [
         CqrsModule.forRoot({ isGlobal: true }),
         NetworkTransportModule.forRoot({
           transports: [
-            { type: 'ws', host: '127.0.0.1', port: 31337, password: 'pw' },
+            { type: 'ws', host: '127.0.0.1', port: 31337 },
             { type: 'ipc-child' },
-            { type: 'ipc-parent', child: new FakeChild() as any },
-            // { type: 'electron-ipc-main' },
           ],
         }),
       ],

@@ -108,7 +108,12 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     }
 
     if (persisted.rawEvents.length > 0) {
-      await this.publisherProvider.publisher.publishWireStreamBatchWithAck(persisted.rawEvents);
+      try {
+        await this.publisherProvider.publisher.publishWireStreamBatchWithAck(persisted.rawEvents);
+      } catch (e) {
+        this.logger.verbose('Outbox publish error', { args: { error: (e as any)?.message } });
+      }
+
       await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
     }
   }
@@ -150,9 +155,9 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         });
         if (sent === 0) break;
       } catch (e) {
-        this.logger.debug('Outbox drain error — scheduling retry', { args: { error: (e as any)?.message } });
+        this.logger.verbose('Outbox drain error — scheduling retry', { args: { error: (e as any)?.message } });
         this.startRetryTimerIfNeeded();
-        throw e;
+        // throw e;
       }
     }
   }

@@ -20,6 +20,8 @@ export interface HttpServiceOptions {
   maxBodySizeMb?: number;
   webhook?: { url: string; pingUrl?: string; token?: string; timeoutMs?: number };
   ping?: { staleMs?: number; factor?: number; minMs?: number; maxMs?: number; password?: string };
+  /** Optional override for how long we wait for ACK after sending a batch. */
+  ackTimeoutMs?: number;
 }
 
 /**
@@ -66,6 +68,12 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
   ) {
     if (!opts.host || !opts.port) throw new Error('HTTP: host/port are required');
 
+    // Validate webhook config early
+    if (opts.webhook) {
+      if (!opts.webhook.url) throw new Error('HTTP: webhook.url is required when webhook is set');
+      if (!opts.webhook.pingUrl) throw new Error('HTTP: webhook.pingUrl is required when webhook is set');
+    }
+
     // --- Middlewares ---------------------------------------------------------
     if (opts.cors?.enabled) {
       this.app.use(cors({ origin: opts.cors.origin ?? true }));
@@ -83,53 +91,21 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
         }
 
         const result = await this.queryBus.execute(buildQuery(body));
-
         return res.status(200).json({ ok: true, data: result });
       } catch (e: any) {
-        this.log.debug(`HTTP /query error: ${e?.message ?? e}`);
-
-        // Normalize the "No handler found" shape → consistent server response
-        if (e?.message?.includes('No handler found')) {
-          return res
-            .status(500)
-            .json({ ok: false, err: `Query handler not found for: ${req.body?.name ?? 'unknown'}` });
-        }
-
-        return res.status(500).json({ ok: false, err: String(e?.message ?? e) });
+        return res.status(500).json({ ok: false, err: String(e?.message ?? e ?? 'internal error') });
       }
     });
 
-    // --- Webhook contract validation ----------------------------------------
-    // No webhook: allowed → we won't send batches nor pings at all.
-    if (opts.webhook) {
-      if (!opts.webhook.url) {
-        throw new Error('HTTP: webhook.url is required when webhook is provided');
-      }
-      if (!opts.webhook.pingUrl) {
-        throw new Error('HTTP: webhook.pingUrl is required when webhook is provided');
-      }
-
-      // Optional sanity checks: avoid path collisions on the receiver
-      const wUrl = new URL(opts.webhook.url);
-      const pUrl = new URL(opts.webhook.pingUrl);
-      const wPath = (wUrl.pathname || '/').replace(/\/+$/, '') || '/';
-      const pPath = (pUrl.pathname || '/').replace(/\/+$/, '') || '/';
-      if (wPath === pPath) {
-        throw new Error('HTTP: webhook.pingUrl must differ from webhook.url path');
-      }
+    // --- Server bootstrap ----------------------------------------------------
+    if (opts.tls) {
+      const key = fs.readFileSync(opts.tls.key);
+      const cert = fs.readFileSync(opts.tls.cert);
+      const ca = opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined;
+      this.server = https.createServer({ key, cert, ca }, this.app);
+    } else {
+      this.server = http.createServer(this.app);
     }
-
-    // --- HTTP/HTTPS server ---------------------------------------------------
-    this.server = opts.tls
-      ? https.createServer(
-          {
-            key: fs.readFileSync(opts.tls.key),
-            cert: fs.readFileSync(opts.tls.cert),
-            ca: opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined,
-          },
-          this.app
-        )
-      : http.createServer(this.app);
 
     this.server.listen(opts.port, opts.host);
     this.log.log(`HTTP server listening at ${opts.host}:${opts.port}`);
@@ -144,7 +120,7 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  // --- Health/state ----------------------------------------------------------
+  // --- Health/state ------------------------------------------------------
   /**
    * Returns whether the peer is considered "online":
    *  - we must have received a valid Pong recently (within staleMs),
@@ -161,12 +137,13 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
    */
   async waitForOnline(deadlineMs = 2_000): Promise<void> {
     const start = Date.now();
-    while (!this.isOnline()) {
+    while (Date.now() - start < deadlineMs) {
+      if (this.isOnline()) return;
+      // Nudge heartbeat to emit next Ping earlier
       this.heartbeatReset?.();
-      if (this.isOnline()) break;
-      if (Date.now() - start >= deadlineMs) throw new Error('HTTP: not online');
-      await delay(120);
+      await delay(1000);
     }
+    throw new Error('HTTP: peer is offline (no valid Pong)');
   }
 
   // --- Outbound send + ACK handling -----------------------------------------
@@ -190,8 +167,8 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     const body = typeof msg === 'string' ? msg : JSON.stringify(msg);
     this.log.debug(`HTTP send action=${typeof msg === 'string' ? '<string>' : (msg as Message).action}`);
 
-    const res = await this.post(url, body, this.opts.webhook?.token, this.opts.webhook?.timeoutMs);
-    const parsed = safeParse(res) as Message | null;
+    const resText = await this.post(url, body, this.opts.webhook?.token, this.opts.webhook?.timeoutMs);
+    const parsed = safeParse(resText) as Message | null;
     if (!parsed) return;
 
     if (parsed.action === Actions.OutboxStreamAck && parsed.payload) {
@@ -201,11 +178,11 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     }
   }
 
-  /**
-   * Await the next OutboxStreamAck. If an ACK already arrived earlier,
-   * it's returned immediately (buffered).
-   */
-  async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
+  async waitForAck(deadlineMs?: number): Promise<OutboxStreamAckPayload> {
+    // Compute default deadline if not provided: must exceed client processing timeout.
+    const defaultAckMs = Math.max(3000, (this.opts.webhook?.timeoutMs ?? 2000) + 1500, this.opts.ackTimeoutMs ?? 0);
+    const finalDeadline = deadlineMs && deadlineMs > 0 ? deadlineMs : defaultAckMs;
+
     if (this.lastAckBuffer) {
       const ack = this.lastAckBuffer;
       this.lastAckBuffer = null;
@@ -215,7 +192,7 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
       const timer = setTimeout(() => {
         this.pendingAck = null;
         reject(new Error('HTTP: ACK timeout'));
-      }, deadlineMs);
+      }, finalDeadline);
       this.pendingAck = {
         resolve: (v) => {
           clearTimeout(timer);
@@ -254,51 +231,56 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
           action: Actions.Ping,
           timestamp: Date.now(),
         };
-
         try {
-          // Always ping pingUrl; never fall back to webhook.url
-          const pingUrl = this.opts.webhook!.pingUrl!; // validated in constructor
-          const raw = await this.post(
-            pingUrl,
+          const resText = await this.post(
+            this.requirePingUrl(),
             JSON.stringify(ping),
             this.opts.webhook?.token,
             this.opts.webhook?.timeoutMs
           );
-          this.log.verbose('HTTP ping published');
-
-          // Parse reply and mark online on valid Pong (with optional password match)
-          const parsed = safeParse(raw) as Message | null;
-
-          if (!parsed) {
-            this.log.debug(`HTTP post non-JSON reply: ${raw?.slice(0, 200)}`);
-            return;
-          }
-
+          const parsed = safeParse(resText) as Message | null;
           if (parsed?.action === Actions.Pong) {
-            const pw = (parsed.payload as any)?.password;
-            const ok = this.opts.ping?.password ? pw === this.opts.ping.password : true;
-            if (ok) {
-              this.lastPongAt = Date.now();
+            // Validate password (if expected)
+            const want = this.opts.ping?.password;
+            const got = (parsed.payload as any)?.password;
+            if (!want || want === got) {
               this.online = true;
-              this.log.verbose('HTTP pong accepted (heartbeat)');
+              this.lastPongAt = Date.now();
+              this.log.debug('HTTP pong ok');
+              return; // success; next backoff step will start from min
             }
           }
+
+          // If we fell through — pong is invalid
+          this.online = false;
+          this.log.warn('HTTP pong invalid');
         } catch (e: any) {
-          this.log.debug(`HTTP ping error: ${e?.message ?? e}`);
+          // Network/timeout
+          this.online = false;
+          this.log.warn(`HTTP ping failed: ${String(e?.message ?? e)}`);
         }
       },
-      { interval, multiplier, maxInterval }
+      { multiplier, interval, maxInterval }
     );
   }
 
   private stopHeartbeat() {
-    this.heartbeatController?.destroy?.();
-    this.heartbeatController = null;
-    this.heartbeatReset = null;
+    try {
+      this.heartbeatController?.destroy();
+    } finally {
+      this.heartbeatController = null;
+    }
   }
 
-  // --- Low-level POST helper -------------------------------------------------
-  private async post(urlStr: string, body: string, token?: string, timeoutMs = 2_000): Promise<string> {
+  private requirePingUrl(): string {
+    const url = this.opts.webhook?.pingUrl;
+    if (!url) throw new Error('HTTP: webhook.pingUrl is required when webhook is set');
+    return url;
+  }
+
+  // --- Low-level HTTP helper --------------------------------------------------
+  /** POST with hard timeout and token; rejects on non-2xx. */
+  private async post(urlStr: string, body: string, token?: string, timeoutMs = 2000): Promise<string> {
     const url = new URL(urlStr);
     const isHttps = url.protocol === 'https:';
     const agent = isHttps ? https : http;
@@ -314,20 +296,26 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
           method: 'POST',
           hostname: url.hostname,
           port: url.port,
-          path: url.pathname,
+          path: url.pathname + (url.search || ''),
           headers,
-          timeout: timeoutMs,
         },
         (res) => {
+          const status = res.statusCode ?? 0;
           const chunks: Buffer[] = [];
-          res.on('data', (c) => {
-            chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-          });
+          res.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
           res.on('end', () => {
-            resolve(Buffer.concat(chunks).toString('utf8'));
+            const text = Buffer.concat(chunks).toString('utf8');
+            if (status < 200 || status >= 300) return reject(new Error(`HTTP ${status} ${text}`.trim()));
+            resolve(text);
           });
         }
       );
+
+      // Hard timeout for the entire request
+      req.setTimeout(Math.max(1, timeoutMs), () => {
+        req.destroy(new Error('request timeout'));
+      });
+
       req.on('error', reject);
       req.write(body);
       req.end();

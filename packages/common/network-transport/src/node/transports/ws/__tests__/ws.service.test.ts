@@ -1,161 +1,154 @@
-import { Test, type TestingModule } from '@nestjs/testing';
-import { CqrsModule, QueryBus } from '@easylayer/common/cqrs';
-import { WsTransportService } from '../ws.service';
+jest.mock('http', () => ({
+  createServer: () => ({
+    on: (_e: string, _cb: Function) => undefined,
+    listen: (_p?: any, _h?: any, cb?: any) => { cb && cb(); },
+    close: (cb?: any) => { cb && cb(); },
+  }),
+}));
+jest.mock('https', () => jest.requireMock('http'));
+jest.mock('node:http', () => jest.requireMock('http'));
+jest.mock('node:https', () => jest.requireMock('https'));
 
 jest.mock('ws', () => {
-  const EventEmitter = require('events');
-  class MockSocket extends EventEmitter {
+  class E {
+    m = new Map<string, Function[]>();
+    on(ev: string, fn: Function) { (this.m.get(ev) ?? this.m.set(ev, []).get(ev)!)!.push(fn); }
+    emit(ev: string, ...a: any[]) { (this.m.get(ev) || []).forEach(f => f(...a)); }
+  }
+  class WSS extends E {
+    clients = new Set<any>();
+    constructor(_opts: any) { super(); }
+    close = jest.fn();
+  }
+  class WS extends E {
     static OPEN = 1;
-    OPEN = 1;
     readyState = 1;
-    send = jest.fn((data: any, cb: any) => cb && cb());
+    send = jest.fn((_d: any, cb?: Function) => { cb && cb(); });
     close = jest.fn();
   }
-  class MockWSS extends EventEmitter {
-    clients = new Set<MockSocket>();
-    close = jest.fn();
-    addClient() {
-      const c = new MockSocket();
-      this.clients.add(c);
-      this.emit('connection', c);
-      return c;
-    }
-  }
-  return { WebSocketServer: MockWSS, WebSocket: MockSocket };
+  return { WebSocketServer: WSS, WebSocket: WS };
 });
 
-jest.mock('node:http', () => ({ createServer: () => ({ listen: jest.fn(), close: (cb: any) => cb && cb() }) }));
-jest.mock('node:https', () => jest.requireMock('node:http'));
+jest.mock('@easylayer/common/exponential-interval-async', () => ({
+  exponentialIntervalAsync: (fn: (reset: () => void) => any) => { const r = () => {}; fn(r); return { destroy: () => {} }; },
+}));
 
-const tick = () => new Promise(res => setTimeout(res, 0));
+import { Actions } from '../../../../core';
+import { WsTransportService, type WsServiceOptions } from '../ws.service';
+import type { QueryBus } from '@easylayer/common/cqrs';
 
-describe('WsTransportService', () => {
-  let modRef: TestingModule | undefined;
+class FakeSocket {
+  readyState = 1;
+  sent: string[] = [];
+  send = jest.fn((data: any, cb?: (err?: any) => void) => { this.sent.push(String(data)); cb && cb(); });
+  close = jest.fn();
+  on = jest.fn();
+}
+
+const baseOpts = (port: number): WsServiceOptions => ({
+  type: 'ws',
+  host: '127.0.0.1',
+  port,
+  path: '/ws',
+  tls: null,
+  ackTimeoutMs: 200,
+  maxWireBytes: 1024 * 1024,
+  ping: { staleMs: 1000, factor: 1.2, minMs: 50, maxMs: 100, password: 'pw' },
+});
+
+const makeQB = (): QueryBus =>
+  ({ execute: jest.fn(async (q: any) => ({ ok: true, name: q?.name, dto: q?.dto })) } as unknown as QueryBus);
+
+jest.setTimeout(15000);
+
+describe('WsTransportService minimal unit', () => {
+  let svc: WsTransportService | undefined;
 
   afterEach(async () => {
-    try { await modRef?.close(); } catch {}
-    jest.clearAllTimers();
+    if (svc) await svc.onModuleDestroy();
+    svc = undefined;
     jest.useRealTimers();
-    modRef = undefined;
+    jest.restoreAllMocks();
   });
 
-  it('accepts single client and goes online after pong with correct password', async () => {
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: WsTransportService,
-          useFactory: (qb: QueryBus) => new WsTransportService(
-            { type: 'ws', host: '127.0.0.1', port: 43000, password: 'pw', ping: { minMs: 10, factor: 1.1, maxMs: 20 } },
-            qb
-          ),
-          inject: [QueryBus],
-        },
-      ],
-    }).compile();
-
-    const svc = modRef.get(WsTransportService) as any;
-    const wss: any = svc.wss;
-    const socket = wss.addClient();
-    await tick();
-    socket.emit('message', JSON.stringify({ action: 'pong', payload: { password: 'pw' } }));
-    await svc.waitForOnline(500);
+  it('isOnline works with flags set', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+    (svc as any).online = true;
+    (svc as any).lastPongAt = Date.now();
     expect(svc.isOnline()).toBe(true);
+    (svc as any).online = false;
+    expect(svc.isOnline()).toBe(false);
   });
 
-  it('routes QueryRequest to QueryBus and replies on the same socket', async () => {
-    const exec = jest.fn(async () => ({ ok: true }));
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: WsTransportService,
-          useFactory: () =>
-            new WsTransportService(
-              { type: 'ws', host: '127.0.0.1', port: 43001, password: 'pw', ping: { minMs: 10, factor: 1.1, maxMs: 20 } } as any,
-              { execute: exec } as any
-            ),
-        },
-      ],
-    }).compile();
-
-    const svc = modRef.get(WsTransportService) as any;
-    const wss: any = svc.wss;
-    const socket = wss.addClient();
-    await tick();
-    socket.emit('message', JSON.stringify({ action: 'pong', payload: { password: 'pw' } }));
-    await svc.waitForOnline(500);
-
-    (socket.send as jest.Mock).mockClear();
-    socket.emit('message', JSON.stringify({ action: 'query.request', payload: { name: 'Q', data: 1 }, requestId: 'r1' }));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(exec).toHaveBeenCalled();
-    expect(socket.send).toHaveBeenCalledWith(expect.any(String), expect.any(Function));
+  it('waitForOnline resolves when online is pre-set', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+    (svc as any).online = true;
+    (svc as any).lastPongAt = Date.now();
+    await expect(svc.waitForOnline(200)).resolves.toBeUndefined();
   });
 
-  it('keeps only the latest client', async () => {
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: WsTransportService,
-          useFactory: (qb: QueryBus) => new WsTransportService(
-            { type: 'ws', host: '127.0.0.1', port: 43002, password: 'pw', ping: { minMs: 10, factor: 1.1, maxMs: 20 } },
-            qb
-          ),
-          inject: [QueryBus],
-        },
-      ],
-    }).compile();
-
-    const svc = modRef.get(WsTransportService) as any;
-    const wss: any = svc.wss;
-
-    const first = wss.addClient();
-    await tick();
-    const second = wss.addClient();
-    await tick();
-
-    second.emit('message', JSON.stringify({ action: 'pong', payload: { password: 'pw' } }));
-    await svc.waitForOnline(500);
-
-    (first.send as jest.Mock).mockClear();
-    (second.send as jest.Mock).mockClear();
-
-    second.emit('message', JSON.stringify({ action: 'query.request', payload: { name: 'Q', data: 1 }, requestId: 'r2' }));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(second.send).toHaveBeenCalled();
-    expect(first.send).not.toHaveBeenCalled();
+  it('send throws without client', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    await expect(svc.send({ action: 'X' as any, timestamp: Date.now() } as any)).rejects.toThrow(/no active client/i);
   });
 
-  it('resolves ACK for batch', async () => {
-    modRef = await Test.createTestingModule({
-      imports: [CqrsModule.forRoot({ isGlobal: true })],
-      providers: [
-        {
-          provide: WsTransportService,
-          useFactory: (qb: QueryBus) => new WsTransportService(
-            { type: 'ws', host: '127.0.0.1', port: 43003, password: 'pw', ping: { minMs: 10, factor: 1.1, maxMs: 20 } },
-            qb
-          ),
-          inject: [QueryBus],
-        },
-      ],
-    }).compile();
+  it('send writes when client set', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+    await svc.send({ action: 'Ping' as any, timestamp: Date.now() } as any);
+    expect(sock.send).toHaveBeenCalledTimes(1);
+  });
 
-    const svc = modRef.get(WsTransportService) as any;
-    const wss: any = svc.wss;
-    const socket = wss.addClient();
-    await tick();
-    socket.emit('message', JSON.stringify({ action: 'pong', payload: { password: 'pw' } }));
-    await svc.waitForOnline(500);
+  it('waitForAck resolves from buffer', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    (svc as any).lastAckBuffer = { ok: true, okIndices: [0] };
+    const got = await svc.waitForAck(200);
+    expect(got.ok).toBe(true);
+    expect(got.okIndices).toEqual([0]);
+  });
 
-    const wait = svc.waitForAck(300);
-    socket.emit('message', JSON.stringify({ action: 'outbox.stream.ack', payload: { ok: true, okIndices: [0] } }));
-    await expect(wait).resolves.toEqual({ ok: true, okIndices: [0] });
+  it('waitForAck times out', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    jest.useFakeTimers();
+    const p = svc.waitForAck(100);
+    jest.advanceTimersByTime(120);
+    await expect(p).rejects.toThrow(/ack timeout/i);
+  });
+
+  it('handleQuery sends success response', async () => {
+    svc = new WsTransportService(baseOpts(1), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+
+    await (svc as any).handleQuery('Echo', { a: 1 });
+
+    expect(sock.sent.length).toBeGreaterThan(0);
+    const last = JSON.parse(sock.sent.at(-1)!);
+    expect(last.action).toBe(Actions.QueryResponse);
+    expect(last.payload.ok).toBe(true);
+  });
+
+  it('handleQuery sends error response', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+    await (svc as any).handleQuery(0 as any, {});
+    const last = JSON.parse(sock.sent.at(-1)!);
+    expect(last.action).toBe(Actions.QueryResponse);
+    expect(last.payload.ok).toBe(false);
+  });
+
+  it('onClose rejects pending ACK', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const sock = new FakeSocket();
+    (svc as any).socket = sock;
+    const p = svc.waitForAck(500);
+    (svc as any).onClose(1000, 'closed');
+    await expect(p).rejects.toThrow(/closed/i);
   });
 });

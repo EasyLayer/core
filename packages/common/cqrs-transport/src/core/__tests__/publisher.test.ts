@@ -53,4 +53,50 @@ describe("Publisher", () => {
 
     sub.unsubscribe();
   });
+
+  it('publishWireStreamBatchWithAck: schedules local emit before calling remote stream', async () => {
+    const { OutboxBatchSender } = require('@easylayer/common/network-transport');
+
+    const order: string[] = [];
+    const origQM = global.queueMicrotask;
+
+    global.queueMicrotask = (cb: () => void) => {
+      order.push('scheduled-local');
+      return origQM.call(global, () => {
+        order.push('executed-local');
+        cb();
+      }) as any;
+    };
+
+    const pm = new OutboxBatchSender();
+    const logger = new (require('@nestjs/common').Logger)();
+    const pub = new (require('../publisher').Publisher)(pm as any, logger as any, ['sys-model']);
+
+    const origStream = pm.streamWireWithAck.bind(pm);
+    pm.streamWireWithAck = jest.fn(async (events: any[]) => {
+      order.push('called-remote');
+      return origStream(events);
+    });
+
+    const sysWire = {
+      modelName: 'sys-model',
+      eventType: 'UserCreated',
+      eventVersion: 1,
+      requestId: 'r1',
+      blockHeight: 10,
+      payload: JSON.stringify({ a: 1 }),
+      timestamp: Date.now(),
+    };
+
+    await pub.publishWireStreamBatchWithAck([sysWire]);
+
+    expect(order[0]).toBe('scheduled-local');
+    expect(order[1]).toBe('called-remote');
+
+    await Promise.resolve();
+    expect(order).toContain('executed-local');
+
+    // возвращаем queueMicrotask
+    global.queueMicrotask = origQM;
+  });
 });
