@@ -5,9 +5,9 @@ describe('createSnapshotsEntity()', () => {
   it('postgres mapping', () => {
     const s = createSnapshotsEntity('postgres') as any;
     const c = s.options.columns;
-    expect(c.id.type).toBe('bigserial');
+    expect(c.id.type).toBe('bigint');
     expect(c.id.primary).toBe(true);
-    expect(c.id.generated).toBe(true);
+    expect(c.id.generated).toBe('increment');
     expect(c.payload.type).toBe('bytea');
     expect(c.createdAt.type).toBe('timestamp');
     expect(c.isCompressed.type).toBe('boolean');

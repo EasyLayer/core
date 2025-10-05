@@ -3,11 +3,13 @@ import type { Transaction } from './transaction.interfaces';
 export interface LightScriptPubKey {
   type?: string;
   addresses?: string[];
+  hex?: string; // required for address derivation when addresses[] is absent
 }
 
 export interface LightVin {
   txid?: string;
   vout?: number;
+  sequence?: number; // required for BIP-125 signaling check
 }
 
 export interface LightVout {

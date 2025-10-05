@@ -27,7 +27,7 @@ import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from 
  * - We avoid RETURNING because we already know the id; one less round trip.
  * - Delivery chunk sizing is computed locally from the provided transport cap:
  *     prefetch LIMIT ~ cap / AVG_EVENT_BYTES_GUESS (clamped) and then greedily
- *     accumulate by (FIXED_OVERHEAD + payload_uncompressed_bytes).
+ *     accumulate by (FIXED_OVERHEAD + uncompressedBytes).
  */
 export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends BaseAdapter<T> {
   private deliverLock = new Mutex();
@@ -60,7 +60,6 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     lastTs: number;
     lastId: string;
     rawEvents: WireEventRecord[];
-    avgUncompressedBytes?: number;
   }> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -119,7 +118,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           // (2) Insert into outbox with our precomputed BIGINT id.
           await qr.manager.query(
             `INSERT INTO "outbox"
-               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
              ON CONFLICT ON CONSTRAINT "UQ_outbox_aggregate_version" DO NOTHING`,
             [
@@ -132,7 +131,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
               row.payload, // same bytea
               row.isCompressed, // boolean
               row.timestamp,
-              // if you track uncompressed size separately, pass it here; otherwise null/undefined is fine
+              row.uncompressedBytes,
             ]
           );
 
@@ -179,7 +178,6 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         lastTs,
         lastId,
         rawEvents,
-        // Optionally, you can compute avgUncompressedBytes here if you track it.
       };
     } catch (e) {
       await qr.query('ROLLBACK').catch(() => undefined);
@@ -267,7 +265,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
    *      N ≈ transportCapBytes / AVG_EVENT_BYTES_GUESS,
    *      clamped to [MIN_PREFETCH_ROWS .. MAX_PREFETCH_ROWS].
    * 2) In JS, greedily accumulate rows while
-   *      (FIXED_OVERHEAD + payload_uncompressed_bytes) fits the budget.
+   *      (FIXED_OVERHEAD + uncompressedBytes) fits the budget.
    * 3) Deliver → ACK delete chosen ids.
    */
   public async fetchDeliverAckChunk(
@@ -283,15 +281,15 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
       const rows = (await this.dataSource.query(
         `SELECT id,
-                  "aggregateId" as aggregateId,
-                  "eventType"   as eventType,
-                  "eventVersion" as eventVersion,
-                  "requestId"   as requestId,
-                  "blockHeight" as blockHeight,
-                  "payload"     as payload,
-                  "isCompressed" as isCompressed,
-                  "timestamp"   as timestamp,
-                  "payload_uncompressed_bytes" as ulen
+                "aggregateId"  AS "aggregateId",
+                "eventType"    AS "eventType",
+                "eventVersion" AS "eventVersion",
+                "requestId"    AS "requestId",
+                "blockHeight"  AS "blockHeight",
+                "payload"      AS "payload",
+                "isCompressed" AS "isCompressed",
+                "timestamp"    AS "timestamp",
+                "uncompressedBytes" as ulen
          FROM "outbox"
          WHERE id > $1::bigint
          ORDER BY id ASC

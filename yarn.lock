@@ -860,6 +860,7 @@ __metadata:
     localforage: "npm:1.10.0"
     lodash: "npm:4.17.21"
     pg: "npm:8.12.0"
+    pg-query-stream: "npm:4.10.3"
     reflect-metadata: "npm:0.1.14"
     rxjs: "npm:7.8.1"
     sql.js: "npm:1.13.0"
@@ -10145,6 +10146,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"pg-cursor@npm:^2.15.3":
+  version: 2.15.3
+  resolution: "pg-cursor@npm:2.15.3"
+  peerDependencies:
+    pg: ^8
+  checksum: 10/ceae81cf5e48d0e30382fa267dd659d929f4122d8435f40908421428104973eb54665651df94872d513835b32ac188833bc7ebee18acb3b27a8863fbc5dfc1d8
+  languageName: node
+  linkType: hard
+
 "pg-int8@npm:1.0.1":
   version: 1.0.1
   resolution: "pg-int8@npm:1.0.1"
@@ -10172,6 +10182,17 @@ __metadata:
   version: 1.10.3
   resolution: "pg-protocol@npm:1.10.3"
   checksum: 10/31da85319084c03f403efee7accce9786964df82a7feb60e6bd77b71f1e622c74a2a644a2bc434389d0ab92e5abdeedea69ebdb53b1897d9f01d2a1f51a8a2fe
+  languageName: node
+  linkType: hard
+
+"pg-query-stream@npm:4.10.3":
+  version: 4.10.3
+  resolution: "pg-query-stream@npm:4.10.3"
+  dependencies:
+    pg-cursor: "npm:^2.15.3"
+  peerDependencies:
+    pg: ^8
+  checksum: 10/e3e8acce408bca2de1b41a9c59149ad3f163aa3e03f5a2c0dd5d6ee8b249ea1ecb0170f30fabb55dfa0cbf3db49d5d3f1c96dc71011159186712c6a643ef35eb
   languageName: node
   linkType: hard
 

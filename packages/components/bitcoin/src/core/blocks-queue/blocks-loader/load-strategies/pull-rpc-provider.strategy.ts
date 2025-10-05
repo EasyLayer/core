@@ -16,7 +16,7 @@ interface BlockInfo {
  * Approximate reply size = sum(total_size) * 2.1 (×2 hex + ~10% JSON overhead).
  */
 export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.RPC_PULL;
+  readonly name: StrategyNames = StrategyNames.RPC;
 
   // Budget of expected RPC reply bytes (not raw block bytes)
   private _maxRpcReplyBytes: number = 10 * 1024 * 1024;

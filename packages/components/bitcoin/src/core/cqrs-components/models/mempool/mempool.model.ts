@@ -52,18 +52,27 @@ function planBatchesByProvider(txids: string[], providers: ProviderMap, totalLim
 /**
  * Slimming normalizer:
  * Convert heavy Transaction → MempoolTransaction immediately (omit large fields, keep only what's needed).
- * Complexity: O(#vin + #vout), memory: ~1–2KB typical (depends on witness/script density).
+ * Complexity: O(#vin + #vout)
  */
 function normalizeToMempoolTx(tx: Transaction): MempoolTransaction {
+  // keep only what watcher needs for conflicts and RBF signaling
   const lightVin: LightVin[] = (tx.vin ?? []).map((v) => ({
     txid: v.txid,
     vout: v.vout,
+    sequence: v.sequence, // needed for BIP-125 signaling check
   }));
 
   const lightVout: LightVout[] = (tx.vout ?? []).map((o) => ({
     value: o.value,
     n: o.n,
-    scriptPubKey: o.scriptPubKey ? { type: o.scriptPubKey.type } : undefined,
+    // preserve type + addresses if present; add hex when available for address derivation
+    scriptPubKey: o.scriptPubKey
+      ? {
+          type: o.scriptPubKey.type,
+          addresses: (o.scriptPubKey as any)?.addresses, // keep if verbose form provided
+          hex: (o.scriptPubKey as any)?.hex, // keep if verbose form provided
+        }
+      : undefined,
   }));
 
   const feeRate = tx.fee && tx.vsize > 0 ? tx.fee / tx.vsize : undefined;
@@ -83,7 +92,7 @@ function normalizeToMempoolTx(tx: Transaction): MempoolTransaction {
     fee: tx.fee,
     feeRate,
     wtxid: tx.wtxid,
-    bip125_replaceable: tx.bip125_replaceable,
+    bip125_replaceable: tx.bip125_replaceable, // optional fast flag; model still checks sequences
   };
 
   return slim;

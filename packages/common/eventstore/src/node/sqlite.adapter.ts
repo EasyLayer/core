@@ -95,7 +95,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     lastTs: number;
     lastId: string;
     rawEvents: WireEventRecord[];
-    avgUncompressedBytes?: number;
   }> {
     return this.writeLock.runExclusive(async () => {
       const qr = this.dataSource.createQueryRunner();
@@ -151,7 +150,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
             // (2) Insert into outbox with our monotonic id.
             await qr.manager.query(
               `INSERT OR IGNORE INTO "outbox"
-                ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+                ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
               VALUES (?,?,?,?,?,?,?,?,?,?)`,
               [
                 newId.toString(), // bind as string; SQLite will store as INTEGER
@@ -163,6 +162,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
                 row.payload,
                 row.isCompressed ? 1 : 0,
                 row.timestamp,
+                row.uncompressedBytes,
               ]
             );
 
@@ -305,7 +305,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
    *      N ≈ transportCapBytes / AVG_EVENT_BYTES_GUESS,
    *      clamped to [MIN_PREFETCH_ROWS .. MAX_PREFETCH_ROWS].
    * 2) In JS, greedily accumulate rows while
-   *      (FIXED_OVERHEAD + payload_uncompressed_bytes) fits the budget.
+   *      (FIXED_OVERHEAD + uncompressedBytes) fits the budget.
    * 3) Deliver → ACK delete chosen ids.
    */
   public async fetchDeliverAckChunk(
@@ -318,15 +318,15 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
       const rows = (await this.dataSource.query(
         `SELECT CAST(id AS TEXT) AS id,
-                "aggregateId" as aggregateId,
-                "eventType"   as eventType,
-                "eventVersion" as eventVersion,
-                "requestId"   as requestId,
-                "blockHeight" as blockHeight,
-                "payload"     as payload,
-                "isCompressed" as isCompressed,
-                "timestamp"   as timestamp,
-                "payload_uncompressed_bytes" as ulen
+                "aggregateId"  AS "aggregateId",
+                "eventType"    AS "eventType",
+                "eventVersion" AS "eventVersion",
+                "requestId"    AS "requestId",
+                "blockHeight"  AS "blockHeight",
+                "payload"      AS "payload",
+                "isCompressed" AS "isCompressed",
+                "timestamp"    AS "timestamp",
+                "uncompressedBytes" as ulen
          FROM "outbox"
          WHERE id > CAST(? AS INTEGER)
          ORDER BY id ASC
@@ -446,7 +446,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     return {
       id: rows[0].id,
       aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
-      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockHeight),
       version: Number(rows[0].version),
       payload: rows[0].payload,
       isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
@@ -469,7 +469,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     return {
       id: rows[0].id,
       aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
-      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockHeight),
       version: Number(rows[0].version),
       payload: rows[0].payload,
       isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),

@@ -11,7 +11,7 @@ export interface OutboxDataModel {
   payload: Buffer; // BLOB/bytea
   timestamp: number;
   isCompressed?: boolean;
-  payload_uncompressed_bytes: number;
+  uncompressedBytes: number;
 }
 
 export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySchema<OutboxDataModel> => {
@@ -56,7 +56,7 @@ export const createOutboxEntity = (dbDriver: DriverType = 'postgres'): EntitySch
         default: false,
         nullable: true,
       },
-      payload_uncompressed_bytes: { type: bytesType },
+      uncompressedBytes: { type: bytesType },
     },
     uniques: [{ name: 'UQ_outbox_aggregate_version', columns: ['aggregateId', 'eventVersion'] }],
     indices: [

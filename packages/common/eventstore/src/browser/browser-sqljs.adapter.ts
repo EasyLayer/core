@@ -143,7 +143,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
             // (2) Outbox insert using our precomputed id.
             await qr.manager.query(
               `INSERT OR IGNORE INTO "outbox"
-                 ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","payload_uncompressed_bytes")
+                 ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
                VALUES (?,?,?,?,?,?,?,?,?,?)`,
               [
                 newId.toString(), // BIGINT as string literal
@@ -298,7 +298,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
   /**
    * Prefetch by id and greedily accumulate rows until the transport budget is reached:
    *  1) LIMIT ~ cap / AVG_EVENT_BYTES_GUESS, clamped to [MIN..MAX]
-   *  2) Sum FIXED_OVERHEAD + payload_uncompressed_bytes
+   *  2) Sum FIXED_OVERHEAD + uncompressedBytes
    *  3) Deliver → ACK delete → advance watermark
    */
   public async fetchDeliverAckChunk(
@@ -314,15 +314,15 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
 
       const rows = (await this.dataSource.query(
         `SELECT CAST(id AS TEXT) AS id,
-                "aggregateId" as aggregateId,
-                "eventType"   as eventType,
-                "eventVersion" as eventVersion,
-                "requestId"   as requestId,
-                "blockHeight" as blockHeight,
-                "payload"     as payload,
-                "isCompressed" as isCompressed,
-                "timestamp"   as timestamp,
-                "payload_uncompressed_bytes" as ulen
+                "aggregateId"  AS "aggregateId",
+                "eventType"    AS "eventType",
+                "eventVersion" AS "eventVersion",
+                "requestId"    AS "requestId",
+                "blockHeight"  AS "blockHeight",
+                "payload"      AS "payload",
+                "isCompressed" AS "isCompressed",
+                "timestamp"    AS "timestamp",
+                "uncompressedBytes" as ulen
         FROM "outbox"
         WHERE id > CAST(? AS INTEGER)
         ORDER BY id ASC
@@ -443,7 +443,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
     return {
       id: String(rows[0].id ?? '0'),
       aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
-      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockHeight),
       version: Number(rows[0].version),
       payload: toBuffer(rows[0].payload),
       isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),
@@ -468,7 +468,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
     return {
       id: String(rows[0].id ?? '0'),
       aggregateId: rows[0].aggregateId ?? rows[0].aggregateid,
-      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockheight),
+      blockHeight: Number(rows[0].blockHeight ?? rows[0].blockHeight),
       version: Number(rows[0].version),
       payload: toBuffer(rows[0].payload),
       isCompressed: !!(rows[0].isCompressed ?? rows[0].iscompressed),

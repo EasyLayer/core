@@ -26,6 +26,7 @@ export interface EventDataModel {
   blockHeight: number;
   timestamp: number;
   isCompressed?: boolean;
+  uncompressedBytes?: number;
 }
 
 /**
@@ -40,9 +41,9 @@ export const createEventDataEntity = (
 
   // Auto-incrementing sequence for guaranteed order
   const id: any = {
-    type: isPostgres ? 'bigserial' : 'integer',
+    type: isPostgres ? 'bigint' : 'integer',
     primary: true,
-    generated: isPostgres ? true : 'increment',
+    generated: 'increment',
   };
 
   const payload: any = {
@@ -65,7 +66,19 @@ export const createEventDataEntity = (
         type: 'bigint',
       },
     },
-    uniques: [{ name: `UQ_${aggregateId}_v_reqid`, columns: ['version', 'requestId'] }],
-    indices: [{ name: `IDX_${aggregateId}_blockh`, columns: ['blockHeight'] }],
+    uniques: [{ name: safeName(`UQ_${aggregateId}_v_reqid`), columns: ['version', 'requestId'] }],
+    indices: [{ name: safeName(`IDX_${aggregateId}_blockh`), columns: ['blockHeight'] }],
   });
 };
+
+function safeName(raw: string): string {
+  const s = raw.replace(/[^a-zA-Z0-9_]/g, '_');
+  const hash = (Math.abs(hashCode(s)) % 999).toString();
+  const base = s.slice(0, Math.max(0, 60 - hash.length - 1));
+  return `${base}_${hash}`;
+}
+function hashCode(str: string): number {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  return h;
+}

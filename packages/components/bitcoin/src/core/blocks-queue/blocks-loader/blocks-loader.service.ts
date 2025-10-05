@@ -114,12 +114,12 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     };
 
     this._strategies.set(
-      StrategyNames.RPC_PULL,
+      StrategyNames.RPC,
       new PullRpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
 
     this._strategies.set(
-      StrategyNames.P2P_PROCESS,
+      StrategyNames.P2P,
       new ProcessP2PProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
   }
@@ -129,8 +129,8 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     const configStrategy = this.config.queueLoaderStrategyName;
 
     // If config is PULL - always use PULL
-    if (configStrategy === StrategyNames.RPC_PULL) {
-      return this._strategies.get(StrategyNames.RPC_PULL)!;
+    if (configStrategy === StrategyNames.RPC) {
+      return this._strategies.get(StrategyNames.RPC)!;
     }
 
     // If config is SUBSCRIBE but big height difference - use PULL
@@ -139,11 +139,11 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
       const threshold = this.config.strategyThreshold || 10;
 
       if (heightDifference > threshold) {
-        return this._strategies.get(StrategyNames.RPC_PULL)!;
+        return this._strategies.get(StrategyNames.RPC)!;
       }
     }
 
     // Default to use configured strategy
-    return this._strategies.get(StrategyNames.P2P_PROCESS)!;
+    return this._strategies.get(StrategyNames.P2P)!;
   }
 }
