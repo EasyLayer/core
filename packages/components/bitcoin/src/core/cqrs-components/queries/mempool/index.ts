@@ -1,30 +1,36 @@
-export * from './check-mempool-transaction.query';
-export * from './get-mempool-stats.query';
-export * from './get-mempool-transactions.query';
-export * from './get-mempool-txids.query';
+export * from './check-mempool-transaction-full.query';
+export * from './get-mempool-overview.query';
+export * from './get-list-mempool-transactions.query';
+export * from './get-list-mempool-txids.query';
 
-import { CheckMempoolTransactionQuery, CheckMempoolTransactionQueryDto } from './check-mempool-transaction.query';
-import { GetMempoolStatsQuery, GetMempoolStatsQueryDto } from './get-mempool-stats.query';
-import { GetMempoolTransactionsQuery, GetMempoolTransactionsQueryDto } from './get-mempool-transactions.query';
-import { GetMempoolTxidsQuery, GetMempoolTxidsQueryDto } from './get-mempool-txids.query';
+import {
+  CheckMempoolTransactionFullQuery,
+  CheckMempoolTransactionFullQueryDto,
+} from './check-mempool-transaction-full.query';
+import { GetMempoolOverviewQuery, GetMempoolOverviewQueryDto } from './get-mempool-overview.query';
+import {
+  GetListMempoolTransactionsQuery,
+  GetListMempoolTransactionsQueryDto,
+} from './get-list-mempool-transactions.query';
+import { GetListMempoolTxidsQuery, GetListMempoolTxidsQueryDto } from './get-list-mempool-txids.query';
 
 export const MempoolQueries = [
-  CheckMempoolTransactionQuery,
-  GetMempoolStatsQuery,
-  GetMempoolTransactionsQuery,
-  GetMempoolTxidsQuery,
+  CheckMempoolTransactionFullQuery,
+  GetMempoolOverviewQuery,
+  GetListMempoolTransactionsQuery,
+  GetListMempoolTxidsQuery,
 ];
 
 export const MempoolQueryDtos = [
-  CheckMempoolTransactionQueryDto,
-  GetMempoolStatsQueryDto,
-  GetMempoolTransactionsQueryDto,
-  GetMempoolTxidsQueryDto,
+  CheckMempoolTransactionFullQueryDto,
+  GetMempoolOverviewQueryDto,
+  GetListMempoolTransactionsQueryDto,
+  GetListMempoolTxidsQueryDto,
 ];
 
 export const MempoolQueryDtoMap = new Map([
-  [CheckMempoolTransactionQuery, CheckMempoolTransactionQueryDto],
-  [GetMempoolStatsQuery, GetMempoolStatsQueryDto],
-  [GetMempoolTransactionsQuery, GetMempoolTransactionsQueryDto],
-  [GetMempoolTxidsQuery, GetMempoolTxidsQueryDto],
+  [CheckMempoolTransactionFullQuery, CheckMempoolTransactionFullQueryDto],
+  [GetMempoolOverviewQuery, GetMempoolOverviewQueryDto],
+  [GetListMempoolTransactionsQuery, GetListMempoolTransactionsQueryDto],
+  [GetListMempoolTxidsQuery, GetListMempoolTxidsQueryDto],
 ]);

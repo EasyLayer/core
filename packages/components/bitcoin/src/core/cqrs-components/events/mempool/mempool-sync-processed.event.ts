@@ -1,9 +1,9 @@
 import { BasicEvent } from '@easylayer/common/cqrs';
-import type { Transaction } from '../../../blockchain-provider';
+import type { MempoolTransaction } from '../../../blockchain-provider';
 export interface BitcoinMempoolSyncProcessedEventPayload {
   loadedTransactions: Array<{
     txid: string;
-    transaction: Transaction;
+    transaction: MempoolTransaction;
     // Optional provider info for transactions loaded directly from specific providers
     providerIndex?: number;
     // providerName?: string;

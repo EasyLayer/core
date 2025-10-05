@@ -4,7 +4,7 @@ import type { NetworkProvider, MempoolProvider } from './providers';
 import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
 import { BitcoinNormalizer } from './normalizer';
 import { BitcoinMerkleVerifier } from './merkle-verifier';
-import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo } from './components';
+import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo, MempoolTxMetadata } from './components';
 
 /**
  * A Subscription is a Promise that resolves once unsubscribed, and also provides
@@ -591,7 +591,7 @@ export class BlockchainProviderService {
   public async getMempoolEntries(
     txids: string[],
     options: MempoolRequestOptions = {}
-  ): Promise<(MempoolTransaction | null)[]> {
+  ): Promise<(MempoolTxMetadata | null)[]> {
     this.ensureMempoolProviders();
     return this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getMempoolEntries(txids),

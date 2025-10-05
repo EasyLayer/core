@@ -1,0 +1,249 @@
+import {
+  hashTxid32,
+  TxIndex,
+  ProviderMap,
+  MetadataStore,
+  TxStore,
+  LoadTracker,
+} from '../components';
+
+describe('hashTxid32', () => {
+  it('returns deterministic uint32 for same string', () => {
+    const txid = 'a'.repeat(64);
+    const h1 = hashTxid32(txid);
+    const h2 = hashTxid32(txid);
+    expect(h1).toBe(h2);
+    expect(h1).toBeGreaterThanOrEqual(0);
+    expect(h1).toBeLessThanOrEqual(0xffffffff);
+  });
+
+  it('likely differs for different strings', () => {
+    const h1 = hashTxid32('0'.repeat(64));
+    const h2 = hashTxid32('1'.repeat(64));
+    expect(h1).not.toBe(h2);
+  });
+});
+
+describe('TxIndex', () => {
+  it('adds and retrieves txid by hash', () => {
+    const idx = new TxIndex();
+    const txid = 'f'.repeat(64);
+    const h = idx.add(txid);
+    expect(idx.hasHash(h)).toBe(true);
+    expect(idx.getByHash(h)).toBe(txid);
+    expect([...idx.values()]).toContain(txid);
+    expect([...idx.keys()]).toContain(h);
+    expect(idx.size()).toBe(1);
+  });
+
+  it('removes by hash and clears', () => {
+    const idx = new TxIndex();
+    const h = idx.add('a'.repeat(64));
+    idx.removeByHash(h);
+    expect(idx.hasHash(h)).toBe(false);
+    expect(idx.size()).toBe(0);
+    idx.add('b'.repeat(64));
+    idx.clear();
+    expect(idx.size()).toBe(0);
+  });
+
+  it('snapshot map setters/getters work', () => {
+    const idx = new TxIndex();
+    const m = new Map<number, string>();
+    m.set(123, 'x'.repeat(64));
+    idx.__setMap(m);
+    expect(idx.size()).toBe(1);
+    expect(idx.__getMap()).toBe(m);
+  });
+});
+
+describe('ProviderMap', () => {
+  it('creates stable provider indices and maps tx to providers', () => {
+    const pm = new ProviderMap();
+    const iA = pm.getOrCreateProviderIndex('A');
+    const iB = pm.getOrCreateProviderIndex('B');
+    expect(iA).toBe(0);
+    expect(iB).toBe(1);
+    expect(pm.getOrCreateProviderIndex('A')).toBe(iA);
+
+    pm.add(111, iA);
+    pm.add(111, iB);
+    const set = pm.getProviders(111)!;
+    expect(set.has(iA)).toBe(true);
+    expect(set.has(iB)).toBe(true);
+    expect(pm.getProviderName(iA)).toBe('A');
+    expect(pm.getProviderNames()).toEqual(['A', 'B']);
+  });
+
+  it('removes mapping and clears names', () => {
+    const pm = new ProviderMap();
+    const iA = pm.getOrCreateProviderIndex('A');
+    pm.add(222, iA);
+    pm.remove(222);
+    expect(pm.getProviders(222)).toBeUndefined();
+    pm.clear();
+    expect(pm.getProviderNames()).toEqual([]);
+  });
+
+  it('snapshot accessors work', () => {
+    const pm = new ProviderMap();
+    const map = new Map<number, Set<number>>([[10, new Set([0, 1])]]);
+    pm.__setMap(map);
+    pm.__setNames(['X', 'Y']);
+    expect(pm.__getMap()).toBe(map);
+    expect(pm.__getNames()).toEqual(['X', 'Y']);
+  });
+});
+
+describe('MetadataStore', () => {
+  const sampleMeta = (overrides: Partial<any> = {}): any => ({
+    txid: 't'.repeat(64),
+    size: 100,
+    vsize: 100,
+    weight: 400,
+    fee: 5000,
+    modifiedfee: 5000,
+    time: 1,
+    height: 0,
+    depends: [],
+    descendantcount: 0,
+    descendantsize: 0,
+    descendantfees: 0,
+    ancestorcount: 0,
+    ancestorsize: 0,
+    ancestorfees: 0,
+    fees: { base: 5000, modified: 5000, ancestor: 0, descendant: 0 },
+    bip125_replaceable: false,
+    ...overrides,
+  });
+
+  it('set/get/has/remove/size/clear', () => {
+    const ms = new MetadataStore();
+    const meta = sampleMeta();
+    ms.set(1, meta);
+    expect(ms.get(1)).toEqual(meta);
+    expect(ms.has(1)).toBe(true);
+    expect(ms.size()).toBe(1);
+
+    const entries = Array.from(ms.entries());
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toEqual([1, meta]);
+
+    ms.remove(1);
+    expect(ms.has(1)).toBe(false);
+    expect(ms.size()).toBe(0);
+
+    ms.set(2, sampleMeta({ fee: 123 }));
+    ms.clear();
+    expect(ms.size()).toBe(0);
+  });
+
+  it('snapshot accessors work', () => {
+    const ms = new MetadataStore();
+    const m = new Map<number, any>([[7, sampleMeta({ fee: 1 })]]);
+    ms.__setMap(m);
+    expect(ms.__getMap()).toBe(m);
+    expect(ms.get(7)).toEqual(m.get(7));
+  });
+});
+
+describe('TxStore', () => {
+  const slimTx = (id: string): any => ({
+    txid: id,
+    hash: id,
+    version: 2,
+    size: 120,
+    strippedsize: 100,
+    sizeWithoutWitnesses: 100,
+    vsize: 100,
+    weight: 400,
+    locktime: 0,
+    vin: [],
+    vout: [],
+    fee: 1000,
+    feeRate: 10,
+    wtxid: id,
+    bip125_replaceable: false,
+  });
+
+  it('put/get/remove/count/clear', () => {
+    const st = new TxStore();
+    st.put(5, slimTx('a'));
+    expect(st.get(5)?.txid).toBe('a');
+    expect(st.count()).toBe(1);
+    st.remove(5);
+    expect(st.get(5)).toBeUndefined();
+    expect(st.count()).toBe(0);
+    st.put(1, slimTx('x'));
+    st.put(2, slimTx('y'));
+    st.clear();
+    expect(st.count()).toBe(0);
+  });
+
+  it('snapshot accessors work', () => {
+    const st = new TxStore();
+    const m = new Map<number, any>([[9, slimTx('z')]]);
+    st.__setMap(m);
+    expect(st.__getMap()).toBe(m);
+    expect(st.get(9)?.txid).toBe('z');
+  });
+});
+
+// describe('FeeRateIndex', () => {
+//   it('adds to rounded buckets and distributes', () => {
+//     const fi = new FeeRateIndex(); // precision 0.1
+//     fi.add(1, 12.34); // → 12.3
+//     fi.add(2, 12.39); // → 12.3
+//     fi.add(3, 7.01);  // → 7.0
+
+//     const dist = fi.distribution();
+//     expect(dist[12.3]).toBe(2);
+//     expect(dist[7.0]).toBe(1);
+//   });
+
+//   it('removes and cleans up empty buckets', () => {
+//     const fi = new FeeRateIndex();
+//     fi.add(1, 1.19); // 1.1
+//     fi.add(2, 1.10); // 1.1
+//     fi.remove(1, 1.19);
+//     let dist = fi.distribution();
+//     expect(dist[1.1]).toBe(1);
+//     fi.remove(2, 1.10);
+//     dist = fi.distribution();
+//     expect(dist[1.1]).toBeUndefined();
+//   });
+
+//   it('snapshot accessors work', () => {
+//     const fi = new FeeRateIndex();
+//     const m = new Map<number, Set<number>>([[3.2, new Set([1, 2])]]);
+//     fi.__setMap(m);
+//     expect(fi.__getMap()).toBe(m);
+//     const dist = fi.distribution();
+//     expect(dist[3.2]).toBe(2);
+//   });
+// });
+
+describe('LoadTracker', () => {
+  it('marks, queries, removes, clears', () => {
+    const lt = new LoadTracker();
+    const info = { timestamp: 123, feeRate: 5.5, providerIndex: 0 };
+    lt.mark(77, info);
+    expect(lt.isLoaded(77)).toBe(true);
+    expect(lt.get(77)).toEqual(info);
+    expect(lt.count()).toBe(1);
+    lt.remove(77);
+    expect(lt.isLoaded(77)).toBe(false);
+    expect(lt.count()).toBe(0);
+    lt.mark(1, info);
+    lt.clear();
+    expect(lt.count()).toBe(0);
+  });
+
+  it('snapshot accessors work', () => {
+    const lt = new LoadTracker();
+    const m = new Map<number, any>([[5, { timestamp: 1, feeRate: 1, providerIndex: 2 }]]);
+    lt.__setMap(m);
+    expect(lt.__getMap()).toBe(m);
+    expect(lt.get(5)?.providerIndex).toBe(2);
+  });
+});

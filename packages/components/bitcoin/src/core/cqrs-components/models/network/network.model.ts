@@ -1,13 +1,13 @@
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
-import { Blockchain } from '../../blockchain-provider';
+import type { BlockchainProviderService, LightBlock } from '../../../blockchain-provider';
+import { Blockchain } from './blockchain.structure';
 import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
   BitcoinNetworkReorganizedEvent,
   BitcoinNetworkClearedEvent,
-} from '../events';
-import { BlockchainValidationError, ReorganizationGenesisError } from './errors';
+} from '../../events';
+import { BlockchainValidationError, ReorganizationGenesisError } from '../errors';
 
 /**
  * Network aggregate for blockchain storage with fast height lookups
