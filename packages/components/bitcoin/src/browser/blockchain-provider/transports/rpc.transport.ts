@@ -1,28 +1,32 @@
 import { Buffer } from 'buffer';
 import { v4 as uuidv4 } from 'uuid';
 import type { BaseTransportOptions, RateLimits } from '../../../core';
-import { BaseTransport } from '../../../core';
+import { BaseTransport, RateLimiter } from '../../../core';
 
 export interface RPCTransportOptions extends BaseTransportOptions {
   baseUrl: string;
   responseTimeout?: number;
+  /** Optional rate limits specific to this RPC transport (browser). */
+  rateLimits?: Partial<RateLimits>;
 }
 
+/** Base64 helper safe for both Node and browser. */
 function toBase64(str: string): string {
-  if (typeof Buffer !== 'undefined') {
+  if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
     return Buffer.from(str).toString('base64');
   }
-  if (typeof btoa !== 'undefined') {
-    return btoa(str);
-  }
-  return (globalThis as any).btoa?.(str) ?? '';
+  if (typeof btoa !== 'undefined') return btoa(str);
+  // @ts-ignore
+  return globalThis?.btoa?.(str) ?? '';
 }
 
+/** UUID helper with graceful fallback. */
 function uuid(): string {
   try {
     return uuidv4();
   } catch {
-    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    // @ts-ignore
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       // @ts-ignore
       return crypto.randomUUID();
     }
@@ -41,8 +45,7 @@ function hexToU8(hex: string): Uint8Array {
   const len = clean.length / 2;
   const out = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
-    const byte = Number('0x' + clean.substr(i * 2, 2));
-    out[i] = byte;
+    out[i] = Number('0x' + clean.substr(i * 2, 2));
   }
   return out;
 }
@@ -57,26 +60,14 @@ function toBufferLike(u8: Uint8Array): Buffer {
 }
 
 /**
- * RPC Transport with guaranteed request-response order via UUID matching
+ * Browser RPC Transport (fetch-based) with order-preserving batch JSON-RPC and RateLimiter.
  *
- * Core Architecture:
- * 1. Each RPC call gets unique UUID for identification
- * 2. Server can return responses in any order (JSON-RPC 2.0 spec)
- * 3. We match responses to requests using UUID
- * 4. Missing/failed responses are filled with null values
- * 5. Final result array maintains exact order correspondence with input
- *
- * Order Guarantees:
- * - Input requests[i] always corresponds to output results[i]
- * - RateLimiter preserves order through batching
- * - UUID matching eliminates dependency on server response order
- * - null values maintain array positions for failed requests
- *
- * Example:
- * Input:  [req_A, req_B, req_C]
- * UUIDs:  [uuid1, uuid2, uuid3]
- * Server: [{id:uuid3,result:C}, {id:uuid1,result:A}]
- * Output: [A, null, C]
+ * Design rules:
+ * - RateLimiter lives inside this transport (RPC-only concern).
+ * - Public methods map to canonical transport API and call a private batch executor via limiter.
+ * - Arrays: results keep exact input order; failures are `null` in-place.
+ * - Error handling goes through BaseTransport.executeWithErrorHandling/handleError.
+ * - Subscriptions are NOT supported in browser RPC transport (use P2P or Node RPC+ZMQ).
  */
 export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   readonly type = 'rpc';
@@ -86,9 +77,13 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   private password?: string;
   private responseTimeout: number;
 
+  // Rate limiter is internal to the RPC transport
+  private rateLimiter: RateLimiter;
+
   constructor(options: RPCTransportOptions) {
     super(options);
 
+    // Allow basic auth in URL but strip it out for fetch requests
     const url = new URL(options.baseUrl);
     this.username = url.username || undefined;
     this.password = url.password || undefined;
@@ -97,17 +92,25 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     this.baseUrl = url.toString();
 
     this.responseTimeout = options.responseTimeout ?? 5000;
+
+    // Initialize limiter with provided config (or defaults)
+    this.rateLimiter = new RateLimiter(options.rateLimits ?? {});
   }
 
   get connectionOptions(): RPCTransportOptions {
     return {
       uniqName: this.uniqName,
       baseUrl: this.baseUrl,
-      rateLimits: (this.rateLimiter as unknown as { config: Required<RateLimits> })['config'],
+      // Expose limiter config for diagnostics (without changing RateLimiter API)
+
+      rateLimits:
+        (this.rateLimiter as any)?.getConfig?.() ?? (this.rateLimiter as unknown as { config?: RateLimits })?.config,
       network: this.network,
       responseTimeout: this.responseTimeout,
-    };
+    } as RPCTransportOptions;
   }
+
+  // ===== Lifecycle =====
 
   async connect(): Promise<void> {
     return this.executeWithErrorHandling(async () => {
@@ -118,66 +121,190 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   }
 
   async disconnect(): Promise<void> {
+    // Stop limiter timers/queues if any
     await this.rateLimiter.stop();
     this.isConnected = false;
   }
 
   async healthcheck(): Promise<boolean> {
     try {
-      const results = await this.rateLimiter.execute([{ method: 'getblockchaininfo', params: [] }], (calls) =>
+      const [r] = await this.rateLimiter.execute([{ method: 'getblockchaininfo', params: [] }], (calls) =>
         this.batchCall(calls)
       );
-      return results[0] !== null && results[0] !== undefined;
+      return r !== null && r !== undefined;
     } catch {
       return false;
     }
   }
 
+  // ===== Canonical API (order-preserving, null-safe) =====
+
+  /** Current best height. */
   async getBlockHeight(): Promise<number> {
     return this.executeWithErrorHandling(async () => {
-      const results = await this.rateLimiter.execute([{ method: 'getblockcount', params: [] }], (calls) =>
-        this.batchCall(calls)
+      const [height] = await this.rateLimiter.execute([{ method: 'getblockcount', params: [] }], (calls) =>
+        this.batchCall<number>(calls)
       );
-      const height = results[0];
-      if (height === null || height === undefined) {
-        throw new Error('Failed to get block height: null response from RPC server');
-      }
+      if (typeof height !== 'number') throw new Error('Failed to get block height: invalid response');
       return height;
     }, 'getBlockHeight');
   }
 
+  /** Heights → hashes (aligned with input; null for missing). */
   async getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]> {
     return this.executeWithErrorHandling(async () => {
-      const requests = heights.map((height) => ({ method: 'getblockhash', params: [height] }));
-      const results = await this.rateLimiter.execute(requests, (calls) => this.batchCall(calls));
-      return results.map((hash) => hash || null);
+      const reqs = heights.map((h) => ({ method: 'getblockhash', params: [h] }));
+      const res = await this.rateLimiter.execute(reqs, (calls) => this.batchCall<string>(calls));
+      return res.map((hash) => (typeof hash === 'string' ? hash : null));
     }, 'getManyBlockHashesByHeights');
   }
 
-  public async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
+  /** Hashes → block bytes (Buffer/Uint8Array), aligned with input. */
+  async requestHexBlocks(hashes: string[]): Promise<(Buffer | Uint8Array | null)[]> {
     return this.executeWithErrorHandling(async () => {
-      const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] }));
-      const hexResults = await this.rateLimiter.execute(requests, (calls) => this.batchCall<string>(calls));
+      const reqs = hashes.map((hash) => ({ method: 'getblock', params: [hash, 0] })); // verbosity=0 -> hex
+      const hexResults = await this.rateLimiter.execute(reqs, (calls) => this.batchCall<string>(calls));
 
-      const out: (Buffer | null)[] = new Array(hashes.length);
+      const out: (Buffer | Uint8Array | null)[] = new Array(hashes.length);
       for (let i = 0; i < hexResults.length; i++) {
         const hex = hexResults[i];
         if (typeof hex !== 'string') {
           out[i] = null;
           continue;
         }
-        if (hasNodeBuffer()) {
-          out[i] = Buffer.from(hex, 'hex');
-        } else {
-          const u8 = hexToU8(hex);
-          out[i] = toBufferLike(u8);
-        }
+        out[i] = hasNodeBuffer() ? Buffer.from(hex, 'hex') : hexToU8(hex);
       }
       return out;
     }, 'requestHexBlocks');
   }
 
-  async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
+  /** Hashes → verbose blocks (JSON), aligned with input. */
+  async getRawBlocksByHashesVerbose(hashes: string[], verbosity: 1 | 2 = 1): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = hashes.map((hash) => ({ method: 'getblock', params: [hash, verbosity] }));
+      return this.rateLimiter.execute(reqs, (calls) => this.batchCall<any>(calls));
+    }, 'getRawBlocksByHashesVerbose');
+  }
+
+  /** Hashes → getblockstats results (JSON), aligned with input. */
+  async getBlockStatsByHashes(hashes: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = hashes.map((hash) => ({ method: 'getblockstats', params: [hash] }));
+      return this.rateLimiter.execute(reqs, (calls) => this.batchCall<any>(calls));
+    }, 'getBlockStatsByHashes');
+  }
+
+  /** Hashes → headers (JSON), aligned with input. */
+  async getBlockHeadersByHashes(hashes: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = hashes.map((hash) => ({ method: 'getblockheader', params: [hash, true] }));
+      return this.rateLimiter.execute(reqs, (calls) => this.batchCall<any>(calls));
+    }, 'getBlockHeadersByHashes');
+  }
+
+  /** Hashes → heights (via headers), aligned with input. */
+  async getHeightsByHashes(hashes: string[]): Promise<(number | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const headers = await this.getBlockHeadersByHashes(hashes);
+      return headers.map((h) => (h && typeof h.height === 'number' ? h.height : null));
+    }, 'getHeightsByHashes');
+  }
+
+  /** Txids → tx hex (aligned with input). */
+  async getRawTransactionsHexByTxids(txids: string[]): Promise<(string | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = txids.map((txid) => ({ method: 'getrawtransaction', params: [txid, false] }));
+      const res = await this.rateLimiter.execute(reqs, (calls) => this.batchCall<string>(calls));
+      return res.map((hex) => (typeof hex === 'string' ? hex : null));
+    }, 'getRawTransactionsHexByTxids');
+  }
+
+  /** Txids → tx verbose JSON (aligned with input). */
+  async getRawTransactionsByTxids(txids: string[], verbosity: 1 | 2): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = txids.map((txid) => ({ method: 'getrawtransaction', params: [txid, verbosity] }));
+      return this.rateLimiter.execute(reqs, (calls) => this.batchCall<any>(calls));
+    }, 'getRawTransactionsByTxids');
+  }
+
+  /** Raw mempool: array (verbose=false) or object map (verbose=true). */
+  async getRawMempool(verbose: boolean = false): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const [r] = await this.rateLimiter.execute([{ method: 'getrawmempool', params: [verbose] }], (calls) =>
+        this.batchCall<any>(calls)
+      );
+      return r ?? (verbose ? {} : []);
+    }, 'getRawMempool');
+  }
+
+  /** Convenience: always return object map for verbose mempool. */
+  async getMempoolVerbose(): Promise<Record<string, any>> {
+    const out = await this.getRawMempool(true);
+    return out && typeof out === 'object' ? (out as Record<string, any>) : {};
+  }
+
+  /** Txids → mempoolentry JSON (aligned with input). */
+  async getMempoolEntries(txids: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      const reqs = txids.map((txid) => ({ method: 'getmempoolentry', params: [txid] }));
+      return this.rateLimiter.execute(reqs, (calls) => this.batchCall<any>(calls));
+    }, 'getMempoolEntries');
+  }
+
+  /** Mempool info JSON. */
+  async getMempoolInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const [r] = await this.rateLimiter.execute([{ method: 'getmempoolinfo', params: [] }], (calls) =>
+        this.batchCall<any>(calls)
+      );
+      return r ?? {};
+    }, 'getMempoolInfo');
+  }
+
+  /** Fee estimate JSON. */
+  async estimateSmartFee(
+    confTarget: number,
+    estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE'
+  ): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const [r] = await this.rateLimiter.execute(
+        [{ method: 'estimatesmartfee', params: [confTarget, estimateMode] }],
+        (calls) => this.batchCall<any>(calls)
+      );
+      return r ?? null;
+    }, 'estimateSmartFee');
+  }
+
+  /** Blockchain info JSON. */
+  async getBlockchainInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const [r] = await this.rateLimiter.execute([{ method: 'getblockchaininfo', params: [] }], (calls) =>
+        this.batchCall<any>(calls)
+      );
+      return r ?? {};
+    }, 'getBlockchainInfo');
+  }
+
+  /** Network info JSON. */
+  async getNetworkInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      const [r] = await this.rateLimiter.execute([{ method: 'getnetworkinfo', params: [] }], (calls) =>
+        this.batchCall<any>(calls)
+      );
+      return r ?? {};
+    }, 'getNetworkInfo');
+  }
+
+  // ===== Private JSON-RPC batch executor (order-preserving, null-safe) =====
+
+  /**
+   * Execute a batch JSON-RPC call via fetch.
+   * - Preserves order using id→result mapping.
+   * - Any missing/error responses become null at their original positions.
+   * - Times out using AbortController and responseTimeout.
+   * NOTE: This is private; providers never call it directly.
+   */
+  private async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
     return this.executeWithErrorHandling(async () => {
       const headers = new Headers();
       headers.set('Content-Type', 'application/json');
@@ -188,11 +315,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       }
 
       const callsWithIds = calls.map((call) => ({ ...call, id: uuid() }));
-      const payload = callsWithIds.map((call) => ({
+      const payload = callsWithIds.map((c) => ({
         jsonrpc: '2.0',
-        method: call.method,
-        params: call.params,
-        id: call.id,
+        method: c.method,
+        params: c.params,
+        id: c.id,
       }));
 
       const ac = new AbortController();
@@ -239,7 +366,13 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     }, 'batchCall');
   }
 
+  // ===== Streaming/subscriptions =====
+
+  /**
+   * Browser fetch-based RPC does not support subscriptions.
+   * Use Node RPC (ZMQ) or P2P transport for streaming new blocks.
+   */
   subscribeToNewBlocks(): { unsubscribe: () => void } {
-    throw new Error('Subscriptions are not supported in browser RPC transport');
+    this.throwNotImplemented('subscribeToNewBlocks');
   }
 }

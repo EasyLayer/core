@@ -1,14 +1,6 @@
 import type { Logger } from '@nestjs/common';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type {
-  BlockchainProviderService,
-  LightBlock,
-  Transaction,
-  MempoolTxMetadata,
-  MempoolTransaction,
-  LightVin,
-  LightVout,
-} from '../../../blockchain-provider';
+import type { BlockchainProviderService, Transaction, MempoolTxMetadata } from '../../../blockchain-provider';
 import {
   BitcoinMempoolInitializedEvent,
   BitcoinMempoolSyncProcessedEvent,
@@ -17,33 +9,37 @@ import {
   BitcoinMempoolBlockBatchProcessedEvent,
 } from '../../events';
 import { hashTxid32, TxIndex, ProviderMap, MetadataStore, TxStore, LoadTracker } from './components';
+import type { LightBlock, LightTransaction, LightVin, LightVout } from '../interfaces';
 
 /** === BatchPlanner (stateless util) ========================================
  * Responsibility: group txids by providerIndex; optionally slice to total limit.
  * Complexity: O(n), memory: proportional to #txids.
  */
-function planBatchesByProvider(txids: string[], providers: ProviderMap, totalLimit: number): Map<number, string[]> {
+function planBatchesByProvider(
+  txids: string[],
+  providers: ProviderMap,
+  perProviderCaps: Map<number, number>
+): Map<number, string[]> {
   const plan = new Map<number, string[]>();
-  if (totalLimit <= 0 || txids.length === 0) return plan;
+  if (txids.length === 0) return plan;
 
-  let taken = 0;
+  const takenByProvider = new Map<number, number>();
+
   for (const txid of txids) {
-    if (taken >= totalLimit) break;
     const h = hashTxid32(txid);
-    const provSet = providers.getProviders(h);
-    if (!provSet || provSet.size === 0) continue;
+    const primary = providers.primaryProviderIndex(h);
+    if (primary == null) continue;
 
-    // Pick *all* providers? No: the requirement is "parallel per provider, no fallback".
-    // We choose the first provider in Set order to assign responsibility for this txid’s request.
-    // That way each txid appears in exactly one provider batch, avoiding duplicate RPC calls.
-    const providerIdx = provSet.values().next().value as number;
-    let arr = plan.get(providerIdx);
-    if (!arr) {
-      arr = [];
-      plan.set(providerIdx, arr);
-    }
+    const cap = perProviderCaps.get(primary) ?? 0;
+    if (cap <= 0) continue;
+
+    const taken = takenByProvider.get(primary) ?? 0;
+    if (taken >= cap) continue;
+
+    let arr = plan.get(primary);
+    if (!arr) plan.set(primary, (arr = []));
     arr.push(txid);
-    taken++;
+    takenByProvider.set(primary, taken + 1);
   }
 
   return plan;
@@ -54,7 +50,7 @@ function planBatchesByProvider(txids: string[], providers: ProviderMap, totalLim
  * Convert heavy Transaction → MempoolTransaction immediately (omit large fields, keep only what's needed).
  * Complexity: O(#vin + #vout)
  */
-function normalizeToMempoolTx(tx: Transaction): MempoolTransaction {
+function normalizeToMempoolTx(tx: Transaction): LightTransaction {
   // keep only what watcher needs for conflicts and RBF signaling
   const lightVin: LightVin[] = (tx.vin ?? []).map((v) => ({
     txid: v.txid,
@@ -77,7 +73,7 @@ function normalizeToMempoolTx(tx: Transaction): MempoolTransaction {
 
   const feeRate = tx.fee && tx.vsize > 0 ? tx.fee / tx.vsize : undefined;
 
-  const slim: MempoolTransaction = {
+  const slim: LightTransaction = {
     txid: tx.txid,
     hash: tx.hash,
     version: tx.version,
@@ -119,10 +115,10 @@ export class Mempool extends AggregateRoot {
   /* Readiness flags */
   private isSynchronized = false; // flips to true exactly once per app run
 
-  // simple timing memory for dynamic batching in processSync
-  private prevSyncDurationMs = 0;
-  private lastSyncDurationMs = 0;
-  private currentBatchSize = 200;
+  // Per-provider batching (in-memory only; not serialized)
+  private defaultPerProviderBatchSize = 200;
+  private perProviderBatch = new Map<number, number>();
+  private __prevDur?: Map<number, number>; // previous durations per provider (ms), also in-memory only
 
   /* Internal stores */
   private txIndex = new TxIndex();
@@ -169,6 +165,7 @@ export class Mempool extends AggregateRoot {
     this.isSynchronized = !!state?.isSynchronized;
     this.mempoolInfoDriftTolerance =
       typeof state?.mempoolInfoDriftTolerance === 'number' ? state.mempoolInfoDriftTolerance : 0.15;
+    this.defaultPerProviderBatchSize = 200;
 
     const toMap = <K, V>(m: any): Map<K, V> => (m instanceof Map ? m : Array.isArray(m) ? new Map(m) : new Map());
     const toMapOfSets = (m: any): Map<number, Set<number>> => {
@@ -180,11 +177,18 @@ export class Mempool extends AggregateRoot {
       return out;
     };
 
+    // re-create instances before applying internal maps
+    this.txIndex = new TxIndex();
+    this.providerMap = new ProviderMap();
+    this.metaStore = new MetadataStore();
+    this.txStore = new TxStore();
+    this.loadTracker = new LoadTracker();
+
     this.txIndex.__setMap(toMap<number, string>(state?.txIndex_h2s));
     this.providerMap.__setMap(toMapOfSets(state?.provider_txToProviders));
     this.providerMap.__setNames(Array.isArray(state?.provider_names) ? state.provider_names : []);
     this.metaStore.__setMap(toMap<number, MempoolTxMetadata>(state?.metaStore_map));
-    this.txStore.__setMap(toMap<number, MempoolTransaction>(state?.txStore_map));
+    this.txStore.__setMap(toMap<number, LightTransaction>(state?.txStore_map));
     this.loadTracker.__setMap(toMap<number, any>(state?.loadTracker_map));
 
     Object.setPrototypeOf(this, Mempool.prototype);
@@ -194,8 +198,47 @@ export class Mempool extends AggregateRoot {
   private calcMetaFeeRate(m: MempoolTxMetadata): number {
     return m.vsize > 0 ? m.fee / m.vsize : 0;
   }
-  private calcSlimFeeRate(t: MempoolTransaction): number {
+  private calcSlimFeeRate(t: LightTransaction): number {
     return t.vsize > 0 && t.fee !== undefined ? t.fee / t.vsize : 0;
+  }
+
+  // ===== helpers: robust fee/feerate from verbose mempool meta =====
+
+  /** Extract fee (in sats) from verbose mempool metadata. */
+  private feeSatsFromMeta(m: MempoolTxMetadata): number {
+    const any = m as any;
+
+    // Some nodes expose flat `fee` (BTC) or already in sats (large numbers) — handle both.
+    if (typeof any.fee === 'number') {
+      // Heuristic: if value is huge it's likely already in sats; otherwise BTC.
+      return any.fee > 1e3 ? Math.round(any.fee) : Math.round(any.fee * 1e8);
+    }
+
+    // Bitcoin Core typical shape: fees.{base|modified|ancestor|descendant} in BTC
+    const fees = any.fees;
+    if (fees && typeof fees === 'object') {
+      const cand =
+        (typeof fees.modified === 'number' && fees.modified) ??
+        (typeof fees.base === 'number' && fees.base) ??
+        (typeof fees.ancestor === 'number' && fees.ancestor) ??
+        (typeof fees.descendant === 'number' && fees.descendant) ??
+        0;
+      return Math.round(cand * 1e8);
+    }
+
+    return 0;
+  }
+
+  /** Compute fee rate (sat/vB) from verbose mempool metadata; returns NaN if impossible. */
+  private calcMetaFeeRateRobust(m: MempoolTxMetadata): number {
+    const any = m as any;
+    const vsize = Number(any.vsize);
+    if (!Number.isFinite(vsize) || vsize <= 0) return NaN;
+
+    const sats = this.feeSatsFromMeta(m);
+    if (!Number.isFinite(sats) || sats < 0) return NaN;
+
+    return sats / vsize;
   }
 
   private removeEverywhere(txHash: number): void {
@@ -204,6 +247,27 @@ export class Mempool extends AggregateRoot {
     this.loadTracker.remove(txHash);
     this.providerMap.remove(txHash);
     this.txIndex.removeByHash(txHash);
+  }
+
+  /** Lazy getter: returns current batch size for provider, initializes with default if absent */
+  private getBatchSizeFor(providerIndex: number): number {
+    let v = this.perProviderBatch.get(providerIndex);
+    if (!v || v <= 0) {
+      v = this.defaultPerProviderBatchSize;
+      this.perProviderBatch.set(providerIndex, v);
+    }
+    return v;
+  }
+
+  /** Simple adaptive tuning per provider based on ratio (currentDuration / previousDuration) */
+  private tuneBatchSize(providerIndex: number, ratio: number) {
+    let v = this.getBatchSizeFor(providerIndex);
+    if (ratio > 1.2) {
+      v = Math.max(1, Math.round(v * 0.75)); // slower => shrink
+    } else if (ratio < 0.8) {
+      v = Math.max(1, Math.round(v * 1.25)); // faster => grow
+    }
+    this.perProviderBatch.set(providerIndex, v);
   }
 
   private async refreshFromVerboseSnapshot({
@@ -219,9 +283,9 @@ export class Mempool extends AggregateRoot {
     logger: Logger;
     isSynchronized?: boolean;
   }) {
-    const verboseList = await service.getRawMempoolFromAll(true);
+    const result = await service.getRawMempoolFromAll(true);
 
-    if (verboseList.length === 0) {
+    if (result.length === 0) {
       logger?.warn('Mempool metadata list is empty');
     }
 
@@ -229,21 +293,41 @@ export class Mempool extends AggregateRoot {
     const providerTxMap = new Map<string, number[]>();
     const filteredMetaByTxid = new Map<string, MempoolTxMetadata>();
 
-    for (let i = 0; i < verboseList.length; i++) {
-      const obj = verboseList[i];
-      if (!obj || typeof obj !== 'object') continue;
+    for (const { providerName, value } of result) {
+      const idx = this.providerMap.getIndexByName(providerName);
+      if (idx == null) {
+        logger.debug('refreshFromVerboseSnapshot: got response from unknown provider, skipping', {
+          args: { providerName },
+        });
+        continue;
+      }
+      if (!value || typeof value !== 'object') continue;
 
-      const providerIndex = this.providerMap.getOrCreateProviderIndex(`provider_${i}`);
-
-      for (const [txid, meta] of Object.entries(obj)) {
+      for (const [txid, meta] of Object.entries(value)) {
         uniqueTxids.add(txid);
 
         const arr = providerTxMap.get(txid) ?? [];
-        arr.push(providerIndex);
+        arr.push(idx);
         providerTxMap.set(txid, arr);
 
         const m = meta as MempoolTxMetadata;
-        if (this.calcMetaFeeRate(m) >= this.minFeeRate) filteredMetaByTxid.set(txid, m);
+
+        // --- robust feeRate (sat/vB)
+        let fr = this.calcMetaFeeRateRobust(m);
+        if (!Number.isFinite(fr)) {
+          logger?.debug?.('refreshFromVerboseSnapshot: invalid feeRate from metadata; treating as 0', {
+            args: {
+              txid,
+              vsize: (m as any)?.vsize,
+              feeShape: typeof (m as any)?.fee === 'number' ? 'fee:number' : (m as any)?.fees ? 'fees.object' : 'none',
+            },
+          });
+          fr = 0;
+        }
+
+        if (fr >= this.minFeeRate) {
+          filteredMetaByTxid.set(txid, m);
+        }
       }
     }
 
@@ -258,6 +342,12 @@ export class Mempool extends AggregateRoot {
         }
       )
     );
+
+    logger.log('Mempool refreshed', {
+      args: {
+        mempoolSize: this.getMempoolSize(),
+      },
+    });
   }
 
   /* ----------------------------------- Commands ----------------------------------- */
@@ -277,6 +367,27 @@ export class Mempool extends AggregateRoot {
     service: BlockchainProviderService;
     logger: Logger;
   }) {
+    const providersNewNames = service.getAllMempoolProviderNames();
+    if (!Array.isArray(providersNewNames) || providersNewNames.length === 0) {
+      throw new Error('No mempool providers configured');
+    }
+
+    const oldNames = this.providerMap.getProviderNames();
+
+    if (this.providerMap.hasSameNames(providersNewNames)) {
+      // The composition hasn't changed - we'll leave it as is
+    } else if (oldNames.length === 0) {
+      // first initialization after empty state
+      this.providerMap.setNamesOnce(providersNewNames);
+    } else {
+      // composition/order changed - replace names and clear visibility map
+      this.providerMap.replaceNames(providersNewNames);
+
+      // The indexes have changed → batch tuning is no longer valid
+      this.perProviderBatch.clear();
+      this.__prevDur = undefined;
+    }
+
     return this.refreshFromVerboseSnapshot({
       isSynchronized: false,
       requestId,
@@ -290,20 +401,22 @@ export class Mempool extends AggregateRoot {
    * Synchronize by loading slimmed full txs ONLY for not-yet-loaded, high-fee txids.
    * Plan:
    *  - Gather txids present in MetadataStore but not in LoadTracker.
-   *  - Group by providerIndex (first provider who saw the tx), without fallback.
+   *  - Group by providerIndex (first/primary provider who saw the tx), without fallback.
    *  - For each provider run ONE batch request in parallel.
    *  - Normalize each Transaction → MempoolTransaction and store.
-   *  - Adapt currentBatchSize based on wall-clock duration vs previous cycle.
+   *  - Adapt per-provider batch size based on wall-clock duration vs previous cycle (per provider).
    *
    * Complexity: planning O(T), network dominated by RPC batch; memory: ~1–1.5MB per 200 tx (after slimming).
    */
   public async processSync({
     requestId,
     service,
+    logger,
     hasMoreToProcess = true,
   }: {
     requestId: string;
     service: BlockchainProviderService;
+    logger: Logger;
     hasMoreToProcess?: boolean;
   }) {
     if (!hasMoreToProcess) return;
@@ -313,7 +426,7 @@ export class Mempool extends AggregateRoot {
       const expected = this.metaStore.size();
       const loaded = this.loadTracker.count();
       const p = expected > 0 ? loaded / expected : 0;
-      if (p === 0 || p >= this.syncThresholdPercent) {
+      if (p >= this.syncThresholdPercent) {
         this.apply(
           new BitcoinMempoolSynchronizedEvent(
             { aggregateId: this.aggregateId, requestId, blockHeight: this.lastBlockHeight },
@@ -324,28 +437,39 @@ export class Mempool extends AggregateRoot {
       }
     }
 
-    // compute list of txids to load (not loaded yet; and must be high-fee because metaStore was filtered in init)
+    // === candidates: all txids with metadata but not yet slim-loaded (no duplicates) ===
     const candidates: string[] = [];
     for (const [txHash] of this.metaStore.entries()) {
       if (this.loadTracker.isLoaded(txHash)) continue;
       const txid = this.txIndex.getByHash(txHash);
       if (txid) candidates.push(txid);
-      if (candidates.length >= this.currentBatchSize * 2) break; // small overhead for better distribution
     }
     if (candidates.length === 0) return;
 
-    // apply global batch limit (single number)
-    const batchTxids = candidates.slice(0, this.currentBatchSize);
+    // === per-provider caps from adaptive batch sizes (lazy init) ===
+    const perProviderCaps = new Map<number, number>();
+    for (const idx of this.providerMap.providerIndices()) {
+      perProviderCaps.set(idx, this.getBatchSizeFor(idx));
+    }
 
-    // group by provider (no fallback)
-    const plan = planBatchesByProvider(batchTxids, this.providerMap, this.currentBatchSize);
+    // === group by provider (no fallback); respect per-provider caps ===
+    const plan = planBatchesByProvider(candidates, this.providerMap, perProviderCaps);
 
-    // --- timing start
-    const syncStart = Date.now();
+    if (plan.size === 0) {
+      this.apply(
+        new BitcoinMempoolSyncProcessedEvent(
+          { aggregateId: this.aggregateId, requestId, blockHeight: this.lastBlockHeight },
+          { loadedTransactions: [], hasMoreToProcess: false }
+        )
+      );
+      return;
+    }
 
-    // parallel requests per provider
+    // --- parallel requests per provider with per-provider timing & adaptation
+    const loadedBefore = this.loadTracker.count();
+    const loadedForEvent: Array<{ txid: string; transaction: LightTransaction; providerIndex: number }> = [];
     const tasks: Promise<void>[] = [];
-    const loadedForEvent: Array<{ txid: string; transaction: MempoolTransaction; providerIndex: number }> = [];
+    const startedAt = new Map<number, number>();
 
     for (const [providerIndex, txids] of plan.entries()) {
       const providerName = this.providerMap.getProviderName(providerIndex);
@@ -353,20 +477,34 @@ export class Mempool extends AggregateRoot {
 
       tasks.push(
         (async () => {
-          // getrawtransaction in batch; no fallback; whatever arrives is used
-          const txs = await service.getMempoolTransactionsByTxids(txids, true, 1, {
-            strategy: 'single',
-            providerName,
-          });
+          try {
+            startedAt.set(providerIndex, Date.now());
 
-          // align by position: service preserves input order; nulls may appear for misses
-          for (let i = 0; i < txids.length; i++) {
-            const txid = txids[i]!;
-            const full = txs[i];
-            if (!full) continue;
+            // getrawtransaction in batch; no fallback; whatever arrives is used
+            const txs = await service.getMempoolTransactionsByTxids(txids, true, 1, {
+              strategy: 'single',
+              providerName,
+            });
 
-            const slim = normalizeToMempoolTx(full);
-            loadedForEvent.push({ txid, transaction: slim, providerIndex });
+            // NOTE: no positional alignment — just consume what arrived
+            for (const full of txs) {
+              if (!full?.txid) continue;
+              const slim = normalizeToMempoolTx(full);
+              loadedForEvent.push({ txid: slim.txid, transaction: slim, providerIndex });
+            }
+          } catch (e) {
+            logger?.warn?.('processSync provider batch failed', {
+              args: { providerName, error: (e as any)?.message ?? String(e) },
+            });
+          } finally {
+            // adaptive per-provider batch tuning
+            const start = startedAt.get(providerIndex)!;
+            const duration = Date.now() - start;
+            if (!this.__prevDur) this.__prevDur = new Map<number, number>();
+            const prev = this.__prevDur.get(providerIndex) ?? duration;
+            const ratio = duration / (prev || duration);
+            this.__prevDur.set(providerIndex, duration);
+            this.tuneBatchSize(providerIndex, ratio);
           }
         })()
       );
@@ -374,22 +512,10 @@ export class Mempool extends AggregateRoot {
 
     await Promise.allSettled(tasks);
 
-    // --- timing end + dynamic batch adaptation
-    const duration = Date.now() - syncStart;
-    this.prevSyncDurationMs = this.lastSyncDurationMs || duration;
-    this.lastSyncDurationMs = duration;
-
-    const ratio = this.lastSyncDurationMs / (this.prevSyncDurationMs || this.lastSyncDurationMs);
-    if (ratio > 1.2) {
-      // took significantly longer → reduce by 25%
-      this.currentBatchSize = Math.max(1, Math.round(this.currentBatchSize * 0.75));
-    } else if (ratio < 0.8) {
-      // significantly faster → increase by 25%
-      this.currentBatchSize = Math.max(1, Math.round(this.currentBatchSize * 1.25));
-    }
-    // else keep as is
-
-    const hasMore = candidates.length > this.currentBatchSize;
+    // hasMore: compare "how much was downloaded" + "how much has been downloaded now" with the expected amount
+    const expected = this.metaStore.size();
+    const loadedThisCycle = loadedForEvent.length;
+    const hasMore = loadedThisCycle > 0 && loadedBefore + loadedThisCycle < expected;
 
     this.apply(
       new BitcoinMempoolSyncProcessedEvent(
@@ -397,13 +523,19 @@ export class Mempool extends AggregateRoot {
         { loadedTransactions: loadedForEvent, hasMoreToProcess: hasMore }
       )
     );
+
+    logger.log('Mempool sync processing', {
+      args: {
+        mempoolSize: this.getMempoolSize(),
+      },
+    });
   }
 
   /**
    * Blocks batch:
    * 1) Remove confirmed tx locally (cheap, O(K)).
-   * 2) Consult mempool info across providers (median size). If our snapshot drifted beyond tolerance,
-   *    refresh verbose snapshot (single verbose=true pass) to realign and then continue normal syncing.
+   * 2) Heuristic: query mempool info from providers, compare our tracked count vs median(node.size).
+   *    If drift exceeds tolerance → refresh verbose snapshot to realign.
    */
   public async processBlocksBatch({
     requestId,
@@ -434,18 +566,34 @@ export class Mempool extends AggregateRoot {
           { txidsToRemove: toRemove }
         )
       );
+
+      logger.log('Mempool blocks batch processed successfully', {
+        args: { mempoolSize: this.getMempoolSize() },
+      });
     }
 
-    // (2) mempool info heuristic (multi-provider)
-    //    - We compare our txIndex.size() (total txids we currently track) to the median(node.size).
-    //    - If |median - ours| / max(1, median) > tolerance => refresh verbose snapshot.
-    //    - Reason: a block may also evict/accept many non-tracked or new tx; our local removals
-    //      only touch confirmed. A large drift signals we are stale (new txs or evicted ones).
-    const infos = await service.getMempoolInfoFromAll().catch(() => []);
-    const sizes: number[] = [];
-    for (const i of infos as any[]) {
-      if (i && typeof i.size === 'number' && i.size >= 0) sizes.push(i.size);
+    // (2) mempool info heuristic
+    // service.getMempoolInfoFromAll() may return:
+    //   - Array<MempoolInfo>
+    //   - OR Array<{ providerName: string; value: MempoolInfo }>
+    // Be tolerant to both shapes and to partial failures.
+    let infos: any[] = [];
+    try {
+      infos = await service.getMempoolInfoFromAll();
+    } catch (e) {
+      logger.warn('processBlocksBatch: mempool info fetch failed', {
+        args: { error: (e as any)?.message ?? String(e) },
+      });
+      return; // no heuristic possible
     }
+
+    const sizes: number[] = [];
+    for (const item of infos) {
+      const val = item && typeof item === 'object' && 'value' in item ? (item as any).value : item;
+      const sz = val?.size;
+      if (typeof sz === 'number' && sz >= 0) sizes.push(sz);
+    }
+
     if (sizes.length >= this.mempoolInfoMinProviders) {
       sizes.sort((a, b) => a - b);
       const mid = Math.floor(sizes.length / 2);
@@ -454,8 +602,7 @@ export class Mempool extends AggregateRoot {
       const drift = Math.abs(median - ours) / Math.max(1, median);
 
       if (drift > this.mempoolInfoDriftTolerance) {
-        // Refresh snapshot to align with network view (single verbose=true pass).
-        return this.refreshFromVerboseSnapshot({
+        await this.refreshFromVerboseSnapshot({
           requestId,
           height: this.lastBlockHeight,
           service,
@@ -514,7 +661,12 @@ export class Mempool extends AggregateRoot {
       const m = aggregatedMetadata?.[txid];
       if (m) newMeta.set(h, m as MempoolTxMetadata);
       const provArr = providerTxidMapping?.[txid];
-      if (Array.isArray(provArr)) for (const idx of provArr) newProviders.add(h, idx);
+      if (Array.isArray(provArr) && provArr.length > 0) {
+        newProviders.setProvidersForTx(
+          h,
+          provArr.filter((i) => typeof i === 'number')
+        );
+      }
     }
 
     // drop tx that disappeared; keep slim where tx still exists
@@ -536,7 +688,9 @@ export class Mempool extends AggregateRoot {
       const fr = this.calcSlimFeeRate(transaction);
       this.loadTracker.mark(h, { timestamp: Date.now(), feeRate: fr, providerIndex: providerIndex ?? 0 });
       if (!this.txIndex.hasHash(h)) this.txIndex.add(txid);
-      if (providerIndex !== undefined) this.providerMap.add(h, providerIndex);
+      if (providerIndex !== undefined) {
+        // do NOT change visibility map here; it's maintained by snapshots
+      }
     }
   }
 
@@ -557,6 +711,7 @@ export class Mempool extends AggregateRoot {
       this.txStore.clear();
       this.loadTracker.clear();
       this.providerMap.clear();
+      // keep provider names; clear() in ProviderMap does not drop names
     }
   }
 
@@ -566,10 +721,6 @@ export class Mempool extends AggregateRoot {
     this.txStore.clear();
     this.loadTracker.clear();
     this.providerMap.clear();
-    this.isSynchronized = false;
-    this.currentBatchSize = 200;
-    this.prevSyncDurationMs = 0;
-    this.lastSyncDurationMs = 0;
   }
 
   // ======= Read API =========================================================
@@ -585,7 +736,7 @@ export class Mempool extends AggregateRoot {
   }
 
   /** O(1) – get slim transaction (MempoolTransaction) for txid. */
-  public getFullTransaction(txid: string): MempoolTransaction | undefined {
+  public getFullTransaction(txid: string): LightTransaction | undefined {
     return this.txStore.get(hashTxid32(txid));
   }
 
@@ -615,7 +766,8 @@ export class Mempool extends AggregateRoot {
   public getTransactionsAboveFeeRate(minFeeRate: number): string[] {
     const out: string[] = [];
     for (const [h, m] of this.metaStore.entries()) {
-      if (this.calcMetaFeeRate(m) >= minFeeRate) {
+      const fr = this.calcMetaFeeRateRobust(m);
+      if (Number.isFinite(fr) && fr >= minFeeRate) {
         const txid = this.txIndex.getByHash(h);
         if (txid) out.push(txid);
       }
@@ -627,8 +779,8 @@ export class Mempool extends AggregateRoot {
   public getTransactionsByFeeRateRange(
     minFeeRate: number,
     maxFeeRate: number
-  ): Array<{ txid: string; feeRate: number; metadata: MempoolTxMetadata; slim?: MempoolTransaction }> {
-    const res: Array<{ txid: string; feeRate: number; metadata: MempoolTxMetadata; slim?: MempoolTransaction }> = [];
+  ): Array<{ txid: string; feeRate: number; metadata: MempoolTxMetadata; slim?: LightTransaction }> {
+    const res: Array<{ txid: string; feeRate: number; metadata: MempoolTxMetadata; slim?: LightTransaction }> = [];
     for (const [h, m] of this.metaStore.entries()) {
       const fr = this.calcMetaFeeRate(m);
       if (fr >= minFeeRate && fr <= maxFeeRate) {
@@ -703,7 +855,7 @@ export class Mempool extends AggregateRoot {
   /** O(n) – ready transactions (slimmed) sorted by feeRate desc. */
   public getReadyTransactions(): Array<{
     txid: string;
-    transaction: MempoolTransaction;
+    transaction: LightTransaction;
     metadata: MempoolTxMetadata;
     feeRate: number;
     loadedAt: number;
@@ -711,7 +863,7 @@ export class Mempool extends AggregateRoot {
   }> {
     const out: Array<{
       txid: string;
-      transaction: MempoolTransaction;
+      transaction: LightTransaction;
       metadata: MempoolTxMetadata;
       feeRate: number;
       loadedAt: number;

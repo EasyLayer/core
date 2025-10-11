@@ -1,7 +1,8 @@
 import { IsOptional, IsString, IsBoolean } from 'class-validator';
 import { JSONSchema } from 'class-validator-jsonschema';
 import { QueryDoc } from '@easylayer/common/shared-interfaces';
-import type { MempoolTxMetadata, MempoolTransaction } from '../../../blockchain-provider';
+import type { MempoolTxMetadata } from '../../../blockchain-provider';
+import type { LightTransaction } from '../../models';
 
 export interface ICheckMempoolTransactionFullQuery {
   readonly txid: string;
@@ -35,7 +36,7 @@ export interface CheckMempoolTransactionFullResult {
   providers: string[];
   feeRate?: number;
   metadata?: MempoolTxMetadata;
-  transaction?: MempoolTransaction;
+  transaction?: LightTransaction;
 }
 
 @QueryDoc({

@@ -132,7 +132,6 @@ export class BlockchainProviderModule {
           maxPeers: c.maxPeers,
           connectionTimeout: c.connectionTimeout,
           network,
-          rateLimits,
         });
       });
 

@@ -86,7 +86,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
           // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
-          this.log.debug('Loading blocks on pause, reason: ', {
+          this.log.debug('Loading blocks on pause.', {
             args: { error },
           });
           await this._currentStrategy?.stop();

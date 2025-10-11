@@ -1,10 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequestOptions } from './managers';
-import type { NetworkProvider, MempoolProvider } from './providers';
-import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
+import type {
+  NetworkProvider,
+  MempoolProvider,
+  UniversalBlock,
+  UniversalBlockStats,
+  UniversalTransaction,
+  UniversalMempoolTxMetadata,
+  UniversalMempoolInfo,
+} from './providers';
+import type { NetworkConfig } from './transports';
 import { BitcoinNormalizer } from './normalizer';
 import { BitcoinMerkleVerifier } from './merkle-verifier';
-import { Block, Transaction, BlockStats, MempoolTransaction, MempoolInfo, MempoolTxMetadata } from './components';
+import { Block, Transaction, BlockStats, MempoolInfo, MempoolTxMetadata } from './components';
 
 /**
  * A Subscription is a Promise that resolves once unsubscribed, and also provides
@@ -129,7 +137,7 @@ export class BlockchainProviderService {
 
   /**
    * Subscribe to new block events with automatic normalization
-   * Node calls: 0 (real-time messages from transport)
+   * Node calls: RPC=0 (ZMQ stream), P2P=0 (P2P stream)
    * Memory usage: No block storage - immediate callback execution
    *
    * Automatically uses the best available subscription method from active provider:
@@ -247,7 +255,7 @@ export class BlockchainProviderService {
 
   /**
    * Get current blockchain height
-   * Node calls: 1 (getblockcount for RPC, cached for P2P)
+   * Node calls: RPC=1 (getblockcount), P2P=0 (local header tip)
    * Time complexity: O(1)
    *
    * @returns Current blockchain height
@@ -261,7 +269,7 @@ export class BlockchainProviderService {
 
   /**
    * Get a single block hash by height
-   * Node calls: 1 (getblockhash for RPC, cached lookup for P2P)
+   * Node calls: RPC=1 (getblockhash), P2P=0 (local header map)
    * Time complexity: O(1)
    *
    * @param height Block height to get hash for
@@ -269,18 +277,14 @@ export class BlockchainProviderService {
    */
   public async getOneBlockHashByHeight(height: string | number): Promise<string | null> {
     return this.executeNetworkProviderMethod('getOneBlockHashByHeight', async (provider) => {
-      try {
-        const hashes = await provider.getManyBlockHashesByHeights([Number(height)]);
-        return hashes[0] || null;
-      } catch (error) {
-        return null;
-      }
+      const hashes = await provider.getManyBlockHashesByHeights([Number(height)]);
+      return hashes[0] || null;
     });
   }
 
   /**
    * Get multiple block hashes by heights - batch optimized
-   * Node calls: 1 (batch getblockhash for all heights)
+   * Node calls: RPC=1 (batch getblockhash), P2P=0 (local header map)
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
@@ -294,7 +298,7 @@ export class BlockchainProviderService {
 
   /**
    * Get a basic block by height (with transaction hashes only, not full transactions)
-   * Node calls: 2 (getblockhash + getblock) for RPC, cached lookup + GetData for P2P
+   * Node calls: RPC=2 (getblockhash + getblock[verbosity=1]), P2P=1 (GetData; hash from local headers)
    * Time complexity: O(1) with guaranteed height information
    *
    * Recommended method for reorg detection as it provides minimal data but guarantees height accuracy
@@ -314,11 +318,13 @@ export class BlockchainProviderService {
 
   /**
    * Get multiple blocks by heights with configurable options
-   * Node calls: 1-2 depending on method (batch operations)
+   * Node calls:
+   *   - useHex=true:  RPC=2 (getblockhash + getblock[raw]), P2P=1 (GetData; hash from local headers)
+   *   - useHex=false: RPC=2 (getblockhash + getblock[verbosity]), P2P=1 (GetData; parsed from bytes)
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
-   * @param useHex If true, uses hex parsing via requestHexBlocks for better performance
+   * @param useHex If true, uses hex/bytes parsing via requestHexBlocks for better performance
    * @param verbosity Verbosity level for object method (ignored if useHex=true)
    * @param verifyMerkle If true, verifies Merkle root of transactions
    * @returns Array of blocks in same order as input heights, with guaranteed height information
@@ -347,11 +353,13 @@ export class BlockchainProviderService {
 
   /**
    * Get multiple blocks by hashes with configurable options
-   * Node calls: 1-2 depending on method and whether heights are needed
+   * Node calls:
+   *   - useHex=true:  RPC=2 (getblock[raw] + getblockheader for heights), P2P=1 (GetData; heights from local headers)
+   *   - useHex=false: RPC=1 (getblock[verbosity]), P2P=1 (GetData; parsed from bytes)
    * Time complexity: O(k) where k = number of hashes
    *
    * @param hashes Array of block hashes
-   * @param useHex If true, uses hex parsing via requestHexBlocks for better performance
+   * @param useHex If true, uses hex/bytes parsing via requestHexBlocks for better performance
    * @param verbosity Verbosity level for object method (ignored if useHex=true)
    * @param verifyMerkle If true, verifies Merkle root of transactions
    * @returns Array of blocks in same order as input hashes, with height information
@@ -382,7 +390,7 @@ export class BlockchainProviderService {
             if (typeof h === 'number') {
               block.height = h;
             }
-            // TODO: think about thi case when block without height
+            // If height is still missing, consumer logic should not rely on height-based invariants
             completeBlocks.push(block);
           }
         });
@@ -397,7 +405,7 @@ export class BlockchainProviderService {
 
   /**
    * Get block statistics by heights using batch calls
-   * Node calls: 2 (batch getblockhash + batch getblockstats, with special genesis handling)
+   * Node calls: RPC=2 (batch getblockhash + batch getblockstats), P2P=not applicable
    * Time complexity: O(k) where k = number of heights
    *
    * @param heights Array of block heights
@@ -414,7 +422,7 @@ export class BlockchainProviderService {
 
   /**
    * Get block statistics by hashes using batch calls
-   * Node calls: 1 (batch getblockstats for all hashes)
+   * Node calls: RPC=1 (batch getblockstats), P2P=not applicable
    * Time complexity: O(k) where k = number of hashes
    *
    * @param hashes Array of block hashes
@@ -431,7 +439,7 @@ export class BlockchainProviderService {
 
   /**
    * Get multiple transactions by txids - batch optimized (Network Provider)
-   * Node calls: 1 (batch getrawtransaction for all txids)
+   * Node calls: RPC=1 (batch getrawtransaction), P2P=not applicable on NetworkProvider
    * Time complexity: O(k) where k = number of txids
    *
    * @param txids Array of transaction IDs
@@ -460,7 +468,7 @@ export class BlockchainProviderService {
 
   /**
    * Get blockchain information
-   * Node calls: 1 (getblockchaininfo)
+   * Node calls: RPC=1 (getblockchaininfo), P2P=not applicable
    */
   public async getBlockchainInfo(): Promise<any> {
     return this.executeNetworkProviderMethod('getBlockchainInfo', async (provider) => {
@@ -470,7 +478,7 @@ export class BlockchainProviderService {
 
   /**
    * Get network information
-   * Node calls: 1 (getnetworkinfo)
+   * Node calls: RPC=1 (getnetworkinfo), P2P=not applicable
    */
   public async getNetworkInfo(): Promise<any> {
     return this.executeNetworkProviderMethod('getNetworkInfo', async (provider) => {
@@ -480,7 +488,7 @@ export class BlockchainProviderService {
 
   /**
    * Estimate smart fee via network provider
-   * Node calls: 1 (estimatesmartfee)
+   * Node calls: RPC=1 (estimatesmartfee), P2P=not applicable
    */
   public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
     return this.executeNetworkProviderMethod('estimateSmartFee', async (provider) => {
@@ -492,7 +500,7 @@ export class BlockchainProviderService {
 
   /**
    * Get multiple transactions by txids from mempool providers with strategy
-   * Node calls: 1 per provider (batch getrawtransaction for all txids)
+   * Node calls: RPC=1 per provider (batch getrawtransaction), P2P=not applicable on MempoolProvider
    * Time complexity: O(k) where k = number of txids
    *
    * @param txids Array of transaction IDs
@@ -507,29 +515,26 @@ export class BlockchainProviderService {
     verbosity: number = 1,
     options: MempoolRequestOptions = {}
   ): Promise<Transaction[]> {
-    this.ensureMempoolProviders();
-
-    let universalTxs: (UniversalTransaction | null)[];
-
     if (useHex) {
-      universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
+      const uni = await this.mempoolConnectionManager.executeWithStrategy(
         async (provider: MempoolProvider) => await provider.getManyTransactionsHexByTxids(txids),
         options
       );
-    } else {
-      universalTxs = await this.mempoolConnectionManager.executeWithStrategy(
-        async (provider: MempoolProvider) => await provider.getManyTransactionsByTxids(txids, verbosity),
-        options
-      );
+      const valid = uni.filter((t): t is UniversalTransaction => !!t);
+      return this.normalizer.normalizeManyTransactions(valid);
     }
 
-    const validTxs = universalTxs.filter((tx: any): tx is UniversalTransaction => tx !== null);
-    return this.normalizer.normalizeManyTransactions(validTxs);
+    const uni = await this.mempoolConnectionManager.executeWithStrategy(
+      async (provider: MempoolProvider) => await provider.getManyTransactionsByTxids(txids, verbosity),
+      options
+    );
+    const valid = uni.filter((t): t is UniversalTransaction => !!t);
+    return this.normalizer.normalizeManyTransactions(valid);
   }
 
   /**
    * Get current blockchain height from mempool providers with strategy
-   * Node calls: 1 per provider (getblockcount)
+   * Node calls: RPC=1 per provider (getblockcount), P2P=not applicable on MempoolProvider
    * Time complexity: O(1)
    *
    * @param options Mempool request options (strategy, timeout, etc.)
@@ -538,7 +543,7 @@ export class BlockchainProviderService {
   public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions = {}): Promise<number> {
     this.ensureMempoolProviders();
     const height = await this.mempoolConnectionManager.executeWithStrategy(
-      async (provider: MempoolProvider) => await provider.getBlockHeight(),
+      async (provider: MempoolProvider) => await provider.getCurrentBlockHeight(),
       options
     );
     return Number(height);
@@ -546,7 +551,7 @@ export class BlockchainProviderService {
 
   /**
    * Get mempool information using specified strategy
-   * Node calls: 1 per provider (getmempoolinfo)
+   * Node calls: RPC=1 per provider (getmempoolinfo), P2P=not applicable on MempoolProvider
    * Time complexity: O(1)
    * Memory usage: Minimal - just returns current mempool state
    *
@@ -554,34 +559,16 @@ export class BlockchainProviderService {
    * @returns Mempool information
    */
   public async getMempoolInfo(options: MempoolRequestOptions = {}): Promise<MempoolInfo> {
-    this.ensureMempoolProviders();
-    return this.mempoolConnectionManager.executeWithStrategy(
-      async (provider: MempoolProvider) => await provider.getMempoolInfo(),
+    const uni = await this.mempoolConnectionManager.executeWithStrategy(
+      async (p: MempoolProvider) => await p.getMempoolInfo(),
       options
     );
-  }
-
-  /**
-   * Get raw mempool using specified strategy
-   * Node calls: 1 per provider (getrawmempool)
-   * Time complexity: O(n) where n = number of transactions in mempool
-   * Memory usage: Depends on mempool size and verbosity
-   *
-   * @param verbose If true, returns detailed transaction info; if false, returns array of txids
-   * @param options Mempool request options (strategy, timeout, etc.)
-   * @returns Raw mempool data
-   */
-  public async getRawMempool(verbose: boolean = false, options: MempoolRequestOptions = {}): Promise<any> {
-    this.ensureMempoolProviders();
-    return this.mempoolConnectionManager.executeWithStrategy(
-      async (provider: MempoolProvider) => await provider.getRawMempool(verbose),
-      options
-    );
+    return this.normalizer.normalizeMempoolInfo(uni);
   }
 
   /**
    * Get mempool entries using specified strategy
-   * Node calls: 1 per provider (batch getmempoolentry for all txids)
+   * Node calls: RPC=1 per provider (batch getmempoolentry), P2P=not applicable on MempoolProvider
    * Time complexity: O(k) where k = number of txids
    *
    * @param txids Array of transaction IDs to get mempool entries for
@@ -592,45 +579,63 @@ export class BlockchainProviderService {
     txids: string[],
     options: MempoolRequestOptions = {}
   ): Promise<(MempoolTxMetadata | null)[]> {
-    this.ensureMempoolProviders();
-    return this.mempoolConnectionManager.executeWithStrategy(
+    const entries = await this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getMempoolEntries(txids),
       options
     );
+
+    return entries.map((u) => (u ? this.normalizer.normalizeMempoolEntry(u) : null));
   }
 
   /**
    * Get mempool information from all providers (parallel execution)
-   * Node calls: 1 per provider in parallel (getmempoolinfo)
+   * Node calls: RPC=1 per provider in parallel (getmempoolinfo), P2P=not applicable on MempoolProvider
    * Time complexity: O(1) with parallel execution
    *
    * @returns Array of mempool info from all providers
    */
-  public async getMempoolInfoFromAll(): Promise<MempoolInfo[]> {
-    this.ensureMempoolProviders();
-    return this.mempoolConnectionManager.executeOnMultiple(
+  public async getMempoolInfoFromAll(): Promise<Array<{ providerName: string; value: MempoolInfo }>> {
+    const results = await this.mempoolConnectionManager.executeOnMultiple(
       async (provider: MempoolProvider) => await provider.getMempoolInfo()
     );
+    return results.map(({ providerName, value }) => ({
+      providerName,
+      value: this.normalizer.normalizeMempoolInfo(value as UniversalMempoolInfo),
+    }));
   }
 
   /**
-   * Get raw mempool from all providers (parallel execution)
-   * Node calls: 1 per provider in parallel (getrawmempool)
-   * Time complexity: O(n) where n = number of transactions in mempool
-   *
-   * @param verbose If true, returns detailed transaction info; if false, returns array of txids
-   * @returns Array of raw mempool data from all providers
+   * Get raw mempool from all providers (parallel execution, labeled by providerName)
+   * Returns only successful results; failed providers are logged and skipped.
+   * Node calls: RPC=1 per provider (getrawmempool), P2P=not applicable on MempoolProvider
    */
-  public async getRawMempoolFromAll(verbose: boolean = false): Promise<any[]> {
-    this.ensureMempoolProviders();
-    return this.mempoolConnectionManager.executeOnMultiple(
-      async (provider: MempoolProvider) => await provider.getRawMempool(verbose)
+  public async getRawMempoolFromAll(
+    verbose: true
+  ): Promise<Array<{ providerName: string; value: Record<string, MempoolTxMetadata> }>>;
+  public async getRawMempoolFromAll(verbose?: false): Promise<Array<{ providerName: string; value: string[] }>>;
+  public async getRawMempoolFromAll(verbose: boolean = false): Promise<Array<{ providerName: string; value: any }>> {
+    const results = await this.mempoolConnectionManager.executeOnMultiple(
+      async (provider: MempoolProvider) => await provider.getRawMempool(verbose as any)
     );
+
+    if (!verbose) {
+      // passthrough of txid arrays
+      return results.map(({ providerName, value }) => ({
+        providerName,
+        value: Array.isArray(value) ? value : [],
+      }));
+    }
+
+    // normalize each record value
+    return results.map(({ providerName, value }) => ({
+      providerName,
+      value: this.normalizer.normalizeMempoolEntryMap(value as Record<string, UniversalMempoolTxMetadata>),
+    }));
   }
 
   /**
    * Estimate smart fee using mempool provider with specified strategy
-   * Node calls: 1 per provider (estimatesmartfee)
+   * Node calls: RPC=1 per provider (estimatesmartfee), P2P=not applicable on MempoolProvider
    * Time complexity: O(1)
    *
    * @param confTarget Target number of confirmations
@@ -640,7 +645,7 @@ export class BlockchainProviderService {
    */
   public async estimateSmartFeeFromMempool(
     confTarget: number,
-    estimateMode: string = 'CONSERVATIVE',
+    estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE',
     options: MempoolRequestOptions = {}
   ): Promise<any> {
     this.ensureMempoolProviders();
@@ -719,6 +724,21 @@ export class BlockchainProviderService {
    */
   public async getMempoolProviderByName(name: string) {
     return this.mempoolConnectionManager.getProviderByName(name);
+  }
+
+  /**
+   * List all mempool provider names in the exact order they are registered.
+   * Useful for building a stable ProviderMap index in the model.
+   */
+  public getAllMempoolProviderNames(): string[] {
+    return this.mempoolConnectionManager.allProviders.map((p: MempoolProvider) => p.uniqName);
+  }
+
+  /**
+   * List all network provider names in the exact order they are registered.
+   */
+  public getAllNetworkProviderNames(): string[] {
+    return this.networkConnectionManager.allProviders.map((p: NetworkProvider) => p.uniqName);
   }
 
   /**

@@ -1,5 +1,5 @@
 import { BasicEvent } from '@easylayer/common/cqrs';
-import type { LightBlock } from '../../../blockchain-provider';
+import type { LightBlock } from '../../../cqrs-components';
 
 interface BitcoinNetworkReorganizedEventPayload {
   blocks: LightBlock[];

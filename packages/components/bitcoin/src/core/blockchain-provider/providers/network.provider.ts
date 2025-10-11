@@ -1,4 +1,4 @@
-import type { UniversalBlock, UniversalTransaction, UniversalBlockStats } from '../transports';
+import type { UniversalBlock, UniversalTransaction, UniversalBlockStats } from './interfaces';
 import { BaseProvider } from './base.provider';
 import { HexTransformer } from './hex-transformer';
 
@@ -32,12 +32,16 @@ export class NetworkProvider extends BaseProvider {
       throw new Error('Transport does not support block subscriptions');
     }
     // Parse from bytes to avoid huge hex strings in memory
-    return this.transport.subscribeToNewBlocks((blockData: Buffer) => {
+    return this.transport.subscribeToNewBlocks((blockData: Buffer | Uint8Array) => {
       try {
         const u8 =
-          typeof Buffer !== 'undefined' && Buffer.isBuffer(blockData)
-            ? new Uint8Array(blockData.buffer, blockData.byteOffset, blockData.byteLength)
-            : (blockData as unknown as Uint8Array);
+          typeof Buffer !== 'undefined' && typeof (blockData as any).buffer !== 'undefined'
+            ? new Uint8Array(
+                (blockData as any).buffer,
+                (blockData as any).byteOffset ?? 0,
+                (blockData as any).byteLength ?? (blockData as any).length
+              )
+            : (blockData as Uint8Array);
         const parsedBlock = HexTransformer.parseBlockBytes(u8, this.network);
         // Do NOT attach .hex to the block object to avoid memory bloat
         callback(parsedBlock as UniversalBlock);
@@ -47,12 +51,11 @@ export class NetworkProvider extends BaseProvider {
     }, onError);
   }
 
-  // ===== BASIC BLOCKCHAIN METHODS =====
+  // ===== BASIC CHAIN STATE =====
 
   /**
-   * Get current blockchain height
+   * Get current best block height
    * Node calls: 1 (getblockcount for RPC, cached for P2P)
-   * Time complexity: O(1)
    */
   async getBlockHeight(): Promise<number> {
     return await this.transport.getBlockHeight();
@@ -133,38 +136,29 @@ export class NetworkProvider extends BaseProvider {
       if (hash === null) return null;
       const block = hashToBlock.get(hash) || null;
       if (block !== null) {
-        block.height = heights[index];
+        // Ensure height is set if missing
+        if (typeof (block as any).height !== 'number') {
+          (block as any).height = heights[index];
+        }
       }
       return block;
     });
   }
 
-  // ===== OBJECT METHODS =====
-
   /**
    * Get multiple blocks as structured objects by hashes
-   * Node calls: 1 (batch getblock with specified verbosity)
-   * Time complexity: O(k) where k = number of blocks requested
-   *
-   * @param hashes Array of block hashes
-   * @param verbosity Verbosity level (1=with tx hashes, 2=with full tx objects)
-   * @returns Array of blocks in same order as input, null for missing blocks
+   * Node calls:
+   *   - RPC: batch getblock <hash> <verbosity>
+   *   - P2P: fall back to hex parsing (verbosity=1 only)
    */
   async getManyBlocksByHashes(hashes: string[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
-    const requests = hashes.map((hash) => ({ method: 'getblock', params: [hash, verbosity] }));
-    const results = await this.transport.batchCall(requests);
+    if (this.transport.type === 'rpc') {
+      const raws = await this.transport.getRawBlocksByHashesVerbose(hashes, verbosity as 1 | 2);
+      return raws.map((rawBlock: any) => (rawBlock === null ? null : this.normalizeRawBlock(rawBlock)));
+    }
 
-    return await Promise.all(
-      results.map(async (rawBlock: any) => {
-        if (rawBlock === null) return null;
-
-        try {
-          return this.normalizeRawBlock(rawBlock);
-        } catch {
-          return null;
-        }
-      })
-    );
+    // P2P path: only bytes available — parse as hex form
+    return this.getManyBlocksHexByHashes(hashes);
   }
 
   /**
@@ -178,7 +172,7 @@ export class NetworkProvider extends BaseProvider {
    */
   async getManyBlocksByHeights(heights: number[], verbosity: number = 1): Promise<(UniversalBlock | null)[]> {
     const blocksHashes = await this.getManyBlockHashesByHeights(heights);
-    const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
+    const validHashes = blocksHashes.filter((hash): hash is string => !!hash);
 
     if (validHashes.length === 0) {
       return new Array(heights.length).fill(null);
@@ -186,169 +180,64 @@ export class NetworkProvider extends BaseProvider {
 
     const blocks = await this.getManyBlocksByHashes(validHashes, verbosity);
 
-    const hashToBlock = new Map<string, UniversalBlock | null>();
-    validHashes.forEach((hash, index) => {
-      hashToBlock.set(hash, blocks[index] || null);
+    const map = new Map<string, UniversalBlock | null>();
+    validHashes.forEach((hash, idx) => {
+      const b = blocks[idx] || null;
+      if (b) (b as any).height ??= heights[blocksHashes.indexOf(hash)];
+      map.set(hash, b);
     });
 
-    return blocksHashes.map((hash, index) => {
-      if (hash === null) return null;
-      const block = hashToBlock.get(hash) || null;
-      if (block !== null) {
-        block.height = heights[index];
-      }
-      return block;
-    });
+    return blocksHashes.map((hash) => (hash ? map.get(hash) || null : null));
   }
 
-  // ===== BLOCK STATS METHODS =====
-
   /**
-   * Get block statistics by hashes
+   * Get block stats by hashes (RPC only); P2P throws.
    * Node calls: 1 (batch getblockstats for all hashes)
-   * Time complexity: O(k) where k = number of hashes
-   *
-   * @param hashes Array of block hashes
-   * @returns Array of stats in same order as input, null for missing blocks
    */
   async getManyBlocksStatsByHashes(hashes: string[]): Promise<(UniversalBlockStats | null)[]> {
-    const requests = hashes.map((hash) => ({ method: 'getblockstats', params: [hash] }));
-    const results = await this.transport.batchCall(requests);
-
-    return results.map((rawStats: any) => {
-      if (rawStats === null) return null;
-
-      try {
-        return this.normalizeRawBlockStats(rawStats);
-      } catch {
-        return null;
-      }
-    });
+    const results = await this.transport.getBlockStatsByHashes(hashes);
+    return results.map((raw: any) => (raw ? this.normalizeRawBlockStats(raw) : null));
   }
 
   /**
-   * Get block statistics by heights with special genesis handling
+   * Get block stats by heights
    * Node calls: 2 (batch getblockhash + batch getblockstats, with genesis handling)
-   * Time complexity: O(k) where k = number of heights
-   *
-   * @param heights Array of block heights
-   * @returns Array of stats in same order as input heights, null for missing blocks
    */
   async getManyBlocksStatsByHeights(heights: number[]): Promise<(UniversalBlockStats | null)[]> {
-    const genesisHeight = 0;
-    const hasGenesis = heights.includes(genesisHeight);
+    const blocksHashes = await this.getManyBlockHashesByHeights(heights);
+    const validHashes = blocksHashes.filter((hash): hash is string => !!hash);
 
-    if (hasGenesis) {
-      try {
-        const genesisResults = await this.transport.batchCall([{ method: 'getblockhash', params: [genesisHeight] }]);
-        const genesisHash = genesisResults[0];
-
-        const filteredHeights = heights.filter((height) => height !== genesisHeight);
-        let filteredStats: (UniversalBlockStats | null)[] = [];
-
-        if (filteredHeights.length > 0) {
-          const blocksHashes = await this.getManyBlockHashesByHeights(filteredHeights);
-          const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
-
-          if (validHashes.length > 0) {
-            const statsResults = await this.getManyBlocksStatsByHashes(validHashes);
-
-            const hashToStats = new Map<string, UniversalBlockStats | null>();
-            validHashes.forEach((hash, index) => {
-              hashToStats.set(hash, statsResults[index] || null);
-            });
-
-            filteredStats = blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
-          }
-        }
-
-        // Create genesis mock with available data (getblockstats doesn't support genesis)
-        const genesisMock: UniversalBlockStats | null = genesisHash
-          ? {
-              blockhash: genesisHash,
-              height: genesisHeight,
-              total_size: 285,
-              total_weight: 1140,
-              total_fee: 0,
-            }
-          : null;
-
-        // Combine results in original order
-        const results: (UniversalBlockStats | null)[] = [];
-        let filteredIndex = 0;
-
-        heights.forEach((height) => {
-          if (height === genesisHeight) {
-            results.push(genesisMock);
-          } else {
-            results.push(filteredStats[filteredIndex] || null);
-            filteredIndex++;
-          }
-        });
-
-        return results;
-      } catch {
-        return new Array(heights.length).fill(null);
-      }
-    } else {
-      const blocksHashes = await this.getManyBlockHashesByHeights(heights);
-      const validHashes = blocksHashes.filter((hash): hash is string => hash !== null);
-
-      if (validHashes.length === 0) {
-        return new Array(heights.length).fill(null);
-      }
-
-      const blocks = await this.getManyBlocksStatsByHashes(validHashes);
-
-      const hashToStats = new Map<string, UniversalBlockStats | null>();
-      validHashes.forEach((hash, index) => {
-        hashToStats.set(hash, blocks[index] || null);
-      });
-
-      return blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
+    if (validHashes.length === 0) {
+      return new Array(heights.length).fill(null);
     }
+
+    const blocks = await this.getManyBlocksStatsByHashes(validHashes);
+
+    const hashToStats = new Map<string, UniversalBlockStats | null>();
+    validHashes.forEach((hash, index) => {
+      hashToStats.set(hash, blocks[index] || null);
+    });
+
+    return blocksHashes.map((hash) => (hash ? hashToStats.get(hash) || null : null));
   }
 
   /**
    * Get only block heights by hashes for the *current* transport.
-   * - P2P: read from local ChainTracker via transport.getHeightsByHashes()
-   * - RPC: batch getblockheader <hash> true
+   * Delegates to transport (P2P: local header index; RPC: getblockheader).
    * Any failure propagates up.
    */
   async getHeightsByHashes(hashes: string[]): Promise<(number | null)[]> {
-    if (this.transport.type === 'p2p') {
-      return (this.transport as any).getHeightsByHashes(hashes);
-    }
-
-    // RPC path: ask headers only to extract .height
-    const requests = hashes.map((hash) => ({ method: 'getblockheader', params: [hash, true] }));
-    const results = await this.transport.batchCall(requests);
-    return results.map((hdr: any) => (hdr && typeof hdr.height === 'number' ? hdr.height : null));
-
-    // Optional strict all-or-nothing:
-    // const heights = ...;
-    // if (heights.some(h => h === null)) throw new Error('Not all heights are available');
-    // return heights;
+    return this.transport.getHeightsByHashes(hashes);
   }
 
   // ===== TRANSACTION METHODS =====
 
   /**
-   * Get multiple transactions by txids as structured objects
-   * Node calls: 1 (batch getrawtransaction for all txids)
-   * Time complexity: O(k) where k = number of transactions
-   *
-   * @param txids Array of transaction IDs
-   * @param verbosity Verbosity level for transaction data
-   * @returns Array of transactions in same order as input, null for missing transactions
+   * Get multiple transactions as structured objects
+   * Node calls: 1 (batch getrawtransaction <verbosity=1|2>)
    */
   async getManyTransactionsByTxids(txids: string[], verbosity: number = 1): Promise<(UniversalTransaction | null)[]> {
-    const requests = txids.map((txid) => ({
-      method: 'getrawtransaction',
-      params: [txid, verbosity],
-    }));
-
-    const results = await this.transport.batchCall(requests);
+    const results = await this.transport.getRawTransactionsByTxids(txids, verbosity as 1 | 2);
 
     return results.map((rawTx: any) => {
       if (rawTx === null) return null;
@@ -362,26 +251,16 @@ export class NetworkProvider extends BaseProvider {
   }
 
   /**
-   * Get multiple transactions by txids parsed from hex
-   * Node calls: 1 (batch getrawtransaction with verbosity=0 for all txids)
-   * Time complexity: O(k) where k = number of transactions
-   *
-   * @param txids Array of transaction IDs
-   * @returns Array of transactions in same order as input, null for missing transactions
+   * Get multiple transactions parsed from hex
+   * Node calls: 1 (batch getrawtransaction with verbosity=0)
    */
   async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
-    const hexRequests = txids.map((txid) => ({
-      method: 'getrawtransaction',
-      params: [txid, false],
-    }));
+    const hexResults = await this.transport.getRawTransactionsHexByTxids(txids);
 
-    const hexResults = await this.transport.batchCall(hexRequests);
-
-    return hexResults.map((hex: any) => {
+    return hexResults.map((hex) => {
       if (hex === null) return null;
 
       try {
-        // If you later add bytes parser for transactions:
         const u8 = Buffer.from(hex, 'hex');
         const parsedTx = HexTransformer.parseTxBytes(u8, this.network);
         // Do NOT attach tx.hex to the object
@@ -392,53 +271,107 @@ export class NetworkProvider extends BaseProvider {
     });
   }
 
-  // ===== NETWORK/ESTIMATE METHODS =====
-
   /**
-   * Get blockchain information
-   * Node calls: 1 (getblockchaininfo)
+   * Get blockchain info (passthrough JSON)
    */
   async getBlockchainInfo(): Promise<any> {
-    const results = await this.transport.batchCall([{ method: 'getblockchaininfo', params: [] }]);
-    const info = results[0];
-
-    if (info === null) {
-      throw new Error('Failed to get blockchain info: null response from transport');
-    }
-
-    return info;
+    const [info] = [await this.transport.getBlockchainInfo()];
+    return info ?? {};
   }
 
   /**
-   * Get network information
-   * Node calls: 1 (getnetworkinfo)
+   * Get network info (passthrough JSON)
    */
   async getNetworkInfo(): Promise<any> {
-    const results = await this.transport.batchCall([{ method: 'getnetworkinfo', params: [] }]);
-    const info = results[0];
-
-    if (info === null) {
-      throw new Error('Failed to get network info: null response from transport');
-    }
-
-    return info;
+    const [info] = [await this.transport.getNetworkInfo()];
+    return info ?? {};
   }
 
   /**
-   * Estimate smart fee
-   * Node calls: 1 (estimatesmartfee)
+   * Estimate fee for target confirmation (passthrough)
    */
   async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
-    const results = await this.transport.batchCall([
-      { method: 'estimatesmartfee', params: [confTarget, estimateMode] },
-    ]);
-    const feeData = results[0];
+    return this.transport.estimateSmartFee(confTarget, estimateMode as 'ECONOMICAL' | 'CONSERVATIVE');
+  }
 
-    if (feeData === null) {
-      throw new Error('Failed to estimate smart fee: null response from transport');
-    }
+  // ===== Normalizers =====
 
-    return feeData;
+  private normalizeRawTransaction(rawTx: any): UniversalTransaction {
+    return {
+      txid: rawTx.txid,
+      hash: rawTx.hash,
+      version: rawTx.version,
+      size: rawTx.size,
+      vsize: rawTx.vsize,
+      weight: rawTx.weight,
+      locktime: rawTx.locktime,
+      vin: rawTx.vin,
+      vout: rawTx.vout,
+      hex: undefined,
+      blockhash: rawTx.blockhash,
+      time: rawTx.time,
+      blocktime: rawTx.blocktime,
+      fee: rawTx.fee,
+      wtxid: rawTx.wtxid,
+      depends: rawTx.depends,
+      spentby: rawTx.spentby,
+      bip125_replaceable: rawTx['bip125-replaceable'],
+    } as unknown as UniversalTransaction;
+  }
+
+  private normalizeRawBlock(rawBlock: any): UniversalBlock {
+    return {
+      hash: rawBlock.hash,
+      confirmations: rawBlock.confirmations,
+      size: rawBlock.size,
+      height: rawBlock.height,
+      version: rawBlock.version,
+      merkleroot: rawBlock.merkleroot,
+      time: rawBlock.time,
+      mediantime: rawBlock.mediantime,
+      nonce: rawBlock.nonce,
+      bits: rawBlock.bits,
+      difficulty: rawBlock.difficulty,
+      chainwork: rawBlock.chainwork,
+      nTx: rawBlock.nTx,
+      tx: rawBlock.tx?.map((tx: any) => (typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx))),
+      previousblockhash: rawBlock.previousblockhash,
+      nextblockhash: rawBlock.nextblockhash,
+    } as unknown as UniversalBlock;
+  }
+
+  private normalizeRawBlockStats(rawStats: any): UniversalBlockStats {
+    return {
+      avgFee: rawStats.avgfee,
+      avgFeeRate: rawStats.avgfeerate,
+      avgTxSize: rawStats.avgtxsize,
+      blockHash: rawStats.blockhash,
+      height: rawStats.height,
+      ins: rawStats.ins,
+      maxFee: rawStats.maxfee,
+      maxFeeRate: rawStats.maxfeerate,
+      maxTxSize: rawStats.maxtxsize,
+      medianFee: rawStats.medianfee,
+      medianFeeRate: rawStats.medianfeerate,
+      medianTime: rawStats.mediantime,
+      medianTxSize: rawStats.mediantxsize,
+      minFee: rawStats.minfee,
+      minFeeRate: rawStats.minfeerate,
+      minTxSize: rawStats.mintxsize,
+      outs: rawStats.outs,
+      subsidy: rawStats.subsidy,
+      swTotalSize: rawStats.swtotal_size,
+      swTotalWeight: rawStats.swtotal_weight,
+      swTxs: rawStats.swtxs,
+      time: rawStats.time,
+      totalOut: rawStats.total_out,
+      totalSize: rawStats.total_size,
+      totalWeight: rawStats.total_weight,
+      totalFees: rawStats.totalfee,
+      txs: rawStats.txs,
+      utxoIncrease: rawStats.utxo_increase,
+      utxoSizeInc: rawStats.utxo_size_inc,
+    } as unknown as UniversalBlockStats;
   }
 
   // ===== P2P SPECIFIC METHODS =====
@@ -492,110 +425,5 @@ export class NetworkProvider extends BaseProvider {
     } catch {
       return { isP2P: true };
     }
-  }
-
-  // ===== NORMALIZATION METHODS =====
-
-  /**
-   * Normalize raw block data to UniversalBlock format
-   */
-  private normalizeRawBlock(rawBlock: any): UniversalBlock {
-    return {
-      hash: rawBlock.hash,
-      height: rawBlock.height,
-      strippedsize: rawBlock.strippedsize,
-      size: rawBlock.size,
-      weight: rawBlock.weight,
-      version: rawBlock.version,
-      versionHex: rawBlock.versionHex,
-      merkleroot: rawBlock.merkleroot,
-      time: rawBlock.time,
-      mediantime: rawBlock.mediantime,
-      nonce: rawBlock.nonce,
-      bits: rawBlock.bits,
-      difficulty: rawBlock.difficulty,
-      chainwork: rawBlock.chainwork,
-      previousblockhash: rawBlock.previousblockhash,
-      nextblockhash: rawBlock.nextblockhash,
-      tx: rawBlock.tx?.map((tx: any) => (typeof tx === 'string' ? tx : this.normalizeRawTransaction(tx))),
-      nTx: rawBlock.nTx,
-      fee: rawBlock.fee,
-      subsidy: rawBlock.subsidy,
-      miner: rawBlock.miner,
-      pool: rawBlock.pool,
-    };
-  }
-
-  /**
-   * Normalize raw transaction data to UniversalTransaction format
-   */
-  private normalizeRawTransaction(rawTx: any): UniversalTransaction {
-    return {
-      txid: rawTx.txid,
-      hash: rawTx.hash,
-      version: rawTx.version,
-      size: rawTx.size,
-      vsize: rawTx.vsize,
-      weight: rawTx.weight,
-      locktime: rawTx.locktime,
-      vin:
-        rawTx.vin?.map((vin: any) => ({
-          txid: vin.txid,
-          vout: vin.vout,
-          scriptSig: vin.scriptSig,
-          sequence: vin.sequence,
-          coinbase: vin.coinbase,
-          txinwitness: vin.txinwitness,
-        })) || [],
-      vout:
-        rawTx.vout?.map((vout: any) => ({
-          value: vout.value,
-          n: vout.n,
-          scriptPubKey: vout.scriptPubKey,
-        })) || [],
-      blockhash: rawTx.blockhash,
-      time: rawTx.time,
-      blocktime: rawTx.blocktime,
-      fee: rawTx.fee,
-      wtxid: rawTx.wtxid,
-      depends: rawTx.depends,
-      spentby: rawTx.spentby,
-      bip125_replaceable: rawTx['bip125-replaceable'],
-    };
-  }
-
-  /**
-   * Normalize raw block stats data to UniversalBlockStats format
-   */
-  private normalizeRawBlockStats(rawStats: any): UniversalBlockStats {
-    return {
-      blockhash: rawStats.blockhash,
-      height: rawStats.height,
-      total_size: rawStats.total_size,
-      total_weight: rawStats.total_weight,
-      total_fee: rawStats.total_fee,
-      fee_rate_percentiles: rawStats.fee_rate_percentiles,
-      subsidy: rawStats.subsidy,
-      total_out: rawStats.total_out,
-      utxo_increase: rawStats.utxo_increase,
-      utxo_size_inc: rawStats.utxo_size_inc,
-      ins: rawStats.ins,
-      outs: rawStats.outs,
-      txs: rawStats.txs,
-      minfee: rawStats.minfee,
-      maxfee: rawStats.maxfee,
-      medianfee: rawStats.medianfee,
-      avgfee: rawStats.avgfee,
-      minfeerate: rawStats.minfeerate,
-      maxfeerate: rawStats.maxfeerate,
-      medianfeerate: rawStats.medianfeerate,
-      avgfeerate: rawStats.avgfeerate,
-      mintxsize: rawStats.mintxsize,
-      maxtxsize: rawStats.maxtxsize,
-      mediantxsize: rawStats.mediantxsize,
-      avgtxsize: rawStats.avgtxsize,
-      total_stripped_size: rawStats.total_stripped_size,
-      witness_txs: rawStats.witness_txs,
-    };
   }
 }

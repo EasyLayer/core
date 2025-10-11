@@ -1,9 +1,9 @@
 import { Buffer } from 'buffer';
 import * as bitcoin from 'bitcoinjs-lib';
-import type { UniversalBlock, UniversalTransaction, NetworkConfig } from '../transports';
+import type { UniversalBlock, UniversalTransaction } from '../providers';
+import type { NetworkConfig } from '../transports';
 
 /**
- *
  * Design:
  * - For hex inputs use bitcoinjs to decode header/tx layout, but avoid heavy per-tx methods.
  * - Stripped size is computed structurally (no witness).

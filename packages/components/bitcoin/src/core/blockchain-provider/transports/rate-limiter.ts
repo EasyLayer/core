@@ -78,4 +78,8 @@ export class RateLimiter {
   async stop(): Promise<void> {
     await this.limiter.stop({ dropWaitingJobs: true });
   }
+
+  getConfig() {
+    return this.config;
+  }
 }

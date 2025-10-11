@@ -120,7 +120,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   private headerSyncComplete = false;
 
   private blockSubscribers = new Set<BlockSubscriber>();
-
   private headerSyncPromise: Promise<void> | null = null;
 
   constructor(options: P2PTransportOptions) {
@@ -153,7 +152,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     return {
       uniqName: this.uniqName,
       peers: this.peers,
-      rateLimits: this.rateLimiter['config'],
       network: this.network,
       maxPeers: this.peers.length,
       connectionTimeout: this.connectionTimeout,
@@ -189,20 +187,21 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   }
 
   async disconnect(): Promise<void> {
-    await this.rateLimiter.stop();
+    return this.executeWithErrorHandling(async () => {
+      this.blockSubscribers.clear();
 
-    this.blockSubscribers.clear();
+      this.chainTracker.clear();
+      this.headerSyncComplete = false;
+      this.headerSyncPromise = null;
 
-    this.chainTracker.clear();
-    this.headerSyncComplete = false;
-    this.headerSyncPromise = null;
-
-    this.pool.disconnect();
-    this.activePeer = null;
-    this.isConnected = false;
+      this.pool.disconnect();
+      this.activePeer = null;
+      this.isConnected = false;
+    }, 'disconnect');
   }
 
   async healthcheck(): Promise<boolean> {
+    // Basic readiness: at least one ready peer + connected flag
     return this.isConnected && this.activePeer !== null;
   }
 
@@ -269,34 +268,42 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     });
   }
 
-  /**
-   * P2P batch call with null support
-   * ORDER GUARANTEE: results[i] corresponds to calls[i]
-   */
-  async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
-    const results: (TResult | null)[] = new Array(calls.length);
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i];
-      if (!call) {
-        results[i] = null;
-        continue;
-      }
-      try {
-        if (call.method === 'getblockhash' && typeof call.params?.[0] === 'number') {
-          const height = call.params[0];
-          const hash = this.chainTracker.getHash(height);
-          results[i] = (hash || null) as TResult | null;
-        } else if (call.method === 'getblockcount') {
-          const tipHeight = this.chainTracker.getTipHeight();
-          results[i] = (tipHeight >= 0 ? tipHeight : null) as TResult | null;
-        } else {
-          results[i] = null;
-        }
-      } catch {
-        results[i] = null;
-      }
-    }
-    return results;
+  // ===== RPC-specific operations: not applicable for P2P transport =====
+  async getRawBlocksByHashesVerbose(_hashes: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
+    this.throwNotImplemented('getRawBlocksByHashesVerbose');
+  }
+  async getBlockStatsByHashes(_hashes: string[]): Promise<(any | null)[]> {
+    this.throwNotImplemented('getBlockStatsByHashes');
+  }
+  async getBlockHeadersByHashes(_hashes: string[]): Promise<(any | null)[]> {
+    this.throwNotImplemented('getBlockHeadersByHashes');
+  }
+  async getRawTransactionsHexByTxids(_txids: string[]): Promise<(string | null)[]> {
+    this.throwNotImplemented('getRawTransactionsHexByTxids');
+  }
+  async getRawTransactionsByTxids(_txids: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
+    this.throwNotImplemented('getRawTransactionsByTxids');
+  }
+  async getRawMempool(_verbose?: boolean): Promise<any> {
+    this.throwNotImplemented('getRawMempool');
+  }
+  async getMempoolVerbose(): Promise<Record<string, any>> {
+    this.throwNotImplemented('getMempoolVerbose');
+  }
+  async getMempoolEntries(_txids: string[]): Promise<(any | null)[]> {
+    this.throwNotImplemented('getMempoolEntries');
+  }
+  async getMempoolInfo(): Promise<any> {
+    this.throwNotImplemented('getMempoolInfo');
+  }
+  async estimateSmartFee(_confTarget: number, _estimateMode?: 'ECONOMICAL' | 'CONSERVATIVE'): Promise<any> {
+    this.throwNotImplemented('estimateSmartFee');
+  }
+  async getBlockchainInfo(): Promise<any> {
+    this.throwNotImplemented('getBlockchainInfo');
+  }
+  async getNetworkInfo(): Promise<any> {
+    this.throwNotImplemented('getNetworkInfo');
   }
 
   // Multiple-subscriber API with error propagation
@@ -455,7 +462,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           const prevHash = this.extractPreviousBlockHash(blockBuffer);
           const prevHeight = prevHash ? this.chainTracker.getHeight(prevHash) : undefined;
 
-          if (prevHeight !== undefined) {
+          if (typeof prevHeight === 'number') {
             const newHeight = prevHeight + 1;
             this.chainTracker.addHeader(blockHash, newHeight);
           }
@@ -469,7 +476,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           try {
             const header = this.parseHeaderBuffer(headerBuffer);
             const prevHeight = this.chainTracker.getHeight(header.previousblockhash);
-            if (prevHeight !== undefined) {
+            if (typeof prevHeight === 'number') {
               const height = prevHeight + 1;
               this.chainTracker.addHeader(header.hash, height);
             }

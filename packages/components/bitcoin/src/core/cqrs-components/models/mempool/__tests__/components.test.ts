@@ -58,31 +58,47 @@ describe('TxIndex', () => {
 });
 
 describe('ProviderMap', () => {
-  it('creates stable provider indices and maps tx to providers', () => {
+  it('sets fixed names once and resolves indices by name', () => {
     const pm = new ProviderMap();
-    const iA = pm.getOrCreateProviderIndex('A');
-    const iB = pm.getOrCreateProviderIndex('B');
-    expect(iA).toBe(0);
-    expect(iB).toBe(1);
-    expect(pm.getOrCreateProviderIndex('A')).toBe(iA);
-
-    pm.add(111, iA);
-    pm.add(111, iB);
-    const set = pm.getProviders(111)!;
-    expect(set.has(iA)).toBe(true);
-    expect(set.has(iB)).toBe(true);
-    expect(pm.getProviderName(iA)).toBe('A');
-    expect(pm.getProviderNames()).toEqual(['A', 'B']);
+    pm.setNamesOnce(['A', 'B', 'C']);
+    expect(pm.getProviderNames()).toEqual(['A', 'B', 'C']);
+    expect(pm.getProviderName(0)).toBe('A');
+    expect(pm.getProviderName(1)).toBe('B');
+    expect(pm.getProviderName(2)).toBe('C');
+    expect(pm.getIndexByName('A')).toBe(0);
+    expect(pm.getIndexByName('B')).toBe(1);
+    expect(pm.getIndexByName('C')).toBe(2);
+    expect(pm.getIndexByName('Z')).toBeUndefined();
+    expect([...pm.providerIndices()]).toEqual([0, 1, 2]);
   });
 
-  it('removes mapping and clears names', () => {
+  it('maps tx to exact provider set and replaces on setProvidersForTx', () => {
     const pm = new ProviderMap();
-    const iA = pm.getOrCreateProviderIndex('A');
-    pm.add(222, iA);
-    pm.remove(222);
-    expect(pm.getProviders(222)).toBeUndefined();
+    pm.setNamesOnce(['A', 'B', 'C']);
+    const h = 111;
+    pm.setProvidersForTx(h, [0]);
+    let set = pm.getProviders(h)!;
+    expect(set.size).toBe(1);
+    expect(set.has(0)).toBe(true);
+
+    pm.setProvidersForTx(h, [1, 2]);
+    set = pm.getProviders(h)!;
+    expect(set.size).toBe(2);
+    expect(set.has(1)).toBe(true);
+    expect(set.has(2)).toBe(true);
+    expect(set.has(0)).toBe(false);
+  });
+
+  it('removes mapping and clear keeps names', () => {
+    const pm = new ProviderMap();
+    pm.setNamesOnce(['A', 'B']);
+    const h = 222;
+    pm.setProvidersForTx(h, [1]);
+    expect(pm.getProviders(h)!.has(1)).toBe(true);
+    pm.remove(h);
+    expect(pm.getProviders(h)).toBeUndefined();
     pm.clear();
-    expect(pm.getProviderNames()).toEqual([]);
+    expect(pm.getProviderNames()).toEqual(['A', 'B']);
   });
 
   it('snapshot accessors work', () => {
@@ -92,6 +108,7 @@ describe('ProviderMap', () => {
     pm.__setNames(['X', 'Y']);
     expect(pm.__getMap()).toBe(map);
     expect(pm.__getNames()).toEqual(['X', 'Y']);
+    expect(pm.getProviderName(1)).toBe('Y');
   });
 });
 
@@ -188,40 +205,6 @@ describe('TxStore', () => {
     expect(st.get(9)?.txid).toBe('z');
   });
 });
-
-// describe('FeeRateIndex', () => {
-//   it('adds to rounded buckets and distributes', () => {
-//     const fi = new FeeRateIndex(); // precision 0.1
-//     fi.add(1, 12.34); // → 12.3
-//     fi.add(2, 12.39); // → 12.3
-//     fi.add(3, 7.01);  // → 7.0
-
-//     const dist = fi.distribution();
-//     expect(dist[12.3]).toBe(2);
-//     expect(dist[7.0]).toBe(1);
-//   });
-
-//   it('removes and cleans up empty buckets', () => {
-//     const fi = new FeeRateIndex();
-//     fi.add(1, 1.19); // 1.1
-//     fi.add(2, 1.10); // 1.1
-//     fi.remove(1, 1.19);
-//     let dist = fi.distribution();
-//     expect(dist[1.1]).toBe(1);
-//     fi.remove(2, 1.10);
-//     dist = fi.distribution();
-//     expect(dist[1.1]).toBeUndefined();
-//   });
-
-//   it('snapshot accessors work', () => {
-//     const fi = new FeeRateIndex();
-//     const m = new Map<number, Set<number>>([[3.2, new Set([1, 2])]]);
-//     fi.__setMap(m);
-//     expect(fi.__getMap()).toBe(m);
-//     const dist = fi.distribution();
-//     expect(dist[3.2]).toBe(2);
-//   });
-// });
 
 describe('LoadTracker', () => {
   it('marks, queries, removes, clears', () => {

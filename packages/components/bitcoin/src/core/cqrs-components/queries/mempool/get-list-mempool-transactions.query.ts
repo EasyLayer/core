@@ -1,7 +1,8 @@
 import { IsOptional, IsBoolean, IsNumber, IsPositive } from 'class-validator';
 import { JSONSchema } from 'class-validator-jsonschema';
 import { QueryDoc } from '@easylayer/common/shared-interfaces';
-import type { MempoolTxMetadata, MempoolTransaction } from '../../../blockchain-provider';
+import type { MempoolTxMetadata } from '../../../blockchain-provider';
+import type { LightTransaction } from '../../models';
 
 export interface IGetListMempoolTransactionsQuery {
   readonly minFeeRate?: number;
@@ -48,7 +49,7 @@ export class GetListMempoolTransactionsQueryDto {
 export interface ListedTransactionEntry {
   txid: string;
   feeRate: number;
-  transaction?: MempoolTransaction;
+  transaction?: LightTransaction;
   metadata?: MempoolTxMetadata;
 }
 

@@ -1,6 +1,21 @@
-import type { UniversalMempoolTransaction, UniversalMempoolInfo, UniversalTransaction } from '../transports';
+import type { UniversalMempoolInfo, UniversalTransaction, UniversalMempoolTxMetadata } from './interfaces';
 import { HexTransformer } from './hex-transformer';
 import { BaseProvider } from './base.provider';
+
+/** Unit helpers (coin → smallest units; coin/kvB → smallest-unit per vB) */
+function unitFactor(decimals: number) {
+  return Math.pow(10, Math.max(0, decimals | 0));
+}
+function toSmallestUnits(valueInCoin: any, factor: number): number {
+  const n = Number(valueInCoin);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * factor);
+}
+function toSmallestPerVb(valueInCoinPerKvB: any, factor: number): number {
+  const n = Number(valueInCoinPerKvB);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round((n * factor) / 1000); // kvB -> vB
+}
 
 /**
  * Mempool Provider for mempool-specific operations
@@ -17,338 +32,228 @@ import { BaseProvider } from './base.provider';
  */
 export class MempoolProvider extends BaseProvider {
   /**
-   * Get multiple transactions by txids as structured objects
-   * Node calls: 1 (batch getrawtransaction for all txids)
-   * Time complexity: O(k) where k = number of transactions
-   *
-   * @param txids Array of transaction IDs
-   * @param verbosity Verbosity level for transaction data
-   * @returns Array of transactions in same order as input, null for missing transactions
-   */
-  async getManyTransactionsByTxids(txids: string[], verbosity: number = 1): Promise<(UniversalTransaction | null)[]> {
-    const requests = txids.map((txid) => ({
-      method: 'getrawtransaction',
-      params: [txid, verbosity],
-    }));
-
-    const results = await this.transport.batchCall(requests);
-
-    return results.map((rawTx: string) => {
-      if (rawTx === null) return null;
-
-      try {
-        return this.normalizeRawTransaction(rawTx);
-      } catch (error) {
-        return null;
-      }
-    });
-  }
-
-  /**
-   * Get multiple transactions by txids parsed from hex
-   * Node calls: 1 (batch getrawtransaction with verbosity=0 for all txids)
-   * Time complexity: O(k) where k = number of transactions
-   *
-   * @param txids Array of transaction IDs
-   * @returns Array of transactions in same order as input, null for missing transactions
-   */
-  async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
-    const hexRequests = txids.map((txid) => ({
-      method: 'getrawtransaction',
-      params: [txid, false],
-    }));
-
-    const hexResults = await this.transport.batchCall(hexRequests);
-
-    return hexResults.map((hex: string) => {
-      if (hex === null) return null;
-
-      try {
-        // If you later add bytes parser for transactions:
-        const u8 = Buffer.from(hex, 'hex');
-        const parsedTx = HexTransformer.parseTxBytes(u8, this.network);
-        // Do NOT attach tx.hex to the object
-        return parsedTx;
-      } catch (error) {
-        return null;
-      }
-    });
-  }
-
-  /**
-   * Get mempool information
-   * Node calls: 1 (getmempoolinfo)
-   * Time complexity: O(1)
-   * Memory usage: Minimal - just returns current mempool state
-   *
-   * @returns Normalized mempool information
-   */
-  async getMempoolInfo(): Promise<UniversalMempoolInfo> {
-    const results = await this.transport.batchCall([{ method: 'getmempoolinfo', params: [] }]);
-    const rawInfo = results[0];
-
-    if (!rawInfo) {
-      throw new Error('Failed to get mempool info: null response from transport');
-    }
-
-    try {
-      return this.normalizeMempoolInfo(rawInfo);
-    } catch (error) {
-      throw new Error(`Failed to normalize mempool info: ${error}`);
-    }
-  }
-
-  /**
-   * Get raw mempool data (transaction IDs or detailed entries)
-   * Node calls: 1 (getrawmempool)
-   * Time complexity: O(n) where n = number of transactions in mempool
-   * Memory usage: Depends on mempool size and verbosity
-   *
-   * @param verbose If true, returns detailed transaction info; if false, returns array of txids
-   * @returns Raw mempool data (format depends on verbose flag)
-   */
-  async getRawMempool(verbose: boolean = false): Promise<any> {
-    const results = await this.transport.batchCall([{ method: 'getrawmempool', params: [verbose] }]);
-    const rawResult = results[0];
-
-    if (rawResult === null) {
-      throw new Error('Failed to get raw mempool: null response from transport');
-    }
-
-    if (!verbose) {
-      return rawResult; // string[] of transaction IDs
-    }
-
-    if (rawResult && typeof rawResult === 'object') {
-      const normalizedMempool: { [txid: string]: UniversalMempoolTransaction } = {};
-
-      for (const [txid, rawEntry] of Object.entries(rawResult)) {
-        try {
-          normalizedMempool[txid] = this.normalizeMempoolEntry(txid, rawEntry);
-        } catch (error) {
-          // Skip problematic entries and continue processing
-        }
-      }
-
-      return normalizedMempool;
-    }
-
-    return rawResult;
-  }
-
-  /**
-   * Get mempool entries for specific transactions
-   * Node calls: 1 (batch getmempoolentry for all txids)
-   * Time complexity: O(k) where k = number of txids requested
-   *
-   * @param txids Array of transaction IDs to get mempool entries for
-   * @returns Array of mempool entries in same order as input, null for missing entries
-   */
-  async getMempoolEntries(txids: string[]): Promise<(UniversalMempoolTransaction | null)[]> {
-    const requests = txids.map((txid) => ({ method: 'getmempoolentry', params: [txid] }));
-    const results = await this.transport.batchCall(requests);
-
-    return results.map((entry: any, index: any) => {
-      if (entry === null) return null;
-
-      try {
-        return this.normalizeMempoolEntry(txids[index]!, entry);
-      } catch (error) {
-        return null;
-      }
-    });
-  }
-
-  /**
-   * Estimate smart fee for transaction confirmation
+   * Estimate fee for target confirmation
    * Node calls: 1 (estimatesmartfee)
    * Time complexity: O(1)
    *
-   * @param confTarget Target number of confirmations
-   * @param estimateMode Estimation mode ('CONSERVATIVE' or 'ECONOMICAL')
-   * @returns Fee estimation data
+   * @param confTarget Target number of blocks for confirmation
+   * @param estimateMode Estimation mode (ECONOMICAL or CONSERVATIVE)
+   * @returns Fee estimation result
    */
-  async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
-    const results = await this.transport.batchCall([
-      { method: 'estimatesmartfee', params: [confTarget, estimateMode] },
-    ]);
-
-    const feeData = results[0];
-
-    if (feeData === null) {
-      throw new Error('Failed to estimate smart fee: null response from transport');
-    }
-
-    return feeData;
+  async estimateSmartFee(
+    confTarget: number,
+    estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE'
+  ): Promise<any> {
+    return this.transport.estimateSmartFee(confTarget, estimateMode);
   }
 
   /**
-   * Get current blockchain height
+   * Get current block height
    * Node calls: 1 (getblockcount)
    * Time complexity: O(1)
    */
-  async getBlockHeight(): Promise<number> {
-    const results = await this.transport.batchCall([{ method: 'getblockcount', params: [] }]);
-    const height = results[0];
-
-    if (height === null || height === undefined) {
-      throw new Error('Failed to get block height: null response from transport');
+  async getCurrentBlockHeight(): Promise<number> {
+    const height = await this.transport.getBlockHeight();
+    if (typeof height !== 'number' || height < 0) {
+      throw new Error('Failed to get block height: invalid response from transport');
     }
-
     return height;
   }
 
-  // ===== NORMALIZATION METHODS =====
-
   /**
-   * Convert coin amount to smallest unit (satoshis for Bitcoin)
-   * Time complexity: O(1)
+   * getRawMempool(verbose=false) -> string[]
+   * getRawMempool(verbose=true)  -> Record<txid, UniversalMempoolTxMetadata>
    */
-  private coinToSmallestUnit(coinAmount: number): number {
-    return Math.round(coinAmount * Math.pow(10, this.network.nativeCurrencyDecimals));
+  async getRawMempool(verbose: true): Promise<Record<string, UniversalMempoolTxMetadata>>;
+  async getRawMempool(verbose?: false): Promise<string[]>;
+  async getRawMempool(verbose: boolean = false): Promise<any> {
+    if (!verbose) {
+      const list = await this.transport.getRawMempool(false);
+      return Array.isArray(list) ? list : [];
+    }
+
+    const raw = await this.transport.getRawMempool(true); // Record<string, any>
+    const out: Record<string, UniversalMempoolTxMetadata> = {};
+    const factor = unitFactor(this.network.nativeCurrencyDecimals);
+
+    for (const [txid, entry] of Object.entries(raw || {})) {
+      const e: any = entry || {};
+
+      const baseCoin =
+        e?.fees?.modified ?? e?.fees?.base ?? e?.fees?.ancestor ?? e?.fees?.descendant ?? e?.modifiedfee ?? e?.fee ?? 0;
+
+      out[txid] = {
+        txid,
+        wtxid: e.wtxid,
+        size: Number(e.size) || 0,
+        vsize: Number(e.vsize) || 0,
+        weight: Number(e.weight) || 0,
+
+        fee: toSmallestUnits(e.fee ?? baseCoin, factor),
+        modifiedfee: toSmallestUnits(e.modifiedfee ?? e?.fees?.modified ?? baseCoin, factor),
+        time: Number(e.time) || 0,
+        height: Number(e.height) || 0,
+
+        depends: Array.isArray(e.depends) ? e.depends : [],
+        descendantcount: Number(e.descendantcount) || 0,
+        descendantsize: Number(e.descendantsize) || 0,
+        descendantfees: toSmallestUnits(e.descendantfees, factor),
+        ancestorcount: Number(e.ancestorcount) || 0,
+        ancestorsize: Number(e.ancestorsize) || 0,
+        ancestorfees: toSmallestUnits(e.ancestorfees, factor),
+
+        fees: {
+          base: toSmallestUnits(e?.fees?.base ?? baseCoin, factor),
+          modified: toSmallestUnits(e?.fees?.modified ?? baseCoin, factor),
+          ancestor: toSmallestUnits(e?.fees?.ancestor ?? 0, factor),
+          descendant: toSmallestUnits(e?.fees?.descendant ?? 0, factor),
+        },
+
+        bip125_replaceable: !!e.bip125_replaceable,
+        unbroadcast: !!e.unbroadcast,
+      };
+    }
+
+    return out;
   }
 
-  /**
-   * Normalize raw mempool entry to UniversalMempoolTransaction format
-   * Handles fee conversion from coin format to smallest unit
-   *
-   * @param txid Transaction ID
-   * @param entry Raw mempool entry data
-   * @returns Normalized mempool transaction
-   */
-  private normalizeMempoolEntry(txid: string, entry: any): UniversalMempoolTransaction {
-    const baseFee = entry.fees?.base ?? entry.fee;
-    const modifiedFee = entry.fees?.modified ?? entry.modifiedfee;
-    const ancestorFee = entry.fees?.ancestor ?? entry.ancestorfees;
-    const descendantFee = entry.fees?.descendant ?? entry.descendantfees;
+  // ----- Mempool info -----
 
-    if (baseFee === undefined || baseFee === null) {
-      throw new Error(`Missing base fee for transaction ${txid}`);
-    }
-
-    if (!entry.vsize || entry.vsize <= 0) {
-      throw new Error(`Invalid vsize for transaction ${txid}: ${entry.vsize}`);
-    }
-
-    // Convert to smallest unit if values are in coin format (< 1 indicates coin format)
-    const baseFeeInSmallestUnit = baseFee < 1 ? this.coinToSmallestUnit(baseFee) : baseFee;
-    const modifiedFeeInSmallestUnit =
-      modifiedFee !== undefined && modifiedFee < 1 ? this.coinToSmallestUnit(modifiedFee) : modifiedFee;
-    const ancestorFeeInSmallestUnit =
-      ancestorFee !== undefined && ancestorFee < 1 ? this.coinToSmallestUnit(ancestorFee) : ancestorFee;
-    const descendantFeeInSmallestUnit =
-      descendantFee !== undefined && descendantFee < 1 ? this.coinToSmallestUnit(descendantFee) : descendantFee;
+  async getMempoolInfo(): Promise<UniversalMempoolInfo> {
+    const raw: any = await this.transport.getMempoolInfo();
+    const factor = unitFactor(this.network.nativeCurrencyDecimals);
 
     return {
-      txid,
-      wtxid: entry.wtxid,
-      size: entry.size,
-      vsize: entry.vsize,
-      weight: entry.weight,
-      fee: baseFeeInSmallestUnit,
-      modifiedfee: modifiedFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-      time: entry.time ?? Math.floor(Date.now() / 1000),
-      height: entry.height ?? -1,
-      depends: entry.depends ?? [],
-      descendantcount: entry.descendantcount ?? 0,
-      descendantsize: entry.descendantsize ?? 0,
-      descendantfees: descendantFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-      ancestorcount: entry.ancestorcount ?? 0,
-      ancestorsize: entry.ancestorsize ?? 0,
-      ancestorfees: ancestorFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-      fees: {
-        base: baseFeeInSmallestUnit,
-        modified: modifiedFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-        ancestor: ancestorFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-        descendant: descendantFeeInSmallestUnit ?? baseFeeInSmallestUnit,
-      },
-      bip125_replaceable: entry['bip125-replaceable'] ?? false,
-      unbroadcast: entry.unbroadcast ?? false,
+      loaded: !!raw?.loaded,
+      size: Number(raw?.size) || 0,
+      bytes: Number(raw?.bytes) || 0,
+      usage: Number(raw?.usage) || 0,
+      total_fee: toSmallestUnits(raw?.total_fee, factor),
+      maxmempool: Number(raw?.maxmempool) || 0,
+      mempoolminfee: toSmallestPerVb(raw?.mempoolminfee, factor),
+      minrelaytxfee: toSmallestPerVb(raw?.minrelaytxfee, factor),
+      unbroadcastcount: Number(raw?.unbroadcastcount) || 0,
     };
   }
 
+  // ----- Mempool entries -----
+
   /**
-   * Normalize raw mempool info to UniversalMempoolInfo format
-   * Handles fee rate conversion from BTC/kvB to sat/vB
-   *
-   * @param rawInfo Raw mempool info data
-   * @returns Normalized mempool info
+   * ORDER GUARANTEE: results[i] corresponds to txids[i]; null for missing/failed.
    */
-  private normalizeMempoolInfo(rawInfo: any): UniversalMempoolInfo {
-    if (typeof rawInfo.size !== 'number') {
-      throw new Error('Missing or invalid size in mempool info');
-    }
+  async getMempoolEntries(txids: string[]): Promise<(UniversalMempoolTxMetadata | null)[]> {
+    if (!Array.isArray(txids) || txids.length === 0) return [];
+    const raws = await this.transport.getMempoolEntries(txids); // (any | null)[]
+    const factor = unitFactor(this.network.nativeCurrencyDecimals);
 
-    if (typeof rawInfo.bytes !== 'number') {
-      throw new Error('Missing or invalid bytes in mempool info');
-    }
+    return raws.map((eRaw: any, i) => {
+      if (!eRaw || typeof eRaw !== 'object') return null;
+      const e = eRaw;
 
-    if (typeof rawInfo.maxmempool !== 'number') {
-      throw new Error('Missing or invalid maxmempool in mempool info');
-    }
+      const txid = txids[i]!;
+      const baseCoin =
+        e?.fees?.modified ?? e?.fees?.base ?? e?.fees?.ancestor ?? e?.fees?.descendant ?? e?.modifiedfee ?? e?.fee ?? 0;
 
-    if (rawInfo.mempoolminfee === undefined || rawInfo.mempoolminfee === null) {
-      throw new Error('Missing mempoolminfee in mempool info');
-    }
+      const meta: UniversalMempoolTxMetadata = {
+        txid,
+        wtxid: e.wtxid,
+        size: Number(e.size) || 0,
+        vsize: Number(e.vsize) || 0,
+        weight: Number(e.weight) || 0,
 
-    if (rawInfo.minrelaytxfee === undefined || rawInfo.minrelaytxfee === null) {
-      throw new Error('Missing minrelaytxfee in mempool info');
-    }
+        fee: toSmallestUnits(e.fee ?? baseCoin, factor),
+        modifiedfee: toSmallestUnits(e.modifiedfee ?? e?.fees?.modified ?? baseCoin, factor),
+        time: Number(e.time) || 0,
+        height: Number(e.height) || 0,
 
-    const totalFee =
-      rawInfo.total_fee !== undefined && rawInfo.total_fee !== null ? this.coinToSmallestUnit(rawInfo.total_fee) : 0;
+        depends: Array.isArray(e.depends) ? e.depends : [],
+        descendantcount: Number(e.descendantcount) || 0,
+        descendantsize: Number(e.descendantsize) || 0,
+        descendantfees: toSmallestUnits(e.descendantfees, factor),
+        ancestorcount: Number(e.ancestorcount) || 0,
+        ancestorsize: Number(e.ancestorsize) || 0,
+        ancestorfees: toSmallestUnits(e.ancestorfees, factor),
 
-    const mempoolMinFee = Math.round((rawInfo.mempoolminfee * 100000000) / 1000);
-    const minRelayTxFee = Math.round((rawInfo.minrelaytxfee * 100000000) / 1000);
+        fees: {
+          base: toSmallestUnits(e?.fees?.base ?? baseCoin, factor),
+          modified: toSmallestUnits(e?.fees?.modified ?? baseCoin, factor),
+          ancestor: toSmallestUnits(e?.fees?.ancestor ?? 0, factor),
+          descendant: toSmallestUnits(e?.fees?.descendant ?? 0, factor),
+        },
 
-    return {
-      loaded: rawInfo.loaded === true,
-      size: rawInfo.size,
-      bytes: rawInfo.bytes,
-      usage: rawInfo.usage || rawInfo.bytes,
-      total_fee: totalFee,
-      maxmempool: rawInfo.maxmempool,
-      mempoolminfee: mempoolMinFee,
-      minrelaytxfee: minRelayTxFee,
-      unbroadcastcount: rawInfo.unbroadcastcount || 0,
-    };
+        bip125_replaceable: !!e.bip125_replaceable,
+        unbroadcast: !!e.unbroadcast,
+      };
+
+      return meta;
+    });
+  }
+
+  // ----- Transactions -----
+
+  /**
+   * Decoded path (verbosity=1):
+   * ORDER GUARANTEE: results[i] corresponds to txids[i]; null for missing.
+   */
+  async getManyTransactionsByTxids(txids: string[], verbosity: number = 1): Promise<(UniversalTransaction | null)[]> {
+    if (!Array.isArray(txids) || txids.length === 0) return [];
+    const raws: any[] = await this.transport.getRawTransactionsByTxids(txids, 1 as 1);
+
+    return raws.map((txRaw: any) => {
+      if (!txRaw || typeof txRaw !== 'object') return null;
+
+      const vin = Array.isArray(txRaw.vin)
+        ? txRaw.vin.map((v: any) => ({ txid: v.txid, vout: v.vout, sequence: v.sequence }))
+        : [];
+
+      const vout = Array.isArray(txRaw.vout)
+        ? txRaw.vout.map((o: any) => ({
+            value: Number(o.value) || 0,
+            n: Number(o.n) || 0,
+            scriptPubKey: o?.scriptPubKey
+              ? { type: o.scriptPubKey.type, addresses: o.scriptPubKey.addresses, hex: o.scriptPubKey.hex }
+              : undefined,
+          }))
+        : [];
+
+      const utx: UniversalTransaction = {
+        txid: txRaw.txid,
+        hash: txRaw.hash,
+        version: txRaw.version,
+        size: Number(txRaw.size) || 0,
+        // strippedsize: Number(txRaw.strippedsize) || undefined,
+        // sizeWithoutWitnesses: txRaw.sizeWithoutWitnesses ? Number(txRaw.sizeWithoutWitnesses) : undefined,
+        vsize: Number(txRaw.vsize) || 0,
+        weight: Number(txRaw.weight) || 0,
+        locktime: Number(txRaw.locktime) || 0,
+        vin,
+        vout,
+        fee: typeof txRaw.fee === 'number' ? txRaw.fee : undefined,
+        wtxid: txRaw.wtxid,
+        bip125_replaceable: !!txRaw.bip125_replaceable,
+      };
+
+      return utx;
+    });
   }
 
   /**
-   * Normalize raw transaction data to UniversalTransaction format
+   * Hex path (verbosity=false) + HexTransformer:
+   * ORDER GUARANTEE: results[i] corresponds to txids[i]; null for missing/parse failure.
    */
-  private normalizeRawTransaction(rawTx: any): UniversalTransaction {
-    return {
-      txid: rawTx.txid,
-      hash: rawTx.hash,
-      version: rawTx.version,
-      size: rawTx.size,
-      vsize: rawTx.vsize,
-      weight: rawTx.weight,
-      locktime: rawTx.locktime,
-      vin:
-        rawTx.vin?.map((vin: any) => ({
-          txid: vin.txid,
-          vout: vin.vout,
-          scriptSig: vin.scriptSig,
-          sequence: vin.sequence,
-          coinbase: vin.coinbase,
-          txinwitness: vin.txinwitness,
-        })) || [],
-      vout:
-        rawTx.vout?.map((vout: any) => ({
-          value: vout.value,
-          n: vout.n,
-          scriptPubKey: vout.scriptPubKey,
-        })) || [],
-      blockhash: rawTx.blockhash,
-      time: rawTx.time,
-      blocktime: rawTx.blocktime,
-      fee: rawTx.fee,
-      wtxid: rawTx.wtxid,
-      depends: rawTx.depends,
-      spentby: rawTx.spentby,
-      bip125_replaceable: rawTx['bip125-replaceable'],
-    };
+  async getManyTransactionsHexByTxids(txids: string[]): Promise<(UniversalTransaction | null)[]> {
+    if (!Array.isArray(txids) || txids.length === 0) return [];
+    const hexResults: (string | null)[] = await this.transport.getRawTransactionsHexByTxids(txids);
+
+    return hexResults.map((hex) => {
+      if (typeof hex !== 'string') return null;
+      try {
+        const u8 = Buffer.from(hex, 'hex');
+        const parsed = HexTransformer.parseTxBytes(u8, this.network);
+        return parsed as UniversalTransaction;
+      } catch {
+        return null;
+      }
+    });
   }
 }

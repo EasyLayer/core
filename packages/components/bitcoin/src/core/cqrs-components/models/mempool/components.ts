@@ -1,5 +1,5 @@
-import type { MempoolTransaction, MempoolTxMetadata } from '../../../blockchain-provider';
-
+import type { MempoolTxMetadata } from '../../../blockchain-provider';
+import type { LightTransaction } from '../interfaces';
 /**
  * Internal data-structures live INSIDE the aggregate state.
  * We keep them small, single-responsibility, and serializable via base serializer (Maps/Sets).
@@ -58,63 +58,106 @@ export class TxIndex {
 }
 
 /** === ProviderMap ===========================================================
- * Responsibility: which providers saw a tx.
- * Structure: Map<txidHash, Set<providerIndex>> and providerNames: string[].
- * Complexity: O(1) add/get/remove.
- * Memory: ~8–20B/txid (depending on #providers).
+ * Responsibility:
+ *   - Keep a fixed mapping of *known provider names* (array order is the index).
+ *   - Track, for each tx (by 32-bit hash), which providers reported it.
+ *
+ * Invariants:
+ *   - Provider indices are derived **only** from the fixed `providerNames` array.
+ *     There is NO auto-creation of unknown names.
+ *   - If the provider list (order or membership) changes, indices are no longer valid.
+ *     Call `replaceNames(newNames)` to atomically swap names and CLEAR all per-tx
+ *     visibility (since indices change). After that, rebuild visibility from a fresh
+ *     verbose snapshot.
+ *
+ * Data layout:
+ *   - `providerNames: string[]` — fixed registry of providers; position == index.
+ *   - `txToProviders: Map<number, Set<number>>` — for each txHash, a set of provider indices.
+ *
+ * Typical flow:
+ *   1) On init: set names once from the service (`setNamesOnce(names)`).
+ *   2) On every verbose snapshot: for each tx, call `setProvidersForTx(hash, indices)`.
+ *   3) During sync (loading full tx): read-only access via
+ *      `primaryProviderIndex(hash)` or `getProviders(hash)` for batching;
+ *      DO NOT mutate visibility here.
+ *
+ * Snapshotting:
+ *   - `__getMap/__setMap` and `__getNames/__setNames` are used by the aggregate snapshot
+ *     serializer/deserializer. They do not validate indices; caller must ensure
+ *     names/indices consistency.
  */
 export class ProviderMap {
   private txToProviders: Map<number, Set<number>> = new Map();
   private providerNames: string[] = [];
 
-  getOrCreateProviderIndex(name: string): number {
-    const idx = this.providerNames.indexOf(name);
-    if (idx >= 0) return idx;
-    this.providerNames.push(name);
-    return this.providerNames.length - 1;
+  public setNamesOnce(names: string[]) {
+    if (this.providerNames.length === 0) this.providerNames = [...names];
   }
 
-  add(txHash: number, providerIdx: number) {
-    let set = this.txToProviders.get(txHash);
-    if (!set) {
-      set = new Set<number>();
-      this.txToProviders.set(txHash, set);
+  public hasSameNames(names: string[]): boolean {
+    if (!Array.isArray(names)) return false;
+    if (names.length !== this.providerNames.length) return false;
+    for (let i = 0; i < names.length; i++) {
+      if (names[i] !== this.providerNames[i]) return false;
     }
-    set.add(providerIdx);
+    return true;
   }
 
-  getProviders(txHash: number): Set<number> | undefined {
+  public replaceNames(names: string[]): void {
+    this.providerNames = [...names];
+    this.txToProviders.clear(); // indexes change → clear visibility
+  }
+
+  public getIndexByName(name: string): number | undefined {
+    const i = this.providerNames.indexOf(name);
+    return i >= 0 ? i : undefined;
+  }
+
+  public providerIndices(): Iterable<number> {
+    return this.providerNames.map((_, i) => i).values();
+  }
+
+  public setProvidersForTx(txHash: number, indices: number[]) {
+    this.txToProviders.set(txHash, new Set(indices));
+  }
+
+  public primaryProviderIndex(txHash: number): number | undefined {
+    const set = this.txToProviders.get(txHash);
+    if (!set || set.size === 0) return undefined;
+    return set.values().next().value;
+  }
+
+  public getProviders(txHash: number): Set<number> | undefined {
     return this.txToProviders.get(txHash);
   }
 
-  remove(txHash: number) {
+  public remove(txHash: number) {
     this.txToProviders.delete(txHash);
   }
 
-  clear() {
+  public clear() {
     this.txToProviders.clear();
-    this.providerNames = [];
+    // We keep the names - they are replaced by replaceNames() when needed
   }
 
-  getProviderName(i: number): string | undefined {
+  public getProviderName(i: number): string | undefined {
     return this.providerNames[i];
   }
 
-  getProviderNames(): string[] {
+  public getProviderNames(): string[] {
     return [...this.providerNames];
   }
 
-  /** expose for snapshots */
-  __getMap() {
+  public __getMap() {
     return this.txToProviders;
   }
-  __setMap(m: Map<number, Set<number>>) {
+  public __setMap(m: Map<number, Set<number>>) {
     this.txToProviders = m;
   }
-  __getNames() {
+  public __getNames() {
     return this.providerNames;
   }
-  __setNames(a: string[]) {
+  public __setNames(a: string[]) {
     this.providerNames = a;
   }
 }
@@ -165,12 +208,12 @@ export class MetadataStore {
  * Memory: ~1–2 KB per tx (depends on LightVin/LightVout density).
  */
 export class TxStore {
-  private m: Map<number, MempoolTransaction> = new Map();
+  private m: Map<number, LightTransaction> = new Map();
 
-  put(txHash: number, slim: MempoolTransaction) {
+  put(txHash: number, slim: LightTransaction) {
     this.m.set(txHash, slim);
   }
-  get(txHash: number): MempoolTransaction | undefined {
+  get(txHash: number): LightTransaction | undefined {
     return this.m.get(txHash);
   }
   remove(txHash: number) {
@@ -187,7 +230,7 @@ export class TxStore {
   __getMap() {
     return this.m;
   }
-  __setMap(m: Map<number, MempoolTransaction>) {
+  __setMap(m: Map<number, LightTransaction>) {
     this.m = m;
   }
 }

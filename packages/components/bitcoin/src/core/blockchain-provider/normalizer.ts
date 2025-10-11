@@ -1,5 +1,12 @@
-import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
-import type { Block, BlockStats, Transaction, Vin, Vout } from './components';
+import type { NetworkConfig } from './transports';
+import type {
+  UniversalBlock,
+  UniversalBlockStats,
+  UniversalTransaction,
+  UniversalMempoolInfo,
+  UniversalMempoolTxMetadata,
+} from './providers';
+import type { Block, BlockStats, Transaction, Vin, Vout, MempoolTxMetadata, MempoolInfo } from './components';
 
 /**
  * Bitcoin Normalizer - converts Universal objects to enhanced component objects
@@ -340,5 +347,61 @@ export class BitcoinNormalizer {
       total_vsize,
       witness_ratio,
     };
+  }
+
+  /** UniversalMempoolInfo -> domain MempoolInfo (1:1 today, kept explicit for future changes) */
+  public normalizeMempoolInfo(u: UniversalMempoolInfo): MempoolInfo {
+    return {
+      loaded: !!u.loaded,
+      size: Number(u.size) || 0,
+      bytes: Number(u.bytes) || 0,
+      usage: Number(u.usage) || 0,
+      total_fee: Number(u.total_fee) || 0,
+      maxmempool: Number(u.maxmempool) || 0,
+      mempoolminfee: Number(u.mempoolminfee) || 0,
+      minrelaytxfee: Number(u.minrelaytxfee) || 0,
+      unbroadcastcount: Number(u.unbroadcastcount) || 0,
+    };
+  }
+
+  /** Single entry */
+  public normalizeMempoolEntry(u: UniversalMempoolTxMetadata): MempoolTxMetadata {
+    return {
+      txid: u.txid,
+      wtxid: u.wtxid,
+      size: u.size,
+      vsize: u.vsize,
+      weight: u.weight,
+
+      fee: u.fee,
+      modifiedfee: u.modifiedfee,
+      time: u.time,
+      height: u.height,
+
+      depends: u.depends || [],
+      descendantcount: u.descendantcount,
+      descendantsize: u.descendantsize,
+      descendantfees: u.descendantfees,
+      ancestorcount: u.ancestorcount,
+      ancestorsize: u.ancestorsize,
+      ancestorfees: u.ancestorfees,
+
+      fees: {
+        base: u.fees.base,
+        modified: u.fees.modified,
+        ancestor: u.fees.ancestor,
+        descendant: u.fees.descendant,
+      },
+
+      bip125_replaceable: !!u.bip125_replaceable,
+      unbroadcast: !!u.unbroadcast,
+    };
+  }
+
+  /** Map of entries */
+  public normalizeMempoolEntryMap(m: Record<string, UniversalMempoolTxMetadata>): Record<string, MempoolTxMetadata> {
+    const out: Record<string, MempoolTxMetadata> = {};
+    for (const [txid, u] of Object.entries(m || {})) out[txid] = this.normalizeMempoolEntry(u);
+    return out;
   }
 }

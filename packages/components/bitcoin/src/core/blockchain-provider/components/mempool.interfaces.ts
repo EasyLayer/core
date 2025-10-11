@@ -1,33 +1,3 @@
-import type { Transaction } from './transaction.interfaces';
-
-export interface LightScriptPubKey {
-  type?: string;
-  addresses?: string[];
-  hex?: string; // required for address derivation when addresses[] is absent
-}
-
-export interface LightVin {
-  txid?: string;
-  vout?: number;
-  sequence?: number; // required for BIP-125 signaling check
-}
-
-export interface LightVout {
-  value: number;
-  n: number;
-  scriptPubKey?: LightScriptPubKey;
-}
-
-// Keep only what we need for mempool processing, drop heavy script/witness/etc.
-export type MempoolTransaction = Omit<
-  Transaction,
-  'vin' | 'vout' | 'blockhash' | 'time' | 'blocktime' | 'depends' | 'spentby' | 'witnessSize'
-> & {
-  vin: LightVin[];
-  vout: LightVout[];
-  feeRate?: number; // ensure present for sorting even if not provided by normalizer
-};
-
 export interface MempoolTxMetadata {
   // Basic transaction info
   txid: string;

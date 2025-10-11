@@ -1,7 +1,8 @@
 import { Buffer } from 'buffer';
 import * as bitcoin from 'bitcoinjs-lib';
 import { BlockSizeCalculator } from '../utils';
-import type { UniversalBlock, UniversalTransaction, UniversalVin, UniversalVout, NetworkConfig } from '../transports';
+import type { UniversalBlock, UniversalTransaction, UniversalVin, UniversalVout } from '../providers';
+import type { NetworkConfig } from '../transports';
 
 function bufToHexBE(buf?: Buffer): string | undefined {
   if (!buf) return undefined;

@@ -1,4 +1,4 @@
-import type { LightBlock } from '../../../blockchain-provider';
+import type { LightBlock } from '../interfaces';
 
 export class Chain {
   block!: LightBlock;
