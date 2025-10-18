@@ -288,7 +288,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
-          this.log.error('Exceeded max retries for receipts batch', {
+          this.log.warn('Exceeded max retries for receipts batch', {
             args: { blockCount: blocks.length, error },
           });
           throw error;

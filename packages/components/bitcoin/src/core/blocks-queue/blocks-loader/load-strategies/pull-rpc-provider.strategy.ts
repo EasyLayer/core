@@ -78,9 +78,12 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
         // continue;
       }
 
-      if (this._preloadedItemsQueue.length > 0) {
-        await this.loadAndEnqueueBlocks();
+      if (this._preloadedItemsQueue.length === 0) {
+        // throw new Error('No blocks available to preload for requested heights');
+        return;
       }
+
+      await this.loadAndEnqueueBlocks();
     }
   }
 
@@ -189,10 +192,20 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
         predictedReplyBytes = nextPredicted;
       }
 
+      // If after the loop infos is still empty and the queue is not empty, take 1 block
+      if (infos.length === 0 && this._preloadedItemsQueue.length > 0) {
+        const forced = this._preloadedItemsQueue.pop()!;
+        infos.push(forced);
+      }
+
       if (infos.length > 0) {
         totalInfosPulled += infos.length;
         activeTasks.push(this.loadBlocks(infos, retryLimit));
       }
+    }
+
+    if (activeTasks.length === 0) {
+      return;
     }
 
     const batches: Block[][] = await Promise.all(activeTasks);

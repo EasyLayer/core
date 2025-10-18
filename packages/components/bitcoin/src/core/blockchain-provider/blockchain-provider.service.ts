@@ -201,7 +201,7 @@ export class BlockchainProviderService {
         };
       })
       .catch((error) => {
-        this.logger.error('Failed to get provider for subscription', {
+        this.logger.warn('Failed to get provider for subscription', {
           args: { error },
           methodName: 'subscribeToNewBlocks()',
         });
@@ -246,7 +246,7 @@ export class BlockchainProviderService {
 
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        this.logger.error('Network provider recovery failed', {
+        this.logger.warn('Network provider recovery failed', {
           args: { methodName, originalError: error, recoveryError },
         });
         throw recoveryError;

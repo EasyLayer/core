@@ -87,7 +87,7 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
 
     this.wss = new WebSocketServer({ server: this.server, path: this.path, maxPayload: this.maxWireBytes });
     this.wss.on('connection', (ws, req) => this.onConnection(ws, req));
-    this.wss.on('error', (err) => this.log.error('wss error', err as any));
+    this.wss.on('error', (err) => this.log.warn('wss error', err as any));
     this.server.listen(opts.port, opts.host, () =>
       this.log.log(`WS server listening at ${opts.host}:${opts.port}${this.path}`)
     );
