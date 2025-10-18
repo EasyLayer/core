@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import type { NetworkConfig as BitcoreNetworkConfig } from 'bitcore-p2p';
 import { Pool, Peer, Messages } from 'bitcore-p2p';
-import type { BaseTransportOptions } from '../../../core';
+import type { BaseTransportOptions, ByteData } from '../../../core';
 import { BaseTransport } from '../../../core';
 
 const isNodeLike = typeof process !== 'undefined' && !!process.versions?.node;
@@ -102,12 +102,12 @@ class ChainTracker {
 }
 
 type BlockSubscriber = {
-  onData: (blockData: Buffer) => void;
+  onData: (blockData: ByteData) => void;
   onError?: (err: Error) => void;
 };
 
 export class P2PTransport extends BaseTransport<P2PTransportOptions> {
-  readonly type = 'p2p';
+  readonly type = 'p2p' as const;
 
   private pool: Pool;
   private activePeer: Peer | null = null;
@@ -239,12 +239,12 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
    * ORDER GUARANTEE: results[i] corresponds to hashes[i]
    * Missing/failed items return null at the same index
    */
-  async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
+  async requestHexBlocks(hashes: string[]): Promise<(ByteData | null)[]> {
     return this.executeWithErrorHandling(async () => {
       if (!this.activePeer) return hashes.map(() => null);
 
       const batchSize = 128;
-      const out: (Buffer | null)[] = new Array(hashes.length);
+      const out: (ByteData | null)[] = new Array(hashes.length);
       for (let i = 0; i < hashes.length; i += batchSize) {
         const slice = hashes.slice(i, i + batchSize);
         const got = await this.requestHexBlocksBatch(slice);
@@ -270,45 +270,80 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   // ===== RPC-specific operations: not applicable for P2P transport =====
   async getRawBlocksByHashesVerbose(_hashes: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
-    this.throwNotImplemented('getRawBlocksByHashesVerbose');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawBlocksByHashesVerbose');
+    }, 'getRawBlocksByHashesVerbose');
   }
+
   async getBlockStatsByHashes(_hashes: string[]): Promise<(any | null)[]> {
-    this.throwNotImplemented('getBlockStatsByHashes');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockStatsByHashes');
+    }, 'getBlockStatsByHashes');
   }
+
   async getBlockHeadersByHashes(_hashes: string[]): Promise<(any | null)[]> {
-    this.throwNotImplemented('getBlockHeadersByHashes');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockHeadersByHashes');
+    }, 'getBlockHeadersByHashes');
   }
+
   async getRawTransactionsHexByTxids(_txids: string[]): Promise<(string | null)[]> {
-    this.throwNotImplemented('getRawTransactionsHexByTxids');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawTransactionsHexByTxids');
+    }, 'getRawTransactionsHexByTxids');
   }
+
   async getRawTransactionsByTxids(_txids: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
-    this.throwNotImplemented('getRawTransactionsByTxids');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawTransactionsByTxids');
+    }, 'getRawTransactionsByTxids');
   }
+
   async getRawMempool(_verbose?: boolean): Promise<any> {
-    this.throwNotImplemented('getRawMempool');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawMempool');
+    }, 'getRawMempool');
   }
+
   async getMempoolVerbose(): Promise<Record<string, any>> {
-    this.throwNotImplemented('getMempoolVerbose');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolVerbose');
+    }, 'getMempoolVerbose');
   }
+
   async getMempoolEntries(_txids: string[]): Promise<(any | null)[]> {
-    this.throwNotImplemented('getMempoolEntries');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolEntries');
+    }, 'getMempoolEntries');
   }
+
   async getMempoolInfo(): Promise<any> {
-    this.throwNotImplemented('getMempoolInfo');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolInfo');
+    }, 'getMempoolInfo');
   }
+
   async estimateSmartFee(_confTarget: number, _estimateMode?: 'ECONOMICAL' | 'CONSERVATIVE'): Promise<any> {
-    this.throwNotImplemented('estimateSmartFee');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('estimateSmartFee');
+    }, 'estimateSmartFee');
   }
+
   async getBlockchainInfo(): Promise<any> {
-    this.throwNotImplemented('getBlockchainInfo');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockchainInfo');
+    }, 'getBlockchainInfo');
   }
+
   async getNetworkInfo(): Promise<any> {
-    this.throwNotImplemented('getNetworkInfo');
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getNetworkInfo');
+    }, 'getNetworkInfo');
   }
 
   // Multiple-subscriber API with error propagation
   subscribeToNewBlocks(
-    callback: (blockData: Buffer) => void,
+    callback: (blockData: ByteData) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
     const sub: BlockSubscriber = { onData: callback, onError };
@@ -491,8 +526,8 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   }
   /* eslint-enable no-empty */
 
-  private requestHexBlocksBatch(hashes: string[]): Promise<(Buffer | null)[]> {
-    return new Promise<(Buffer | null)[]>((resolve) => {
+  private requestHexBlocksBatch(hashes: string[]): Promise<(ByteData | null)[]> {
+    return new Promise<(ByteData | null)[]>((resolve) => {
       if (!this.activePeer) {
         resolve(hashes.map(() => null));
         return;
@@ -502,7 +537,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       hashes.forEach((h, idx) => hashToPosition.set(h, idx));
 
       const expected = new Set(hashes);
-      const received = new Map<string, Buffer>();
+      const received = new Map<string, ByteData>();
       const timeoutMs = Math.min(60_000, 10_000 + hashes.length * 300);
 
       const onBlock = (message: any) => {
@@ -520,7 +555,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
         clearTimeout(timer);
         this.activePeer?.removeListener('block', onBlock);
 
-        const ordered: (Buffer | null)[] = new Array(hashes.length).fill(null);
+        const ordered: (ByteData | null)[] = new Array(hashes.length).fill(null);
         for (const [h, buf] of received) {
           const pos = hashToPosition.get(h);
           if (pos !== undefined) ordered[pos] = buf;

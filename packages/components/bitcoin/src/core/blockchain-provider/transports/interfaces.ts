@@ -1,13 +1,27 @@
 /**
- * Rate limiting configuration interface
+ * Rate limiting configuration interface (unified across transports)
  */
 export interface RateLimits {
   /** Maximum concurrent requests (default: 1) */
   maxConcurrentRequests?: number;
   /** Maximum batch size for parallel requests (default: 15) */
   maxBatchSize?: number;
-  /** Delay between requests in milliseconds (default: 1000) */
+
+  /**
+   * Minimum time between requests in milliseconds (preferred).
+   */
+  minTimeMsBetweenRequests?: number;
+
+  /**
+   * Legacy alias for `minTimeMsBetweenRequests`.
+   * Ignored if `minTimeMsBetweenRequests` is provided.
+   */
   requestDelayMs?: number;
+
+  /** Optional token bucket settings */
+  reservoir?: number;
+  reservoirRefreshInterval?: number;
+  reservoirRefreshAmount?: number;
 }
 
 // Bitcoin Network Configuration

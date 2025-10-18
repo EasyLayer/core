@@ -9,6 +9,7 @@ import {
   BlocksLoadingStrategy,
   StrategyNames,
 } from './load-strategies';
+import { MempoolLoaderService } from '../mempool-loader.service';
 
 @Injectable()
 export class BlocksQueueLoaderService implements OnModuleDestroy {
@@ -21,11 +22,12 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
 
   constructor(
     private readonly blockchainProviderService: BlockchainProviderService,
+    private readonly mempoolService: MempoolLoaderService,
     private readonly config: any
   ) {
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
-    this._monitoringInterval = Math.max(this.config.blockTimeMs / 2, 3000);
+    this._monitoringInterval = Math.max(this.config.blockTimeMs / 10, 30000);
   }
 
   get isLoading(): boolean {
@@ -72,6 +74,8 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
 
+          await this.mempoolService.refresh(currentNetworkHeight);
+
           // Get the strategy that should work now
           this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
 
@@ -97,9 +101,9 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
         }
       },
       {
-        interval: 1000, // Start with 1000ms for first attempts
+        interval: 2000, // Start with 1000ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
-        multiplier: 2, // Exponential backoff multiplier
+        multiplier: 1.6, // Exponential backoff multiplier
       }
     );
 

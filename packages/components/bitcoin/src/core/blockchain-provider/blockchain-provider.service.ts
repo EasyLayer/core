@@ -231,8 +231,9 @@ export class BlockchainProviderService {
       const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
+      const msg = error instanceof Error && error.message ? error.message : String(error ?? 'Unknown error');
       this.logger.warn('Network provider operation failed, attempting recovery', {
-        args: { methodName, error: error || 'Unknown error' },
+        args: { methodName, error: msg },
       });
 
       try {
@@ -332,7 +333,7 @@ export class BlockchainProviderService {
   public async getManyBlocksByHeights(
     heights: string[] | number[],
     useHex: boolean = false,
-    verbosity: number = 1,
+    verbosity: 1 | 2 = 1,
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHeights', async (provider) => {
@@ -367,7 +368,7 @@ export class BlockchainProviderService {
   public async getManyBlocksByHashes(
     hashes: string[],
     useHex: boolean = false,
-    verbosity: number = 1,
+    verbosity: 1 | 2 = 1,
     verifyMerkle: boolean = false
   ): Promise<Block[]> {
     return this.executeNetworkProviderMethod('getManyBlocksByHashes', async (provider) => {
@@ -450,7 +451,7 @@ export class BlockchainProviderService {
   public async getTransactionsByTxids(
     txids: string[],
     useHex: boolean = false,
-    verbosity: number = 1
+    verbosity: 1 | 2 = 1
   ): Promise<Transaction[]> {
     return this.executeNetworkProviderMethod('getTransactionsByTxids', async (provider) => {
       let universalTxs: (UniversalTransaction | null)[];
@@ -490,9 +491,25 @@ export class BlockchainProviderService {
    * Estimate smart fee via network provider
    * Node calls: RPC=1 (estimatesmartfee), P2P=not applicable
    */
-  public async estimateSmartFee(confTarget: number, estimateMode: string = 'CONSERVATIVE'): Promise<any> {
+  public async estimateSmartFee(
+    confTarget: number,
+    estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE'
+  ): Promise<any> {
     return this.executeNetworkProviderMethod('estimateSmartFee', async (provider) => {
       return await provider.estimateSmartFee(confTarget, estimateMode);
+    });
+  }
+
+  /**
+   * Estimate smart fee via network provider
+   * Node calls: RPC=1 (estimatesmartfee), P2P=not applicable
+   */
+  public async estimateSmartFeeSatVb(
+    confTarget: number,
+    estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE'
+  ): Promise<any> {
+    return this.executeNetworkProviderMethod('estimateSmartFee', async (provider) => {
+      return await provider.estimateSmartFeeSatVb(confTarget, estimateMode);
     });
   }
 
@@ -512,7 +529,7 @@ export class BlockchainProviderService {
   public async getMempoolTransactionsByTxids(
     txids: string[],
     useHex: boolean = false,
-    verbosity: number = 1,
+    verbosity: 1 | 2 = 1,
     options: MempoolRequestOptions = {}
   ): Promise<Transaction[]> {
     if (useHex) {
@@ -707,10 +724,10 @@ export class BlockchainProviderService {
   /**
    * Manually switch network provider
    */
-  public async switchNetworkProvider(providerName: string): Promise<void> {
-    this.ensureNetworkProviders();
-    await this.networkConnectionManager.switchProvider(providerName);
-  }
+  // public async switchNetworkProvider(providerName: string): Promise<void> {
+  //   this.ensureNetworkProviders();
+  //   await this.networkConnectionManager.switchProvider(providerName);
+  // }
 
   /**
    * Get specific network provider

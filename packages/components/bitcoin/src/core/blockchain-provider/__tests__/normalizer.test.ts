@@ -38,6 +38,13 @@ function makeNonSegwitNetwork() {
   } as const;
 }
 
+function varintSize(value: number): number {
+  if (value < 0xfd) return 1;
+  if (value <= 0xffff) return 3;
+  if (value <= 0xffffffff) return 5;
+  return 9;
+}
+
 describe('BitcoinNormalizer', () => {
   it('normalizeBlock throws when height is missing', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
@@ -46,6 +53,7 @@ describe('BitcoinNormalizer', () => {
       strippedsize: 180,
       size: 200,
       weight: 720,
+      vsize: Math.ceil(720 / 4),
       version: 1,
       versionHex: '0x00000001',
       merkleroot: '11'.repeat(32),
@@ -60,10 +68,10 @@ describe('BitcoinNormalizer', () => {
       tx: [],
       nTx: 0,
     };
-    expect(() => normalizer.normalizeBlock(universalBlock)).toThrow(/Block height is required/);
+    expect(() => normalizer.normalizeBlock(universalBlock)).toThrow(/block\.height/i);
   });
 
-  it('normalizeBlock computes vsize, witnessSize, transactionsSize and efficiency, filters string transactions', () => {
+  it('normalizeBlock computes metrics and maps tx objects', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
     const txObject: any = {
       txid: 't'.repeat(64),
@@ -72,12 +80,15 @@ describe('BitcoinNormalizer', () => {
       size: 190,
       vsize: 180,
       weight: 720,
+      strippedsize: 170,
       locktime: 0,
       vin: [{ txid: 'p'.repeat(64), vout: 0, scriptSig: { asm: '', hex: '' }, sequence: 0 }],
       vout: [{ value: 1.23, n: 0, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' } }],
       wtxid: 'w'.repeat(64),
       time: 10,
       blocktime: 10,
+      fee: 1800,
+      witnessSize: 20,
     };
     const universalBlock: any = {
       hash: 'aa'.repeat(32),
@@ -85,6 +96,7 @@ describe('BitcoinNormalizer', () => {
       strippedsize: 180,
       size: 200,
       weight: 720,
+      vsize: Math.ceil(720 / 4),
       version: 1,
       versionHex: '0x00000001',
       merkleroot: '11'.repeat(32),
@@ -96,8 +108,8 @@ describe('BitcoinNormalizer', () => {
       chainwork: '',
       previousblockhash: '22'.repeat(32),
       nextblockhash: undefined,
-      tx: ['dead', txObject],
-      nTx: 2,
+      tx: [txObject],
+      nTx: 1,
       fee: 123,
       subsidy: 50,
       miner: 'm',
@@ -105,11 +117,11 @@ describe('BitcoinNormalizer', () => {
     };
     const copyBefore = JSON.parse(JSON.stringify(universalBlock));
     const out = normalizer.normalizeBlock(universalBlock);
-    expect(out.vsize).toBe(Math.ceil(universalBlock.weight / 4));
+    expect(out.vsize).toBe(universalBlock.vsize);
     expect(out.witnessSize).toBe(universalBlock.size - universalBlock.strippedsize);
-    expect(out.transactionsSize).toBe(universalBlock.size - 80);
-    expect(out.blockSizeEfficiency).toBeCloseTo((universalBlock.size / (makeSegwitNetwork().maxBlockSize)) * 100, 6);
-    expect(out.witnessDataRatio).toBeCloseTo(((universalBlock.size - universalBlock.strippedsize) / universalBlock.size) * 100, 6);
+    expect(out.transactionsSize).toBe(txObject.vsize);
+    expect(out.blockSizeEfficiency).toBeCloseTo(universalBlock.size / makeSegwitNetwork().maxBlockSize, 10);
+    expect(out.witnessDataRatio).toBeCloseTo((universalBlock.size - universalBlock.strippedsize) / universalBlock.size, 10);
     expect(out.tx?.length).toBe(1);
     expect(out.tx?.[0]?.txid).toBe(txObject.txid);
     expect(universalBlock).toEqual(copyBefore);
@@ -123,6 +135,7 @@ describe('BitcoinNormalizer', () => {
       strippedsize: 180,
       size: 200,
       weight: 720,
+      vsize: Math.ceil(720 / 4),
       version: 1,
       versionHex: '0x00000001',
       merkleroot: '11'.repeat(32),
@@ -142,7 +155,7 @@ describe('BitcoinNormalizer', () => {
     expect(out.witnessDataRatio).toBeUndefined();
   });
 
-  it('normalizeTransaction computes strippedsize and witnessSize on SegWit network and feeRate', () => {
+  it('normalizeTransaction computes fields on SegWit network and feeRate', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
     const universalTx: any = {
       txid: 't'.repeat(64),
@@ -151,6 +164,8 @@ describe('BitcoinNormalizer', () => {
       size: 200,
       vsize: 190,
       weight: 760,
+      strippedsize: 190,
+      witnessSize: 10,
       locktime: 0,
       vin: [{ txid: 'p'.repeat(64), vout: 0, scriptSig: { asm: '', hex: '' }, sequence: 0, txinwitness: ['aa'] }],
       vout: [{ value: 1.23, n: 0, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' } }],
@@ -161,10 +176,9 @@ describe('BitcoinNormalizer', () => {
       wtxid: 'w'.repeat(64),
     };
     const out = normalizer.normalizeTransaction(universalTx);
-    const expectedBase = Math.floor((universalTx.weight + 3) / 4);
-    expect(out.strippedsize).toBe(Math.min(expectedBase, universalTx.size));
-    expect(out.witnessSize).toBe(universalTx.size - out.strippedsize);
-    expect(out.feeRate).toBe(Math.round(universalTx.fee / universalTx.vsize));
+    expect(out.strippedsize).toBe(190);
+    expect(out.witnessSize).toBe(10);
+    expect(out.feeRate!).toBeCloseTo(1000 / 190, 10);
     expect(out.vin[0]!.txinwitness).toEqual(['aa']);
   });
 
@@ -177,6 +191,7 @@ describe('BitcoinNormalizer', () => {
       size: 150,
       vsize: 150,
       weight: 600,
+      strippedsize: 150,
       locktime: 0,
       vin: [{ txid: 'p'.repeat(64), vout: 1, scriptSig: { asm: '', hex: '' }, sequence: 0 }],
       vout: [{ value: 2.5, n: 0, scriptPubKey: { asm: '', hex: '', type: 'pubkeyhash' } }],
@@ -185,18 +200,18 @@ describe('BitcoinNormalizer', () => {
     const out = normalizer.normalizeTransaction(universalTx);
     expect(out.strippedsize).toBe(universalTx.size);
     expect(out.witnessSize).toBeUndefined();
-    expect(out.feeRate).toBe(Math.round((universalTx.fee ?? 0) / universalTx.vsize));
+    expect(out.feeRate!).toBeCloseTo((universalTx.fee ?? 0) / universalTx.vsize, 10);
   });
 
   it('normalizeManyBlocks and normalizeManyTransactions map arrays and preserve order', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
     const blocks: any[] = [
-      { hash: 'a1', height: 1, strippedsize: 10, size: 20, weight: 80, version: 1, versionHex: '0x1', merkleroot: '', time: 1, mediantime: 1, nonce: 1, bits: '0x', difficulty: '1', chainwork: '' },
-      { hash: 'a2', height: 2, strippedsize: 12, size: 22, weight: 88, version: 1, versionHex: '0x1', merkleroot: '', time: 1, mediantime: 1, nonce: 1, bits: '0x', difficulty: '1', chainwork: '' },
+      { hash: 'a1', height: 1, strippedsize: 81, size: 81, weight: 324, vsize: 81, version: 1, versionHex: '0x1', merkleroot: 'mr1', time: 1, mediantime: 1, nonce: 1, bits: '0x', difficulty: '1', chainwork: '', nTx: 0, tx: [] },
+      { hash: 'a2', height: 2, strippedsize: 83, size: 83, weight: 332, vsize: 83, version: 1, versionHex: '0x1', merkleroot: 'mr2', time: 1, mediantime: 1, nonce: 1, bits: '0x', difficulty: '1', chainwork: '', nTx: 0, tx: [] },
     ];
     const txs: any[] = [
-      { txid: 't1', hash: 't1', version: 1, size: 10, vsize: 10, weight: 40, locktime: 0, vin: [], vout: [] },
-      { txid: 't2', hash: 't2', version: 1, size: 20, vsize: 20, weight: 80, locktime: 0, vin: [], vout: [] },
+      { txid: 't1', hash: 't1', version: 1, size: 10, vsize: 10, weight: 40, strippedsize: 10, locktime: 0, vin: [], vout: [] },
+      { txid: 't2', hash: 't2', version: 1, size: 20, vsize: 20, weight: 80, strippedsize: 20, locktime: 0, vin: [], vout: [] },
     ];
     const nb = normalizer.normalizeManyBlocks(blocks as any);
     const nt = normalizer.normalizeManyTransactions(txs as any);
@@ -208,7 +223,7 @@ describe('BitcoinNormalizer', () => {
     expect(nt[1]!.txid).toBe('t2');
   });
 
-  it('normalizeBlockStats computes total_witness_size, total_vsize and witness_ratio when data is present', () => {
+  it('normalizeBlockStats computes total_witness_size and total_vsize and fractional witness_ratio', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
     const stats: any = {
       blockhash: 'h'.repeat(64),
@@ -242,7 +257,7 @@ describe('BitcoinNormalizer', () => {
     const out = normalizer.normalizeBlockStats(stats);
     expect(out.total_witness_size).toBe(200);
     expect(out.total_vsize).toBe(Math.ceil((stats.total_weight ?? 0) / 4));
-    expect(out.witness_ratio).toBeCloseTo(50);
+    expect(out.witness_ratio).toBeCloseTo(0.5, 10);
   });
 
   it('normalizeBlockStats leaves witness fields undefined when inputs are insufficient', () => {
@@ -261,14 +276,15 @@ describe('BitcoinNormalizer', () => {
     expect(out.witness_ratio).toBeUndefined();
   });
 
-  it('normalizeBlock sets undefined fields when universal data is missing', () => {
+  it('normalizeBlock sets minimal computable fields when many universals are missing', () => {
     const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
     const universalBlock: any = {
       hash: 'aa'.repeat(32),
       height: 7,
-      strippedsize: 0,
-      size: 0,
-      weight: 0,
+      strippedsize: 81,
+      size: 81,
+      weight: 324,
+      vsize: 81,
       version: 1,
       versionHex: '0x00000001',
       merkleroot: '11'.repeat(32),
@@ -278,13 +294,43 @@ describe('BitcoinNormalizer', () => {
       bits: '0x1d00ffff',
       difficulty: '1',
       chainwork: '',
+      tx: [],
+      nTx: 0,
     };
     const out = normalizer.normalizeBlock(universalBlock);
-    expect(out.tx).toBeUndefined();
-    expect(out.vsize).toBe(0);
-    expect(out.witnessSize).toBeUndefined();
+    expect(out.tx).toEqual([]);
+    expect(out.vsize).toBe(81);
+    expect(out.witnessSize).toBe(0);
     expect(out.transactionsSize).toBe(0);
-    expect(out.blockSizeEfficiency).toBe(0);
-    expect(out.witnessDataRatio).toBeUndefined();
+    expect(out.blockSizeEfficiency).toBeCloseTo(81 / makeSegwitNetwork().maxBlockSize, 10);
+    expect(out.witnessDataRatio).toBe(0);
+  });
+
+  it('normalizeBlock uses size - 80 - varint(nTx) when only hashes are provided', () => {
+    const normalizer = new BitcoinNormalizer(makeSegwitNetwork() as any);
+    const universalBlock: any = {
+      hash: 'bb'.repeat(32),
+      height: 12,
+      strippedsize: 1000,
+      size: 1200,
+      weight: 4800,
+      vsize: Math.ceil(4800 / 4),
+      version: 2,
+      versionHex: '0x00000002',
+      merkleroot: '22'.repeat(32),
+      time: 2,
+      mediantime: 2,
+      nonce: 2,
+      bits: '0x1d00ffff',
+      difficulty: '2',
+      chainwork: '',
+      previousblockhash: '11'.repeat(32),
+      tx: ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)],
+      nTx: 3,
+    };
+    const out = normalizer.normalizeBlock(universalBlock);
+    const expected = universalBlock.size - 80 - varintSize(universalBlock.nTx);
+    expect(out.transactionsSize).toBe(expected);
+    expect(out.tx).toBeUndefined();
   });
 });

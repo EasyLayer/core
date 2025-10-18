@@ -1,6 +1,6 @@
 import type { Logger } from '@nestjs/common';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { BlockchainProviderService } from '../../../blockchain-provider';
+import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
 import { Blockchain } from './blockchain.structure';
 import {
   BitcoinNetworkInitializedEvent,
@@ -150,6 +150,16 @@ export class Network extends AggregateRoot {
     };
   }
 
+  private normalize(full: Block): LightBlock {
+    return {
+      height: full.height,
+      hash: full.hash,
+      merkleroot: full.merkleroot,
+      previousblockhash: full.previousblockhash ?? '0',
+      tx: full.tx?.map((item) => item.txid) ?? [],
+    };
+  }
+
   // ===== SNAPSHOTS =====
 
   protected serializeUserState(): Record<string, any> {
@@ -236,12 +246,14 @@ export class Network extends AggregateRoot {
    * Time complexity: O(n) where n = number of blocks to validate
    * Memory: stores blocks in circular buffer (~32-128KB per block depending on tx count)
    */
-  public async addBlocks({ blocks, requestId, logger }: { blocks: LightBlock[]; requestId: string; logger: Logger }) {
-    if (!this.chain.validateNextBlocks(blocks)) {
+  public async addBlocks({ blocks, requestId, logger }: { blocks: Block[]; requestId: string; logger: Logger }) {
+    const lightBlocks: LightBlock[] = blocks.map((block: Block) => this.normalize(block));
+
+    if (!this.chain.validateNextBlocks(lightBlocks)) {
       throw new BlockchainValidationError();
     }
 
-    const blockHeight = blocks[blocks.length - 1]?.height ?? -1;
+    const blockHeight = lightBlocks[lightBlocks.length - 1]?.height ?? -1;
     // Event payload size estimation:
     // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
     // Total event size: ~9.6MB per blocks batch
@@ -252,7 +264,7 @@ export class Network extends AggregateRoot {
           requestId,
           blockHeight,
         },
-        { blocks }
+        { blocks: lightBlocks }
       )
     );
 

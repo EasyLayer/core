@@ -2,7 +2,6 @@ export interface MempoolTxMetadata {
   // Basic transaction info
   txid: string;
   wtxid?: string;
-  size: number;
   vsize: number;
   weight: number;
   fee: number;

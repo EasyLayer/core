@@ -7,7 +7,7 @@ export interface RPCTransportOptions extends BaseTransportOptions {
   baseUrl: string;
   responseTimeout?: number;
   /** Optional rate limits specific to this RPC transport (browser). */
-  rateLimits?: Partial<RateLimits>;
+  rateLimits?: RateLimits;
 }
 
 /** Base64 helper safe for both Node and browser. */

@@ -1,19 +1,16 @@
 import { BitcoinErrorHandler } from './errors';
 import type { NetworkConfig } from './interfaces';
 
+// Unified byte data type
+export type ByteData = Buffer | Uint8Array;
+
 export interface BaseTransportOptions {
   uniqName: string;
   network: NetworkConfig;
 }
 
 /**
- * Abstract base transport defining a minimal, canonical surface for providers.
- *
- * Rules:
- * - No rate limiting lives here (transports handle it internally if needed).
- * - No public/protected batchCall here.
- * - Providers call only these abstract methods; transports implement or throw.
- * - Order of array results MUST match input; nulls MUST be preserved.
+ * Abstract base transport with consistent error handling
  */
 export abstract class BaseTransport<T extends BaseTransportOptions = BaseTransportOptions> {
   public readonly uniqName: string;
@@ -25,52 +22,49 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
     this.network = options.network;
   }
 
-  /** Transport type must be explicitly 'rpc' | 'p2p' */
   abstract get type(): 'rpc' | 'p2p';
   abstract get connectionOptions(): T;
 
-  // Connection management
+  // ===== Connection management =====
   abstract connect(): Promise<void>;
   abstract disconnect(): Promise<void>;
   abstract healthcheck(): Promise<boolean>;
 
-  // ===== Canonical API expected by providers =====
-
-  // Blocks
-  abstract requestHexBlocks(hashes: string[]): Promise<(Buffer | Uint8Array | null)[]>;
+  // ===== Blocks =====
+  abstract requestHexBlocks(hashes: string[]): Promise<(ByteData | null)[]>;
   abstract getManyBlockHashesByHeights(heights: number[]): Promise<(string | null)[]>;
   abstract getBlockHeight(): Promise<number>;
   abstract getHeightsByHashes(hashes: string[]): Promise<(number | null)[]>;
 
-  // Verbose blocks / headers / stats (RPC-only; P2P should throw)
+  // ===== Verbose operations (RPC-only) =====
   abstract getRawBlocksByHashesVerbose(hashes: string[], verbosity: 1 | 2): Promise<(any | null)[]>;
   abstract getBlockStatsByHashes(hashes: string[]): Promise<(any | null)[]>;
   abstract getBlockHeadersByHashes(hashes: string[]): Promise<(any | null)[]>;
 
-  // Transactions
+  // ===== Transactions =====
   abstract getRawTransactionsHexByTxids(txids: string[]): Promise<(string | null)[]>;
   abstract getRawTransactionsByTxids(txids: string[], verbosity: 1 | 2): Promise<(any | null)[]>;
 
-  // Mempool / fees
-  abstract getRawMempool(verbose?: boolean): Promise<any>;
-  abstract getMempoolVerbose(): Promise<Record<string, any>>;
-  abstract getMempoolEntries(txids: string[]): Promise<(any | null)[]>;
+  // ===== Mempool =====
+  abstract getRawMempool(verbose: true): Promise<Record<string, any>>;
+  abstract getRawMempool(verbose?: false): Promise<string[]>;
   abstract getMempoolInfo(): Promise<any>;
+  abstract getMempoolEntries(txids: string[]): Promise<(any | null)[]>;
+  abstract getMempoolVerbose(): Promise<Record<string, any>>;
   abstract estimateSmartFee(confTarget: number, estimateMode?: 'ECONOMICAL' | 'CONSERVATIVE'): Promise<any>;
 
-  // Chain info
+  // ===== Chain info =====
   abstract getBlockchainInfo(): Promise<any>;
   abstract getNetworkInfo(): Promise<any>;
 
-  // Streaming (optional): raw new blocks as bytes
+  // ===== Streaming (optional) =====
   abstract subscribeToNewBlocks?(
-    callback: (blockData: Buffer | Uint8Array) => void,
+    callback: (blockData: ByteData) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void };
 
-  /**
-   * Handle transport errors with proper error classification
-   */
+  // ===== Error handling =====
+
   protected handleError(error: any, operation: string): never {
     const err = BitcoinErrorHandler.handleError(error, operation, {
       transport: this.type,
@@ -79,9 +73,6 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
     throw err;
   }
 
-  /**
-   * Execute operation with error handling
-   */
   protected async executeWithErrorHandling<TResult>(
     operation: () => Promise<TResult>,
     operationName: string
@@ -94,10 +85,12 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
   }
 
   /**
-   * Throw error for unsupported operations
+   * Throw not implemented error with proper error handling
+   * Use this instead of direct throw for consistency
    */
   protected throwNotImplemented(method: string): never {
-    throw new Error(`Method ${method} is not implemented for ${this.type} transport`);
+    const error = new Error(`Method ${method} is not implemented for ${this.type} transport`);
+    this.handleError(error, method);
   }
 
   get connected(): boolean {

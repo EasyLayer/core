@@ -1,4 +1,4 @@
-import { LightBlock } from '../../../../blockchain-provider';
+import { LightBlock } from '../../interfaces';
 import { Blockchain } from '../blockchain.structure';
 
 describe('Blockchain', () => {

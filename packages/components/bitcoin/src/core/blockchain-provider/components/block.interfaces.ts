@@ -10,19 +10,16 @@ export interface Block {
   weight: number; // Block weight (BIP 141)
   vsize: number; // Virtual block size
   witnessSize?: number; // Size of witness data only in the block
-  headerSize: number; // Block header size (80 bytes)
+  // headerSize: number; // Block header size (80 bytes)
   transactionsSize: number; // Size of all transactions
   version: number;
   versionHex: string;
   merkleroot: string;
   time: number;
-  mediantime: number;
   nonce: number;
   bits: string;
   difficulty: string;
-  chainwork: string;
   previousblockhash?: string;
-  nextblockhash?: string;
   tx?: Transaction[]; // Transaction objects only, NOT hex
   nTx?: number;
   // ===== ADDITIONAL FIELDS =====

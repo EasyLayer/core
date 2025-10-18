@@ -1,14 +1,15 @@
 import {
   hashTxid32,
   TxIndex,
-  ProviderMap,
   MetadataStore,
   TxStore,
+  ProviderTxMap,
   LoadTracker,
+  BatchSizer,
 } from '../components';
 
 describe('hashTxid32', () => {
-  it('returns deterministic uint32 for same string', () => {
+  it('is deterministic and within uint32 range', () => {
     const txid = 'a'.repeat(64);
     const h1 = hashTxid32(txid);
     const h2 = hashTxid32(txid);
@@ -17,7 +18,7 @@ describe('hashTxid32', () => {
     expect(h1).toBeLessThanOrEqual(0xffffffff);
   });
 
-  it('likely differs for different strings', () => {
+  it('differs for different strings', () => {
     const h1 = hashTxid32('0'.repeat(64));
     const h2 = hashTxid32('1'.repeat(64));
     expect(h1).not.toBe(h2);
@@ -25,18 +26,18 @@ describe('hashTxid32', () => {
 });
 
 describe('TxIndex', () => {
-  it('adds and retrieves txid by hash', () => {
+  it('adds and retrieves both ways', () => {
     const idx = new TxIndex();
     const txid = 'f'.repeat(64);
     const h = idx.add(txid);
     expect(idx.hasHash(h)).toBe(true);
+    expect(idx.hasTxid(txid)).toBe(true);
     expect(idx.getByHash(h)).toBe(txid);
-    expect([...idx.values()]).toContain(txid);
-    expect([...idx.keys()]).toContain(h);
+    expect(idx.getByTxid(txid)).toBe(h);
     expect(idx.size()).toBe(1);
   });
 
-  it('removes by hash and clears', () => {
+  it('removes by hash and clears maps', () => {
     const idx = new TxIndex();
     const h = idx.add('a'.repeat(64));
     idx.removeByHash(h);
@@ -54,61 +55,7 @@ describe('TxIndex', () => {
     idx.__setMap(m);
     expect(idx.size()).toBe(1);
     expect(idx.__getMap()).toBe(m);
-  });
-});
-
-describe('ProviderMap', () => {
-  it('sets fixed names once and resolves indices by name', () => {
-    const pm = new ProviderMap();
-    pm.setNamesOnce(['A', 'B', 'C']);
-    expect(pm.getProviderNames()).toEqual(['A', 'B', 'C']);
-    expect(pm.getProviderName(0)).toBe('A');
-    expect(pm.getProviderName(1)).toBe('B');
-    expect(pm.getProviderName(2)).toBe('C');
-    expect(pm.getIndexByName('A')).toBe(0);
-    expect(pm.getIndexByName('B')).toBe(1);
-    expect(pm.getIndexByName('C')).toBe(2);
-    expect(pm.getIndexByName('Z')).toBeUndefined();
-    expect([...pm.providerIndices()]).toEqual([0, 1, 2]);
-  });
-
-  it('maps tx to exact provider set and replaces on setProvidersForTx', () => {
-    const pm = new ProviderMap();
-    pm.setNamesOnce(['A', 'B', 'C']);
-    const h = 111;
-    pm.setProvidersForTx(h, [0]);
-    let set = pm.getProviders(h)!;
-    expect(set.size).toBe(1);
-    expect(set.has(0)).toBe(true);
-
-    pm.setProvidersForTx(h, [1, 2]);
-    set = pm.getProviders(h)!;
-    expect(set.size).toBe(2);
-    expect(set.has(1)).toBe(true);
-    expect(set.has(2)).toBe(true);
-    expect(set.has(0)).toBe(false);
-  });
-
-  it('removes mapping and clear keeps names', () => {
-    const pm = new ProviderMap();
-    pm.setNamesOnce(['A', 'B']);
-    const h = 222;
-    pm.setProvidersForTx(h, [1]);
-    expect(pm.getProviders(h)!.has(1)).toBe(true);
-    pm.remove(h);
-    expect(pm.getProviders(h)).toBeUndefined();
-    pm.clear();
-    expect(pm.getProviderNames()).toEqual(['A', 'B']);
-  });
-
-  it('snapshot accessors work', () => {
-    const pm = new ProviderMap();
-    const map = new Map<number, Set<number>>([[10, new Set([0, 1])]]);
-    pm.__setMap(map);
-    pm.__setNames(['X', 'Y']);
-    expect(pm.__getMap()).toBe(map);
-    expect(pm.__getNames()).toEqual(['X', 'Y']);
-    expect(pm.getProviderName(1)).toBe('Y');
+    expect(idx.getByHash(123)).toBe('x'.repeat(64));
   });
 });
 
@@ -141,15 +88,12 @@ describe('MetadataStore', () => {
     expect(ms.get(1)).toEqual(meta);
     expect(ms.has(1)).toBe(true);
     expect(ms.size()).toBe(1);
-
     const entries = Array.from(ms.entries());
     expect(entries.length).toBe(1);
     expect(entries[0]).toEqual([1, meta]);
-
     ms.remove(1);
     expect(ms.has(1)).toBe(false);
     expect(ms.size()).toBe(0);
-
     ms.set(2, sampleMeta({ fee: 123 }));
     ms.clear();
     expect(ms.size()).toBe(0);
@@ -177,24 +121,22 @@ describe('TxStore', () => {
     locktime: 0,
     vin: [],
     vout: [],
-    fee: 1000,
     feeRate: 10,
-    wtxid: id,
-    bip125_replaceable: false,
   });
 
-  it('put/get/remove/count/clear', () => {
+  it('set/get/has/remove/clear/size', () => {
     const st = new TxStore();
-    st.put(5, slimTx('a'));
+    st.set(5, slimTx('a'));
     expect(st.get(5)?.txid).toBe('a');
-    expect(st.count()).toBe(1);
+    expect(st.has(5)).toBe(true);
+    expect(st.size()).toBe(1);
     st.remove(5);
     expect(st.get(5)).toBeUndefined();
-    expect(st.count()).toBe(0);
-    st.put(1, slimTx('x'));
-    st.put(2, slimTx('y'));
+    expect(st.size()).toBe(0);
+    st.set(1, slimTx('x'));
+    st.set(2, slimTx('y'));
     st.clear();
-    expect(st.count()).toBe(0);
+    expect(st.size()).toBe(0);
   });
 
   it('snapshot accessors work', () => {
@@ -206,27 +148,80 @@ describe('TxStore', () => {
   });
 });
 
+describe('ProviderTxMap', () => {
+  it('adds tx hashes per provider and reads them back', () => {
+    const pm = new ProviderTxMap();
+    pm.add('A', 10);
+    pm.add('A', 11);
+    pm.add('B', 20);
+    const setA = pm.get('A')!;
+    const setB = pm.get('B')!;
+    expect(setA.has(10)).toBe(true);
+    expect(setA.has(11)).toBe(true);
+    expect(setB.has(20)).toBe(true);
+    expect(pm.providers().sort()).toEqual(['A', 'B']);
+  });
+
+  it('clear removes all provider mappings', () => {
+    const pm = new ProviderTxMap();
+    pm.add('A', 1);
+    expect(pm.get('A')!.size).toBe(1);
+    pm.clear();
+    expect(pm.get('A')).toBeUndefined();
+    expect(pm.providers().length).toBe(0);
+  });
+
+  it('snapshot accessors work', () => {
+    const pm = new ProviderTxMap();
+    const map = new Map<string, Set<number>>([['X', new Set([1,2,3])]]);
+    pm.__setMap(map);
+    expect(pm.__getMap()).toBe(map);
+    expect(pm.get('X')!.has(2)).toBe(true);
+  });
+});
+
 describe('LoadTracker', () => {
-  it('marks, queries, removes, clears', () => {
+  it('add/has/get/remove/clear/count', () => {
     const lt = new LoadTracker();
-    const info = { timestamp: 123, feeRate: 5.5, providerIndex: 0 };
-    lt.mark(77, info);
-    expect(lt.isLoaded(77)).toBe(true);
+    const info = { timestamp: 123, feeRate: 5.5, providerName: 'A' };
+    lt.add(77, info);
+    expect(lt.has(77)).toBe(true);
     expect(lt.get(77)).toEqual(info);
     expect(lt.count()).toBe(1);
     lt.remove(77);
-    expect(lt.isLoaded(77)).toBe(false);
+    expect(lt.has(77)).toBe(false);
     expect(lt.count()).toBe(0);
-    lt.mark(1, info);
+    lt.add(1, info);
     lt.clear();
     expect(lt.count()).toBe(0);
   });
 
   it('snapshot accessors work', () => {
     const lt = new LoadTracker();
-    const m = new Map<number, any>([[5, { timestamp: 1, feeRate: 1, providerIndex: 2 }]]);
+    const m = new Map<number, any>([[5, { timestamp: 1, feeRate: 1, providerName: 'P' }]]);
     lt.__setMap(m);
     expect(lt.__getMap()).toBe(m);
-    expect(lt.get(5)?.providerIndex).toBe(2);
+    expect(lt.get(5)?.providerName).toBe('P');
+  });
+});
+
+describe('BatchSizer', () => {
+  it('returns default and tunes up/down', () => {
+    const bs = new BatchSizer(100, 10, 1000);
+    expect(bs.get('A')).toBe(100);
+    bs.tune('A', 0.7);
+    expect(bs.get('A')).toBeGreaterThan(100);
+    bs.tune('A', 1.5);
+    expect(bs.get('A')).toBeLessThanOrEqual( Math.round((Math.round(100*1.2))*0.8) );
+  });
+
+  it('clamps to min/max and clears', () => {
+    const bs = new BatchSizer(50, 20, 60);
+    bs.tune('A', 0.1);
+    expect(bs.get('A')).toBeLessThanOrEqual(60);
+    bs.tune('A', 10);
+    expect(bs.get('A')).toBeGreaterThanOrEqual(20);
+    bs.clear();
+    expect(bs.get('A')).toBe(50);
   });
 });

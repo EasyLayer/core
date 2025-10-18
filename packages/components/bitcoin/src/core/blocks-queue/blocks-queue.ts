@@ -322,13 +322,13 @@ export class BlocksQueue<T extends Block = Block> {
 
   /**
    * Dequeues blocks by hash(es).
-   * @complexity O(1) per block. Returns count removed.
+   * @complexity O(1) per block. Returns last block's height.
    */
   public async dequeue(hashOrHashes: string | string[]): Promise<number> {
     const hashes: string[] = Array.isArray(hashOrHashes) ? hashOrHashes : [hashOrHashes];
 
     return this.mutex.runExclusive(() => {
-      let removed = 0;
+      let height = 0;
 
       for (const hash of hashes) {
         const bufferIndex = this.hashIndex.get(hash);
@@ -353,10 +353,11 @@ export class BlocksQueue<T extends Block = Block> {
         this.currentBlockCount--;
         this._size -= block.size;
 
-        removed++;
+        // remember height of this dequeued block (the last one will stick)
+        height = Number(block.height);
       }
 
-      return removed;
+      return height;
     });
   }
 

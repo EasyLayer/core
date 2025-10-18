@@ -1,9 +1,9 @@
 import type { MempoolTxMetadata } from '../../../blockchain-provider';
 import type { LightTransaction } from '../interfaces';
+
 /**
  * Internal data-structures live INSIDE the aggregate state.
- * We keep them small, single-responsibility, and serializable via base serializer (Maps/Sets).
- * Each structure exposes only simple methods (O(1) where possible) and keeps invariants tight.
+ * Keep them small, SRP, and snapshot-friendly (Maps/Sets only).
  */
 
 /** 32-bit txid hashing helper (saves ~60 bytes per txid vs 64-char string) */
@@ -14,40 +14,45 @@ export function hashTxid32(txid: string): number {
 }
 
 /** === TxIndex ===============================================================
- * Responsibility: single source of truth for txidHash<->txid mapping.
- * Complexity: add/get/remove/has are O(1).
- * Memory: ~4B per key + string storage (64B) + Map overhead.
+ * (bi-directional) hash <-> txid mapping
+ * Memory: O(n). All operations: O(1).
  */
 export class TxIndex {
-  private h2s: Map<number, string> = new Map();
+  private h2s = new Map<number, string>();
+  private s2h = new Map<string, number>();
 
   add(txid: string): number {
+    const existing = this.s2h.get(txid);
+    if (existing != null) return existing;
     const h = hashTxid32(txid);
     this.h2s.set(h, txid);
+    this.s2h.set(txid, h);
     return h;
-  }
-  hasHash(h: number): boolean {
-    return this.h2s.has(h);
   }
   getByHash(h: number): string | undefined {
     return this.h2s.get(h);
   }
+  getByTxid(txid: string): number | undefined {
+    return this.s2h.get(txid);
+  }
+  hasHash(h: number): boolean {
+    return this.h2s.has(h);
+  }
+  hasTxid(txid: string): boolean {
+    return this.s2h.has(txid);
+  }
   removeByHash(h: number): void {
+    const id = this.h2s.get(h);
+    if (id != null) this.s2h.delete(id);
     this.h2s.delete(h);
   }
-  values(): Iterable<string> {
-    return this.h2s.values();
-  }
-  keys(): Iterable<number> {
-    return this.h2s.keys();
+  clear(): void {
+    this.h2s.clear();
+    this.s2h.clear();
   }
   size(): number {
     return this.h2s.size;
   }
-  clear(): void {
-    this.h2s.clear();
-  }
-
   /** expose for snapshots */
   __getMap() {
     return this.h2s;
@@ -57,255 +62,130 @@ export class TxIndex {
   }
 }
 
-/** === ProviderMap ===========================================================
- * Responsibility:
- *   - Keep a fixed mapping of *known provider names* (array order is the index).
- *   - Track, for each tx (by 32-bit hash), which providers reported it.
- *
- * Invariants:
- *   - Provider indices are derived **only** from the fixed `providerNames` array.
- *     There is NO auto-creation of unknown names.
- *   - If the provider list (order or membership) changes, indices are no longer valid.
- *     Call `replaceNames(newNames)` to atomically swap names and CLEAR all per-tx
- *     visibility (since indices change). After that, rebuild visibility from a fresh
- *     verbose snapshot.
- *
- * Data layout:
- *   - `providerNames: string[]` — fixed registry of providers; position == index.
- *   - `txToProviders: Map<number, Set<number>>` — for each txHash, a set of provider indices.
- *
- * Typical flow:
- *   1) On init: set names once from the service (`setNamesOnce(names)`).
- *   2) On every verbose snapshot: for each tx, call `setProvidersForTx(hash, indices)`.
- *   3) During sync (loading full tx): read-only access via
- *      `primaryProviderIndex(hash)` or `getProviders(hash)` for batching;
- *      DO NOT mutate visibility here.
- *
- * Snapshotting:
- *   - `__getMap/__setMap` and `__getNames/__setNames` are used by the aggregate snapshot
- *     serializer/deserializer. They do not validate indices; caller must ensure
- *     names/indices consistency.
- */
-export class ProviderMap {
-  private txToProviders: Map<number, Set<number>> = new Map();
-  private providerNames: string[] = [];
-
-  public setNamesOnce(names: string[]) {
-    if (this.providerNames.length === 0) this.providerNames = [...names];
-  }
-
-  public hasSameNames(names: string[]): boolean {
-    if (!Array.isArray(names)) return false;
-    if (names.length !== this.providerNames.length) return false;
-    for (let i = 0; i < names.length; i++) {
-      if (names[i] !== this.providerNames[i]) return false;
-    }
-    return true;
-  }
-
-  public replaceNames(names: string[]): void {
-    this.providerNames = [...names];
-    this.txToProviders.clear(); // indexes change → clear visibility
-  }
-
-  public getIndexByName(name: string): number | undefined {
-    const i = this.providerNames.indexOf(name);
-    return i >= 0 ? i : undefined;
-  }
-
-  public providerIndices(): Iterable<number> {
-    return this.providerNames.map((_, i) => i).values();
-  }
-
-  public setProvidersForTx(txHash: number, indices: number[]) {
-    this.txToProviders.set(txHash, new Set(indices));
-  }
-
-  public primaryProviderIndex(txHash: number): number | undefined {
-    const set = this.txToProviders.get(txHash);
-    if (!set || set.size === 0) return undefined;
-    return set.values().next().value;
-  }
-
-  public getProviders(txHash: number): Set<number> | undefined {
-    return this.txToProviders.get(txHash);
-  }
-
-  public remove(txHash: number) {
-    this.txToProviders.delete(txHash);
-  }
-
-  public clear() {
-    this.txToProviders.clear();
-    // We keep the names - they are replaced by replaceNames() when needed
-  }
-
-  public getProviderName(i: number): string | undefined {
-    return this.providerNames[i];
-  }
-
-  public getProviderNames(): string[] {
-    return [...this.providerNames];
-  }
-
-  public __getMap() {
-    return this.txToProviders;
-  }
-  public __setMap(m: Map<number, Set<number>>) {
-    this.txToProviders = m;
-  }
-  public __getNames() {
-    return this.providerNames;
-  }
-  public __setNames(a: string[]) {
-    this.providerNames = a;
-  }
-}
-
 /** === MetadataStore =========================================================
- * Responsibility: hold verbose mempool metadata (from getrawmempool(true)).
- * Complexity: O(1) set/get/remove/size.
- * Memory: ~200–500B per entry (depends on node).
+ * Store mempool metadata by tx hash.
+ * Memory: O(n). Ops: O(1).
  */
 export class MetadataStore {
-  private m: Map<number, MempoolTxMetadata> = new Map();
+  private byHash = new Map<number, MempoolTxMetadata>();
 
-  set(txHash: number, meta: MempoolTxMetadata) {
-    this.m.set(txHash, meta);
+  set(h: number, m: MempoolTxMetadata) {
+    this.byHash.set(h, m);
   }
-  get(txHash: number): MempoolTxMetadata | undefined {
-    return this.m.get(txHash);
+  get(h: number) {
+    return this.byHash.get(h);
   }
-  remove(txHash: number) {
-    this.m.delete(txHash);
+  has(h: number) {
+    return this.byHash.has(h);
   }
-  has(txHash: number): boolean {
-    return this.m.has(txHash);
-  }
-  size(): number {
-    return this.m.size;
+  remove(h: number) {
+    this.byHash.delete(h);
   }
   clear() {
-    this.m.clear();
+    this.byHash.clear();
   }
-  entries(): IterableIterator<[number, MempoolTxMetadata]> {
-    return this.m.entries();
+  size() {
+    return this.byHash.size;
   }
-
+  entries() {
+    return this.byHash.entries();
+  }
+  keys() {
+    return this.byHash.keys();
+  }
   /** expose for snapshots */
   __getMap() {
-    return this.m;
+    return this.byHash;
   }
   __setMap(m: Map<number, MempoolTxMetadata>) {
-    this.m = m;
+    this.byHash = m;
   }
 }
 
-/** === TxStore ===========================================================
- * Responsibility: hold memory-slimmed tx objects (MempoolTransaction), i.e., only fields needed by business logic.
- * We never store full Transaction; normalize immediately upon load.
- * Complexity: O(1) put/get/remove/count.
- * Memory: ~1–2 KB per tx (depends on LightVin/LightVout density).
+/** === TxStore ===============================================================
+ * Store slim transactions (normalized) by tx hash.
  */
 export class TxStore {
-  private m: Map<number, LightTransaction> = new Map();
-
-  put(txHash: number, slim: LightTransaction) {
-    this.m.set(txHash, slim);
+  private byHash = new Map<number, LightTransaction>();
+  set(h: number, tx: LightTransaction) {
+    this.byHash.set(h, tx);
   }
-  get(txHash: number): LightTransaction | undefined {
-    return this.m.get(txHash);
+  get(h: number) {
+    return this.byHash.get(h);
   }
-  remove(txHash: number) {
-    this.m.delete(txHash);
+  has(h: number) {
+    return this.byHash.has(h);
   }
-  count(): number {
-    return this.m.size;
+  remove(h: number) {
+    this.byHash.delete(h);
   }
   clear() {
-    this.m.clear();
+    this.byHash.clear();
   }
-
+  size() {
+    return this.byHash.size;
+  }
+  entries() {
+    return this.byHash.entries();
+  }
   /** expose for snapshots */
   __getMap() {
-    return this.m;
+    return this.byHash;
   }
   __setMap(m: Map<number, LightTransaction>) {
-    this.m = m;
+    this.byHash = m;
   }
 }
 
-// /** === FeeRateIndex ==========================================================
-//  * Responsibility: indexing by rounded feeRate for fast queries & distributions.
-//  * Implementation: Map<roundedFeeRate, Set<txHash>>.
-//  * Complexity: add/remove O(1); distribution scan O(buckets).
-//  * Memory: small (≈ a few hundred KB for huge mempools).
-//  */
-// export class FeeRateIndex {
-//   private buckets: Map<number, Set<number>> = new Map();
-//   constructor(private precision = 10) {} // round to 0.1 sat/vB by default
-
-//   private round(fr: number): number {
-//     return Math.floor(fr * this.precision) / this.precision;
-//   }
-
-//   add(txHash: number, feeRate: number) {
-//     const r = this.round(feeRate);
-//     let set = this.buckets.get(r);
-//     if (!set) {
-//       set = new Set<number>();
-//       this.buckets.set(r, set);
-//     }
-//     set.add(txHash);
-//   }
-
-//   remove(txHash: number, feeRate: number) {
-//     const r = this.round(feeRate);
-//     const set = this.buckets.get(r);
-//     if (!set) return;
-//     set.delete(txHash);
-//     if (set.size === 0) this.buckets.delete(r);
-//   }
-
-//   distribution(): Record<number, number> {
-//     const out: Record<number, number> = {};
-//     for (const [k, v] of this.buckets) out[k] = v.size;
-//     return out;
-//   }
-
-//   clear() {
-//     this.buckets.clear();
-//   }
-
-//   /** expose for snapshots */
-//   __getMap() {
-//     return this.buckets;
-//   }
-//   __setMap(m: Map<number, Set<number>>) {
-//     this.buckets = m;
-//   }
-// }
+/** === ProviderTxMap =========================================================
+ * For each providerName keep a Set of tx hashes assigned to it.
+ * We intentionally assign a txid to at most ONE provider (dedup across providers).
+ * Memory: O(p + n). Ops: O(1) average.
+ */
+export class ProviderTxMap {
+  private map = new Map<string, Set<number>>();
+  add(provider: string, h: number) {
+    let s = this.map.get(provider);
+    if (!s) this.map.set(provider, (s = new Set()));
+    s.add(h);
+  }
+  get(provider: string): Set<number> | undefined {
+    return this.map.get(provider);
+  }
+  providers(): string[] {
+    return Array.from(this.map.keys());
+  }
+  clear() {
+    this.map.clear();
+  }
+  /** expose for snapshots */
+  __getMap() {
+    return this.map;
+  }
+  __setMap(m: Map<string, Set<number>>) {
+    this.map = m;
+  }
+}
 
 /** === LoadTracker ===========================================================
- * Responsibility: track which tx were already normalized+stored (ready), with feeRate and providerIndex.
- * Complexity: O(1).
- * Memory: tiny (~24B/tx + Map overhead).
+ * Track which txids were loaded as slim transactions + feeRate snapshot at load time.
+ * Used for sync progress and to preserve already loaded txs during refresh.
  */
-type LoadInfo = { timestamp: number; feeRate: number; providerIndex: number };
+export interface LoadInfo {
+  timestamp: number;
+  feeRate: number;
+  providerName?: string;
+}
 export class LoadTracker {
-  private loaded: Map<number, LoadInfo> = new Map();
-
-  mark(txHash: number, info: LoadInfo) {
+  private loaded = new Map<number, LoadInfo>();
+  add(txHash: number, info: LoadInfo) {
     this.loaded.set(txHash, info);
   }
-  isLoaded(txHash: number): boolean {
+  has(txHash: number) {
     return this.loaded.has(txHash);
   }
-  get(txHash: number): LoadInfo | undefined {
+  get(txHash: number) {
     return this.loaded.get(txHash);
-  }
-  count(): number {
-    return this.loaded.size;
   }
   remove(txHash: number) {
     this.loaded.delete(txHash);
@@ -313,12 +193,54 @@ export class LoadTracker {
   clear() {
     this.loaded.clear();
   }
-
+  count() {
+    return this.loaded.size;
+  }
   /** expose for snapshots */
   __getMap() {
     return this.loaded;
   }
   __setMap(m: Map<number, LoadInfo>) {
     this.loaded = m;
+  }
+}
+
+/** === BatchSizer (per‑provider adaptive logic) ==============================
+ * Maintains per‑provider batch sizes and adapts using last duration ratio.
+ * Complexity: O(1) updates.
+ */
+export class BatchSizer {
+  private sizeByProvider = new Map<string, number>();
+  private defaultSize: number;
+  private minSize: number;
+  private maxSize: number;
+
+  constructor(defaultSize = 200, minSize = 20, maxSize = 2000) {
+    this.defaultSize = defaultSize;
+    this.minSize = minSize;
+    this.maxSize = maxSize;
+  }
+
+  get(provider: string): number {
+    const v = this.sizeByProvider.get(provider);
+    if (!v || v <= 0) {
+      this.sizeByProvider.set(provider, this.defaultSize);
+      return this.defaultSize;
+    }
+    return v;
+  }
+
+  /** Update using ratio = currentDurationMs / previousDurationMs */
+  tune(provider: string, ratio: number) {
+    let v = this.get(provider);
+    if (!Number.isFinite(ratio) || ratio <= 0) return;
+    if (ratio > 1.25)
+      v = Math.max(this.minSize, Math.round(v * 0.8)); // slower -> shrink
+    else if (ratio < 0.8) v = Math.min(this.maxSize, Math.round(v * 1.2)); // faster -> grow
+    this.sizeByProvider.set(provider, v);
+  }
+
+  clear() {
+    this.sizeByProvider.clear();
   }
 }

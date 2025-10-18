@@ -1,4 +1,3 @@
-// light.interfaces.ts
 import type { Block, Transaction } from '../../blockchain-provider';
 
 /**
