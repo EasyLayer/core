@@ -1,3 +1,12 @@
+## [1.0.3](https://github.com/EasyLayer/core/compare/v1.0.2...v1.0.3) (2025-10-18)
+
+
+### Bug Fixes
+
+* fixed bitcoin blocks loader pull strategy; ([15e890d](https://github.com/EasyLayer/core/commit/15e890d3886c9e1868116bd459d81fd003c87dae))
+
+
+
 ## [1.0.2](https://github.com/EasyLayer/core/compare/v1.0.0...v1.0.2) (2025-10-01)
 
 
