@@ -16,7 +16,7 @@ interface BlockInfo {
  * Approximate reply size = sum(total_size) * 2.1 (×2 hex + ~10% JSON overhead).
  */
 export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.RPC_PULL;
+  readonly name: StrategyNames = StrategyNames.RPC;
 
   // Budget of expected RPC reply bytes (not raw block bytes)
   private _maxRpcReplyBytes: number = 10 * 1024 * 1024;
@@ -72,16 +72,18 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       // IMPORTANT: This check is mandatory after preload.
       // We don't want to start downloading blocks if there is no items in the queue for them
       if (this.queue.isQueueOverloaded(this._maxRpcReplyBytes)) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        continue;
+        // IMPORTANT: This is essentially the same as the queue being full, so we can return an error to reset the timer.
+        throw new Error('The queue is overloaded, waiting before retry');
+        // await new Promise((resolve) => setTimeout(resolve, 1000));
+        // continue;
       }
 
-      if (this._preloadedItemsQueue.length > 0) {
-        await this.loadAndEnqueueBlocks();
+      if (this._preloadedItemsQueue.length === 0) {
+        // throw new Error('No blocks available to preload for requested heights');
+        return;
       }
 
-      // Wait 1 second between iterations to avoid overwhelming the system
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await this.loadAndEnqueueBlocks();
     }
   }
 
@@ -190,10 +192,20 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
         predictedReplyBytes = nextPredicted;
       }
 
+      // If after the loop infos is still empty and the queue is not empty, take 1 block
+      if (infos.length === 0 && this._preloadedItemsQueue.length > 0) {
+        const forced = this._preloadedItemsQueue.pop()!;
+        infos.push(forced);
+      }
+
       if (infos.length > 0) {
         totalInfosPulled += infos.length;
         activeTasks.push(this.loadBlocks(infos, retryLimit));
       }
+    }
+
+    if (activeTasks.length === 0) {
+      return;
     }
 
     const batches: Block[][] = await Promise.all(activeTasks);

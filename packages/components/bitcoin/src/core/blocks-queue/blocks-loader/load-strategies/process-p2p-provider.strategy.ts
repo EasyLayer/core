@@ -5,7 +5,7 @@ import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
 
 export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
-  readonly name: StrategyNames = StrategyNames.P2P_PROCESS;
+  readonly name: StrategyNames = StrategyNames.P2P;
 
   // Hold the active subscription (Promise<void> & { unsubscribe(): void }) or undefined
   private _subscription?: Promise<void> & { unsubscribe: () => void };

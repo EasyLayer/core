@@ -37,9 +37,9 @@ export const createSnapshotsEntity = (dbDriver: DriverType = 'postgres'): Entity
 
   // Auto-incrementing sequence for guaranteed order
   const id: any = {
-    type: isPostgres ? 'bigserial' : 'integer',
+    type: isPostgres ? 'bigint' : 'integer',
     primary: true,
-    generated: isPostgres ? true : 'increment',
+    generated: 'increment',
   };
 
   const payload: any = {

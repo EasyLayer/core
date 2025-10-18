@@ -1,13 +1,15 @@
+import type { Logger } from '@nestjs/common';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { BlockchainProviderService, LightBlock, Block, Transaction } from '../../blockchain-provider';
-import { Blockchain } from '../../blockchain-provider';
+import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
+import { Blockchain } from './blockchain.structure';
 import {
   BitcoinNetworkInitializedEvent,
   BitcoinNetworkBlocksAddedEvent,
   BitcoinNetworkReorganizedEvent,
   BitcoinNetworkClearedEvent,
-} from '../events';
-import { BlockchainValidationError, ReorganizationGenesisError } from './errors';
+} from '../../events';
+import { BlockchainValidationError, ReorganizationGenesisError } from '../errors';
+import type { LightBlock } from '../interfaces';
 
 /**
  * Network aggregate for blockchain storage with fast height lookups
@@ -148,6 +150,16 @@ export class Network extends AggregateRoot {
     };
   }
 
+  private normalize(full: Block): LightBlock {
+    return {
+      height: full.height,
+      hash: full.hash,
+      merkleroot: full.merkleroot,
+      previousblockhash: full.previousblockhash ?? '0',
+      tx: full.tx?.map((item) => item.txid) ?? [],
+    };
+  }
+
   // ===== SNAPSHOTS =====
 
   protected serializeUserState(): Record<string, any> {
@@ -179,7 +191,17 @@ export class Network extends AggregateRoot {
    * Initialize network with starting height
    * Time complexity: O(1)
    */
-  public async init({ requestId, startHeight }: { requestId: string; startHeight: number }) {
+  public async init({
+    requestId,
+    startHeight,
+    currentNetworkHeight,
+    logger,
+  }: {
+    requestId: string;
+    startHeight: number;
+    currentNetworkHeight: number;
+    logger: Logger;
+  }) {
     // Event payload size estimation: ~1KB (minimal data)
     this.apply(
       new BitcoinNetworkInitializedEvent(
@@ -191,6 +213,14 @@ export class Network extends AggregateRoot {
         {}
       )
     );
+
+    logger.log('Network successfully initialized', {
+      args: {
+        lastIndexedHeight: startHeight,
+        nextBlockToProcess: startHeight + 1,
+        currentNetworkHeight,
+      },
+    });
   }
 
   /**
@@ -216,24 +246,31 @@ export class Network extends AggregateRoot {
    * Time complexity: O(n) where n = number of blocks to validate
    * Memory: stores blocks in circular buffer (~32-128KB per block depending on tx count)
    */
-  public async addBlocks({ blocks, requestId }: { blocks: LightBlock[]; requestId: string }) {
-    if (!this.chain.validateNextBlocks(blocks)) {
+  public async addBlocks({ blocks, requestId, logger }: { blocks: Block[]; requestId: string; logger: Logger }) {
+    const lightBlocks: LightBlock[] = blocks.map((block: Block) => this.normalize(block));
+
+    if (!this.chain.validateNextBlocks(lightBlocks)) {
       throw new BlockchainValidationError();
     }
 
+    const blockHeight = lightBlocks[lightBlocks.length - 1]?.height ?? -1;
     // Event payload size estimation:
     // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
     // Total event size: ~9.6MB per blocks batch
-    return this.apply(
+    this.apply(
       new BitcoinNetworkBlocksAddedEvent(
         {
           aggregateId: this.aggregateId,
           requestId,
-          blockHeight: blocks[blocks.length - 1]?.height ?? -1,
+          blockHeight,
         },
-        { blocks }
+        { blocks: lightBlocks }
       )
     );
+
+    logger.log('Blocks successfully added', {
+      args: { blockHeight },
+    });
   }
 
   /**
@@ -246,11 +283,13 @@ export class Network extends AggregateRoot {
     requestId,
     service,
     blocks,
+    logger,
   }: {
     reorgHeight: number;
     requestId: string;
     service: BlockchainProviderService;
     blocks: LightBlock[];
+    logger: Logger;
   }): Promise<void> {
     // Base case: gone below zero - nowhere else to go
     if (reorgHeight < 0) {
@@ -274,7 +313,7 @@ export class Network extends AggregateRoot {
         // Event payload size estimation:
         // - blocks: ~d blocks × 96KB where d = reorg depth
         // Total event size: ~d × 96KB per reorganization
-        return this.apply(
+        this.apply(
           new BitcoinNetworkReorganizedEvent(
             {
               aggregateId: this.aggregateId,
@@ -284,6 +323,10 @@ export class Network extends AggregateRoot {
             { blocks }
           )
         );
+
+        logger.log('Blocks successfully reorganized', { args: { blockHeight: reorgHeight } });
+
+        return;
       }
     }
 
@@ -296,6 +339,7 @@ export class Network extends AggregateRoot {
       requestId,
       service,
       blocks: newBlocks,
+      logger,
     });
   }
 

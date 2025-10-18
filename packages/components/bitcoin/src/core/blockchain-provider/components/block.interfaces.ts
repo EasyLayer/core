@@ -1,12 +1,5 @@
 import type { Transaction } from './transaction.interfaces';
 
-export interface LightBlock {
-  previousblockhash: string; // 32 bytes - hash of previous block
-  merkleroot: string; // 32 bytes - merkle tree root of transactions
-  hash: string; // block hash = header hash (double SHA256 of 80 bytes above)
-  height: number; // block height (NOT part of header, but needed for structure)
-  tx: string[]; // array of transaction IDs (NOT part of header)
-}
 export interface Block {
   height: number; // REQUIRED - always must be known
   hash: string;
@@ -17,19 +10,16 @@ export interface Block {
   weight: number; // Block weight (BIP 141)
   vsize: number; // Virtual block size
   witnessSize?: number; // Size of witness data only in the block
-  headerSize: number; // Block header size (80 bytes)
+  // headerSize: number; // Block header size (80 bytes)
   transactionsSize: number; // Size of all transactions
   version: number;
   versionHex: string;
   merkleroot: string;
   time: number;
-  mediantime: number;
   nonce: number;
   bits: string;
   difficulty: string;
-  chainwork: string;
   previousblockhash?: string;
-  nextblockhash?: string;
   tx?: Transaction[]; // Transaction objects only, NOT hex
   nTx?: number;
   // ===== ADDITIONAL FIELDS =====

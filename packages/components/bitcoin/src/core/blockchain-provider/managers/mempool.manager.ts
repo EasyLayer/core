@@ -122,33 +122,36 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
   async executeOnMultiple<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
     options: MempoolRequestOptions = {}
-  ): Promise<T[]> {
+  ): Promise<Array<{ providerName: string; value: T }>> {
     const { timeout = 30000 } = options;
     const healthy = await this.getHealthyProviders();
     if (healthy.length === 0) throw new Error('No healthy providers available for multiple execution');
 
     const results = await Promise.allSettled(
-      healthy.map((provider) =>
-        Promise.race([
-          operation(provider),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeout)),
-        ])
-          .then((v) => ({ ok: true as const, v }))
-          .catch((e) => {
-            this.logger.warn('Provider operation failed in multiple execution', {
-              args: { providerName: provider.uniqName, error: (e as any)?.message },
-            });
-            return { ok: false as const };
-          })
-      )
+      healthy.map(async (provider) => {
+        try {
+          const value = await Promise.race([
+            operation(provider),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Operation timeout')), timeout)),
+          ]);
+          return { ok: true as const, providerName: provider.uniqName, value: value as T };
+        } catch (e) {
+          this.logger.warn('Provider operation failed in multiple execution', {
+            args: { providerName: provider.uniqName, error: (e as any)?.message },
+          });
+          return { ok: false as const, providerName: provider.uniqName };
+        }
+      })
     );
 
-    const values: T[] = [];
+    const out: Array<{ providerName: string; value: T }> = [];
     for (const r of results) {
-      if (r.status === 'fulfilled' && r.value.ok) values.push(r.value.v as T);
+      if (r.status === 'fulfilled' && r.value.ok) {
+        out.push({ providerName: r.value.providerName, value: r.value.value as T });
+      }
     }
-    if (values.length === 0) throw new Error('All providers failed in multiple execution');
-    return values;
+    if (out.length === 0) throw new Error('All providers failed in multiple execution');
+    return out;
   }
 
   getProviderStats(): { total: number; healthy: number; failed: number } {

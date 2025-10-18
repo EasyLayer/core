@@ -3,7 +3,7 @@ import { BlocksQueue, CapacityPlanner } from '../blocks-queue';
 
 function createTransaction(baseSize: number, witnessSize: number = 0): Transaction {
   const totalSize = baseSize + witnessSize;
-  const weight = (baseSize * 4) + witnessSize; // BIP 141
+  const weight = (baseSize * 4) + witnessSize;
   const vsize = Math.ceil(weight / 4);
   return {
     txid: `txid${baseSize}-${witnessSize}-${Math.random()}`,
@@ -60,22 +60,18 @@ function createTestBlock(height: number, tx: Transaction[] = []): Block {
 const makeTransaction = createTransaction;
 const makeBlock = createTestBlock;
 
-// ================== CapacityPlanner tests ==================
-
 describe('CapacityPlanner', () => {
   it('computes desiredSlots under budget and reacts to EMA', () => {
     const planner = new CapacityPlanner(1024, { maxSlots: 1_000, minSlots: 1 });
-    const budget = 64 * 1024; // 64KB
+    const budget = 64 * 1024;
 
     const d0 = planner.desiredSlots(budget);
     expect(d0).toBeGreaterThan(0);
 
-    // observe bigger blocks -> avg up -> desired down
     for (let i = 0; i < 50; i++) planner.observe(8 * 1024);
     const d1 = planner.desiredSlots(budget);
     expect(d1).toBeLessThan(d0);
 
-    // observe smaller blocks -> avg down -> desired up
     for (let i = 0; i < 100; i++) planner.observe(256);
     const d2 = planner.desiredSlots(budget);
     expect(d2).toBeGreaterThan(d1);
@@ -86,8 +82,7 @@ describe('CapacityPlanner', () => {
     const capacity = 100;
     const count = 80;
 
-    // Choose budget so that desired ≈ capacity (within thresholds)
-    const budgetWithin = capacity * ema; // ~204800
+    const budgetWithin = capacity * ema;
     const planner = new CapacityPlanner(ema, {
       growThreshold: 0.2,
       shrinkThreshold: 0.3,
@@ -97,7 +92,6 @@ describe('CapacityPlanner', () => {
 
     const now = Date.now();
 
-    // Within thresholds -> no resize
     let r = planner.shouldResize({
       now,
       maxQueueBytes: budgetWithin,
@@ -106,7 +100,6 @@ describe('CapacityPlanner', () => {
     });
     expect(r.need).toBe(false);
 
-    // Force large average (observe large sizes), then after cooldown allow shrink if safe
     for (let i = 0; i < 200; i++) planner.observe(64 * 1024);
 
     r = planner.shouldResize({
@@ -117,13 +110,11 @@ describe('CapacityPlanner', () => {
     });
 
     if (r.need) {
-      // Never below occupancy
       expect(r.targetSlots).toBeGreaterThanOrEqual(count);
     }
 
     planner.markResized(now + 6000);
 
-    // Cooldown prevents immediate subsequent resize
     const r2 = planner.shouldResize({
       now: now + 7000,
       maxQueueBytes: budgetWithin,
@@ -134,8 +125,6 @@ describe('CapacityPlanner', () => {
   });
 });
 
-// ================== BlocksQueue tests ==================
-
 describe('BlocksQueue', () => {
   let queue: BlocksQueue<Block>;
 
@@ -143,9 +132,9 @@ describe('BlocksQueue', () => {
     queue = new BlocksQueue<Block>({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
-      blockSize: 1 * 1024 * 1024, // seed EMA
-      maxQueueSize: 1 * 1024 * 1024, // 1MB budget
-      plannerConfig: { maxSlots: 10_000, minSlots: 2 }, // min 2 to reduce startup friction
+      blockSize: 1 * 1024 * 1024,
+      maxQueueSize: 1 * 1024 * 1024,
+      plannerConfig: { maxSlots: 10_000, minSlots: 2 },
     });
   });
 
@@ -153,7 +142,7 @@ describe('BlocksQueue', () => {
     const block = makeBlock(0, [makeTransaction(100)]);
     await queue.enqueue(block);
     const removed = await queue.dequeue(block.hash);
-    expect(removed).toBe(1);
+    expect(removed).toBe(block.height);
     expect(queue.length).toBe(0);
     expect(queue.currentSize).toBe(0);
     const first = await queue.firstBlock();
@@ -186,12 +175,12 @@ describe('BlocksQueue', () => {
     await smallQueue.enqueue(a);
     await smallQueue.enqueue(b);
     const removedA = await smallQueue.dequeue(a.hash);
-    expect(removedA).toBe(1);
+    expect(removedA).toBe(a.height);
     await smallQueue.enqueue(c);
     const removedB = await smallQueue.dequeue(b.hash);
-    expect(removedB).toBe(1);
+    expect(removedB).toBe(b.height);
     const removedC = await smallQueue.dequeue(c.hash);
-    expect(removedC).toBe(1);
+    expect(removedC).toBe(c.height);
     expect(smallQueue.length).toBe(0);
   });
 
@@ -221,7 +210,7 @@ describe('BlocksQueue', () => {
     }
     await Promise.all(blocks.map(b => queue.enqueue(b)));
     const removed = await queue.dequeue(blocks[0]!.hash);
-    expect(removed).toBe(1);
+    expect(removed).toBe(blocks[0]!.height);
     const firstAfter = await queue.firstBlock();
     expect(firstAfter?.height).toBe(blocks[1]!.height);
     const subset = new Set([blocks[5]!.hash, blocks[10]!.hash, blocks[20]!.hash]);
@@ -320,13 +309,13 @@ describe('BlocksQueue', () => {
       await queue.firstBlock();
 
       const removed1 = await queue.dequeue(block1.hash);
-      expect(removed1).toBe(1);
+      expect(removed1).toBe(block1.height);
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(1);
       expect(queue.currentSize).toBe(block2.size);
 
       const removed2 = await queue.dequeue(block2.hash);
-      expect(removed2).toBe(1);
+      expect(removed2).toBe(block2.height);
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(1);
       expect(queue.currentSize).toBe(0);
@@ -485,11 +474,10 @@ describe('BlocksQueue', () => {
     });
 
     it('can be configured to effectively pop one block per iteration by batch limit', async () => {
-      // Blocks of size 2; we set batch size 2 so only one fits.
       const q = new BlocksQueue<Block>({
         lastHeight: -1,
-        maxQueueSize: 100,   // enough memory
-        blockSize: 2,        // seed EMA
+        maxQueueSize: 100,
+        blockSize: 2,
         maxBlockHeight: Number.MAX_SAFE_INTEGER,
         plannerConfig: { minSlots: 2, maxSlots: 1000 },
       });

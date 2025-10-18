@@ -1,15 +1,15 @@
 import { BasicEvent } from '@easylayer/common/cqrs';
-import type { Transaction } from '../../../blockchain-provider';
+import type { LightTransaction } from '../../../cqrs-components';
+
 export interface BitcoinMempoolSyncProcessedEventPayload {
   loadedTransactions: Array<{
     txid: string;
-    transaction: Transaction;
-    // Optional provider info for transactions loaded directly from specific providers
-    providerIndex?: number;
-    // providerName?: string;
-    // metadata: any;
+    transaction: LightTransaction;
+    /** Provider that served this batch (used for per‑provider adaptive sizing) */
+    providerName?: string;
   }>;
-  hasMoreToProcess: boolean; // true if there are still pending txids to load
+  /** Optional: time spent to complete each provider batch, ms */
+  batchDurations?: Record<string, number>;
 }
 
 export class BitcoinMempoolSyncProcessedEvent extends BasicEvent<BitcoinMempoolSyncProcessedEventPayload> {}

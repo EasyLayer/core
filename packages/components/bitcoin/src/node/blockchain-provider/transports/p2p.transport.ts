@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import type { NetworkConfig as BitcoreNetworkConfig } from 'bitcore-p2p';
 import { Pool, Peer, Messages } from 'bitcore-p2p';
-import type { BaseTransportOptions } from '../../../core';
+import type { BaseTransportOptions, ByteData } from '../../../core';
 import { BaseTransport } from '../../../core';
 
 const isNodeLike = typeof process !== 'undefined' && !!process.versions?.node;
@@ -102,12 +102,12 @@ class ChainTracker {
 }
 
 type BlockSubscriber = {
-  onData: (blockData: Buffer) => void;
+  onData: (blockData: ByteData) => void;
   onError?: (err: Error) => void;
 };
 
 export class P2PTransport extends BaseTransport<P2PTransportOptions> {
-  readonly type = 'p2p';
+  readonly type = 'p2p' as const;
 
   private pool: Pool;
   private activePeer: Peer | null = null;
@@ -120,7 +120,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   private headerSyncComplete = false;
 
   private blockSubscribers = new Set<BlockSubscriber>();
-
   private headerSyncPromise: Promise<void> | null = null;
 
   constructor(options: P2PTransportOptions) {
@@ -153,7 +152,6 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     return {
       uniqName: this.uniqName,
       peers: this.peers,
-      rateLimits: this.rateLimiter['config'],
       network: this.network,
       maxPeers: this.peers.length,
       connectionTimeout: this.connectionTimeout,
@@ -189,20 +187,21 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   }
 
   async disconnect(): Promise<void> {
-    await this.rateLimiter.stop();
+    return this.executeWithErrorHandling(async () => {
+      this.blockSubscribers.clear();
 
-    this.blockSubscribers.clear();
+      this.chainTracker.clear();
+      this.headerSyncComplete = false;
+      this.headerSyncPromise = null;
 
-    this.chainTracker.clear();
-    this.headerSyncComplete = false;
-    this.headerSyncPromise = null;
-
-    this.pool.disconnect();
-    this.activePeer = null;
-    this.isConnected = false;
+      this.pool.disconnect();
+      this.activePeer = null;
+      this.isConnected = false;
+    }, 'disconnect');
   }
 
   async healthcheck(): Promise<boolean> {
+    // Basic readiness: at least one ready peer + connected flag
     return this.isConnected && this.activePeer !== null;
   }
 
@@ -240,12 +239,12 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
    * ORDER GUARANTEE: results[i] corresponds to hashes[i]
    * Missing/failed items return null at the same index
    */
-  async requestHexBlocks(hashes: string[]): Promise<(Buffer | null)[]> {
+  async requestHexBlocks(hashes: string[]): Promise<(ByteData | null)[]> {
     return this.executeWithErrorHandling(async () => {
       if (!this.activePeer) return hashes.map(() => null);
 
       const batchSize = 128;
-      const out: (Buffer | null)[] = new Array(hashes.length);
+      const out: (ByteData | null)[] = new Array(hashes.length);
       for (let i = 0; i < hashes.length; i += batchSize) {
         const slice = hashes.slice(i, i + batchSize);
         const got = await this.requestHexBlocksBatch(slice);
@@ -269,39 +268,82 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     });
   }
 
-  /**
-   * P2P batch call with null support
-   * ORDER GUARANTEE: results[i] corresponds to calls[i]
-   */
-  async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
-    const results: (TResult | null)[] = new Array(calls.length);
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i];
-      if (!call) {
-        results[i] = null;
-        continue;
-      }
-      try {
-        if (call.method === 'getblockhash' && typeof call.params?.[0] === 'number') {
-          const height = call.params[0];
-          const hash = this.chainTracker.getHash(height);
-          results[i] = (hash || null) as TResult | null;
-        } else if (call.method === 'getblockcount') {
-          const tipHeight = this.chainTracker.getTipHeight();
-          results[i] = (tipHeight >= 0 ? tipHeight : null) as TResult | null;
-        } else {
-          results[i] = null;
-        }
-      } catch {
-        results[i] = null;
-      }
-    }
-    return results;
+  // ===== RPC-specific operations: not applicable for P2P transport =====
+  async getRawBlocksByHashesVerbose(_hashes: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawBlocksByHashesVerbose');
+    }, 'getRawBlocksByHashesVerbose');
+  }
+
+  async getBlockStatsByHashes(_hashes: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockStatsByHashes');
+    }, 'getBlockStatsByHashes');
+  }
+
+  async getBlockHeadersByHashes(_hashes: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockHeadersByHashes');
+    }, 'getBlockHeadersByHashes');
+  }
+
+  async getRawTransactionsHexByTxids(_txids: string[]): Promise<(string | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawTransactionsHexByTxids');
+    }, 'getRawTransactionsHexByTxids');
+  }
+
+  async getRawTransactionsByTxids(_txids: string[], _verbosity: 1 | 2): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawTransactionsByTxids');
+    }, 'getRawTransactionsByTxids');
+  }
+
+  async getRawMempool(_verbose?: boolean): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getRawMempool');
+    }, 'getRawMempool');
+  }
+
+  async getMempoolVerbose(): Promise<Record<string, any>> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolVerbose');
+    }, 'getMempoolVerbose');
+  }
+
+  async getMempoolEntries(_txids: string[]): Promise<(any | null)[]> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolEntries');
+    }, 'getMempoolEntries');
+  }
+
+  async getMempoolInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getMempoolInfo');
+    }, 'getMempoolInfo');
+  }
+
+  async estimateSmartFee(_confTarget: number, _estimateMode?: 'ECONOMICAL' | 'CONSERVATIVE'): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('estimateSmartFee');
+    }, 'estimateSmartFee');
+  }
+
+  async getBlockchainInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getBlockchainInfo');
+    }, 'getBlockchainInfo');
+  }
+
+  async getNetworkInfo(): Promise<any> {
+    return this.executeWithErrorHandling(async () => {
+      this.throwNotImplemented('getNetworkInfo');
+    }, 'getNetworkInfo');
   }
 
   // Multiple-subscriber API with error propagation
   subscribeToNewBlocks(
-    callback: (blockData: Buffer) => void,
+    callback: (blockData: ByteData) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
     const sub: BlockSubscriber = { onData: callback, onError };
@@ -455,7 +497,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           const prevHash = this.extractPreviousBlockHash(blockBuffer);
           const prevHeight = prevHash ? this.chainTracker.getHeight(prevHash) : undefined;
 
-          if (prevHeight !== undefined) {
+          if (typeof prevHeight === 'number') {
             const newHeight = prevHeight + 1;
             this.chainTracker.addHeader(blockHash, newHeight);
           }
@@ -469,7 +511,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
           try {
             const header = this.parseHeaderBuffer(headerBuffer);
             const prevHeight = this.chainTracker.getHeight(header.previousblockhash);
-            if (prevHeight !== undefined) {
+            if (typeof prevHeight === 'number') {
               const height = prevHeight + 1;
               this.chainTracker.addHeader(header.hash, height);
             }
@@ -484,8 +526,8 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   }
   /* eslint-enable no-empty */
 
-  private requestHexBlocksBatch(hashes: string[]): Promise<(Buffer | null)[]> {
-    return new Promise<(Buffer | null)[]>((resolve) => {
+  private requestHexBlocksBatch(hashes: string[]): Promise<(ByteData | null)[]> {
+    return new Promise<(ByteData | null)[]>((resolve) => {
       if (!this.activePeer) {
         resolve(hashes.map(() => null));
         return;
@@ -495,7 +537,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       hashes.forEach((h, idx) => hashToPosition.set(h, idx));
 
       const expected = new Set(hashes);
-      const received = new Map<string, Buffer>();
+      const received = new Map<string, ByteData>();
       const timeoutMs = Math.min(60_000, 10_000 + hashes.length * 300);
 
       const onBlock = (message: any) => {
@@ -513,7 +555,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
         clearTimeout(timer);
         this.activePeer?.removeListener('block', onBlock);
 
-        const ordered: (Buffer | null)[] = new Array(hashes.length).fill(null);
+        const ordered: (ByteData | null)[] = new Array(hashes.length).fill(null);
         for (const [h, buf] of received) {
           const pos = hashToPosition.get(h);
           if (pos !== undefined) ordered[pos] = buf;

@@ -2,11 +2,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Type } from '@nestjs/common';
 import { BlockchainProviderModule } from '../../../node';
 import { BlocksQueueModule, BlocksQueueModuleOptions } from '../blocks-queue.module';
-// import { BlocksQueueController } from '../blocks-queue.controller';
 import { BlocksQueueService } from '../blocks-queue.service';
 import { BlocksQueueIteratorService } from '../blocks-iterator';
 import { BlocksQueueLoaderService } from '../blocks-loader';
-import { BlocksCommandExecutor } from '../interfaces';
+import { MempoolLoaderService } from '../mempool-loader.service';
+import { BlocksCommandExecutor, MempoolCommandExecutor } from '../interfaces';
 
 describe('BlocksQueueModule', () => {
   let module: TestingModule;
@@ -14,7 +14,11 @@ describe('BlocksQueueModule', () => {
   const mockBlocksCommandExecutor: Type<BlocksCommandExecutor> = class {
     async handleBatch() {}
   };
+  const mockMempoolCommandExecutor: Type<MempoolCommandExecutor> = class {
+    async handleSnapshot() {}
+  };
   const moduleOptions: BlocksQueueModuleOptions = {
+    mempoolCommandExecutor: mockMempoolCommandExecutor,
     blocksCommandExecutor: mockBlocksCommandExecutor,
     maxBlockHeight: 1,
     queueLoaderRequestBlocksBatchSize: 10 * 1024 * 1024,
@@ -60,5 +64,6 @@ describe('BlocksQueueModule', () => {
     expect(module.get(BlocksQueueService)).toBeInstanceOf(BlocksQueueService);
     expect(module.get(BlocksQueueIteratorService)).toBeInstanceOf(BlocksQueueIteratorService);
     expect(module.get(BlocksQueueLoaderService)).toBeInstanceOf(BlocksQueueLoaderService);
+    expect(module.get(MempoolLoaderService)).toBeInstanceOf(MempoolLoaderService);
   });
 });

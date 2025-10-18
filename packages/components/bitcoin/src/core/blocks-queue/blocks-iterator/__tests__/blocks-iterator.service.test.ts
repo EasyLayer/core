@@ -30,17 +30,14 @@ function createTestBlock(height: number, txs: any[], sizeOverride?: number): Blo
     weight: size * 4,
     vsize: size,
     witnessSize: undefined,
-    headerSize: 80,
     transactionsSize: size - 80,
     version: 1,
     versionHex: '00000001',
     merkleroot: '0'.repeat(64),
     time: Date.now(),
-    mediantime: Date.now(),
     nonce: 0,
     bits: '0'.repeat(8),
     difficulty: '1',
-    chainwork: '0'.repeat(64),
     nTx: txs.length,
   };
 }

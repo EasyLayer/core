@@ -1,5 +1,5 @@
+import { LightBlock } from '../../interfaces';
 import { Blockchain } from '../blockchain.structure';
-import { LightBlock } from '../block.interfaces';
 
 describe('Blockchain', () => {
   let blockchain: Blockchain;

@@ -26,6 +26,7 @@ export async function toEventDataModel(
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
+  const uncompressedBytes = Buffer.byteLength(json, 'utf8');
 
   if (dbDriver === 'postgres' && CompressionUtils.shouldCompress(json)) {
     const deflated = await CompressionUtils.compressToBuffer(json);
@@ -37,6 +38,7 @@ export async function toEventDataModel(
       isCompressed: true,
       blockHeight: normalizedHeight as any,
       timestamp,
+      uncompressedBytes,
     };
   }
 
@@ -49,6 +51,7 @@ export async function toEventDataModel(
     isCompressed: false,
     blockHeight: normalizedHeight as any,
     timestamp,
+    uncompressedBytes,
   };
 }
 

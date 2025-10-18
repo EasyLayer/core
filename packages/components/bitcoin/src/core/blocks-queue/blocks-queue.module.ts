@@ -3,10 +3,12 @@ import { BlockchainProviderService } from '../blockchain-provider';
 import { BlocksQueueService } from './blocks-queue.service';
 import { BlocksQueueIteratorService } from './blocks-iterator';
 import { BlocksQueueLoaderService } from './blocks-loader';
-import { BlocksCommandExecutor } from './interfaces';
+import { BlocksCommandExecutor, MempoolCommandExecutor } from './interfaces';
+import { MempoolLoaderService } from './mempool-loader.service';
 
 export interface BlocksQueueModuleOptions {
   blocksCommandExecutor: Type<BlocksCommandExecutor>;
+  mempoolCommandExecutor: Type<MempoolCommandExecutor>;
   basePreloadCount: number;
   maxBlockHeight: number;
   maxQueueSize: number;
@@ -20,7 +22,7 @@ export interface BlocksQueueModuleOptions {
 @Module({})
 export class BlocksQueueModule {
   static async forRootAsync(config: BlocksQueueModuleOptions): Promise<DynamicModule> {
-    const { blocksCommandExecutor, ...restConfig } = config;
+    const { blocksCommandExecutor, mempoolCommandExecutor, ...restConfig } = config;
 
     return {
       module: BlocksQueueModule,
@@ -32,25 +34,34 @@ export class BlocksQueueModule {
           useClass: blocksCommandExecutor,
         },
         {
+          // IMPORTANT: MempoolCommandExecutor is a type, so we provide token string 'MempoolCommandExecutor'
+          provide: 'MempoolCommandExecutor',
+          useClass: mempoolCommandExecutor,
+        },
+        {
           provide: BlocksQueueService,
-          useFactory: (iterator, loader) => new BlocksQueueService(iterator, loader, { ...restConfig }),
-          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService],
+          useFactory: (iterator, loader, mempoolService) =>
+            new BlocksQueueService(iterator, loader, mempoolService, restConfig),
+          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService],
         },
         {
           provide: BlocksQueueLoaderService,
-          useFactory: (blockchainProvider) =>
-            new BlocksQueueLoaderService(blockchainProvider, {
-              ...restConfig,
-            }),
-          inject: [BlockchainProviderService],
+          useFactory: (blockchainProvider, mempoolService) =>
+            new BlocksQueueLoaderService(blockchainProvider, mempoolService, restConfig),
+          inject: [BlockchainProviderService, MempoolLoaderService],
         },
         {
           provide: BlocksQueueIteratorService,
-          useFactory: (executor) => new BlocksQueueIteratorService(executor, { ...restConfig }),
+          useFactory: (executor) => new BlocksQueueIteratorService(executor, restConfig),
           inject: ['BlocksCommandExecutor'],
         },
+        {
+          provide: MempoolLoaderService,
+          useFactory: (executor, provider) => new MempoolLoaderService(provider, executor),
+          inject: ['MempoolCommandExecutor', BlockchainProviderService],
+        },
       ],
-      exports: [BlocksQueueService],
+      exports: [BlocksQueueService, MempoolLoaderService],
     };
   }
 }

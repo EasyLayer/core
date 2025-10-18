@@ -101,7 +101,7 @@ export abstract class BaseConnectionManager<
     try {
       await provider.disconnect();
     } catch (error) {
-      this.logger.error('Error disconnecting provider during removal', { args: { error, name } });
+      this.logger.warn('Error disconnecting provider during removal', { args: { error, name } });
     } finally {
       this.connected.delete(name);
     }

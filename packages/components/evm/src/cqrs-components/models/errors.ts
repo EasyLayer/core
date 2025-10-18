@@ -13,6 +13,7 @@ export class BaseError<P extends ErrorParams = ErrorParams> extends Error {
     Object.setPrototypeOf(this, new.target.prototype);
     this.name = this.constructor.name;
     this.params = params;
+    this.stack = undefined;
   }
 }
 

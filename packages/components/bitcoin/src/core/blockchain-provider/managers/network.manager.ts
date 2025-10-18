@@ -20,7 +20,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       throw new Error('Unable to connect to any providers');
     }
 
-    const p2p = connected.filter((p) => p.transport?.type === 'p2p');
+    // Prefer P2P first
+    const p2p = connected.filter((p) => p.transportType === 'p2p');
     for (const provider of p2p) {
       const healthy = await provider.healthcheck().catch(() => false);
       if (!healthy) continue;
@@ -30,7 +31,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       return;
     }
 
-    const others = connected.filter((p) => p.transport?.type !== 'p2p');
+    // Fallback to others
+    const others = connected.filter((p) => p.transportType !== 'p2p');
     for (const provider of others) {
       const healthy = await provider.healthcheck().catch(() => false);
       if (!healthy) continue;
@@ -42,12 +44,14 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
     throw new Error('No healthy providers available for node operations');
   }
 
-  async switchProvider(name: string): Promise<void> {
+  async switchActiveProvider(name: string): Promise<void> {
     const provider = await this.getProviderByName(name);
-    const ok = await this.ensureConnected(provider);
-    if (!ok) throw new Error(`Failed to connect to provider ${name}`);
+    if (!provider) throw new Error(`Provider ${name} not registered`);
 
-    if (provider.transport?.type === 'p2p') {
+    const ok = await this.ensureConnected(provider);
+    if (!ok) throw new Error(`Provider ${name} is not connected`);
+
+    if (provider.transportType === 'p2p') {
       await this.ensureP2PInitialized(provider);
     }
 
@@ -78,43 +82,25 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
     const attempts = this.reconnectionAttempts.get(providerName) ?? 0;
     this.reconnectionAttempts.set(providerName, attempts + 1);
 
+    // Try to reconnect the same provider a few times
     if (attempts < this.maxReconnectionAttempts) {
       try {
-        await failedProvider.disconnect();
-      } catch {}
-      this.connected.delete(providerName);
-
-      const ok = await this.ensureConnected(failedProvider);
-      if (ok) {
-        if (failedProvider.transport?.type === 'p2p') {
-          await this.ensureP2PInitialized(failedProvider);
+        const ok = await this.ensureConnected(failedProvider);
+        if (ok) {
+          if (failedProvider.transportType === 'p2p') {
+            await this.ensureP2PInitialized(failedProvider);
+          }
+          this.failedProviders.delete(providerName);
+          this.logger.debug(`Recovered provider: ${providerName}`);
+          return failedProvider;
         }
-        this.failedProviders.delete(providerName);
-        this.reconnectionAttempts.delete(providerName);
-        this.activeProviderName = providerName;
-        this.logger.log('Provider reconnection successful', { args: { providerName } });
-        return failedProvider;
-      }
+      } catch {}
     }
 
-    return await this.switchToNextAvailableProvider();
-  }
-  /* eslint-enable no-empty */
-
-  private async switchToNextAvailableProvider(): Promise<NetworkProvider> {
-    const all = this.allProviders;
-    if (!this.activeProviderName) {
-      throw new Error('Active provider is not set');
-    }
-
-    const currentIndex = all.findIndex((p) => p.uniqName === this.activeProviderName);
-    for (let step = 1; step <= all.length; step++) {
-      const next = all[(currentIndex + step) % all.length];
-      if (!next) continue;
-
-      if (this.failedProviders.has(next.uniqName) && this.failedProviders.size < all.length) {
-        continue;
-      }
+    // Fallback to another healthy provider
+    for (const next of this.providers.values()) {
+      if (next.uniqName === providerName) continue;
+      if (this.failedProviders.has(next.uniqName)) continue;
 
       const ok = await this.ensureConnected(next);
       if (!ok) {
@@ -122,7 +108,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
         continue;
       }
 
-      if (next.transport?.type === 'p2p') {
+      if (next.transportType === 'p2p') {
         await this.ensureP2PInitialized(next);
       }
 
@@ -140,6 +126,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
 
     throw new Error('No working providers available');
   }
+  /* eslint-enable no-empty */
 
   private async ensureP2PInitialized(provider: NetworkProvider): Promise<void> {
     if (this.p2pInitialized.has(provider.uniqName)) return;

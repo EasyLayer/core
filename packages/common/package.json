@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Meta-package that routes subpath exports to per-subpackage builds.",
   "type": "commonjs",
   "main": "./index.js",
@@ -101,6 +101,7 @@
     "localforage": "1.10.0",
     "lodash": "4.17.21",
     "pg": "8.12.0",
+    "pg-query-stream": "4.10.3",
     "reflect-metadata": "0.1.14",
     "rxjs": "7.8.1",
     "sql.js": "1.13.0",

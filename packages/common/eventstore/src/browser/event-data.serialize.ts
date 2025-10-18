@@ -21,6 +21,7 @@ export async function toEventDataModel(event: DomainEvent, version: number): Pro
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
+  const uncompressedBytes = Buffer.byteLength(json, 'utf8');
 
   const buf = utf8ToBuffer(json);
   return {
@@ -31,6 +32,7 @@ export async function toEventDataModel(event: DomainEvent, version: number): Pro
     isCompressed: false,
     blockHeight: normalizedHeight as any,
     timestamp,
+    uncompressedBytes,
   };
 }
 

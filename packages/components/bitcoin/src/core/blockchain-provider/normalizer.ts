@@ -1,344 +1,445 @@
-import type { NetworkConfig, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './transports';
-import type { Block, BlockStats, Transaction, Vin, Vout } from './components';
+import type { NetworkConfig } from './transports';
+import type {
+  UniversalBlock,
+  UniversalBlockStats,
+  UniversalTransaction,
+  UniversalMempoolInfo,
+  UniversalMempoolTxMetadata,
+} from './providers';
+import type { Block, BlockStats, Transaction, Vin, Vout, MempoolTxMetadata, MempoolInfo } from './components';
 
 /**
- * Bitcoin Normalizer - converts Universal objects to enhanced component objects
- * Expects complete Universal objects with all size data already calculated
- * Only adds computed fields and enhanced metrics for better API usability
+ * Bitcoin Normalizer - converts Universal objects to domain components.
+ *
+ * Rules:
+ * - Do NOT fabricate defaults anywhere.
+ * - Throw when a field is REQUIRED by the domain model and missing/invalid.
+ * - Accept optional fields from Universal and pass through if present.
  */
 export class BitcoinNormalizer {
-  constructor(private readonly networkConfig: NetworkConfig) {}
+  constructor(private readonly network: NetworkConfig) {}
+
+  // =======================
+  // Internal helpers
+  // =======================
+
+  /** Require a finite number; throw if absent/NaN. */
+  private mustNumber(value: any, field: string): number {
+    const n = Number(value);
+    if (!Number.isFinite(n)) {
+      throw new Error(`Required numeric field "${field}" is missing or invalid`);
+    }
+    return n;
+  }
+
+  /** Optional numeric: returns number or undefined (no defaults). */
+  private optNumber(value: any): number | undefined {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+    // No defaults here; absence stays absence.
+  }
+
+  /** VarInt size in bytes for a value (used for transactions count). */
+  private varintSize(value: number): number {
+    if (value < 0xfd) return 1;
+    if (value <= 0xffff) return 3;
+    if (value <= 0xffffffff) return 5;
+    return 9;
+  }
+
+  // =======================
+  // Blocks
+  // =======================
 
   /**
-   * Normalize UniversalBlock to enhanced Block component
+   * REQUIRED by domain Block:
+   * - height, hash, time
+   * - size, strippedsize, weight, vsize
+   * - headerSize (fixed 80), transactionsSize (must be computable)
+   * - version, versionHex, merkleroot, mediantime, nonce, bits, difficulty, chainwork
+   *
+   * Notes:
+   * - transactionsSize is computed from either tx objects or size/nTx:
+   *     tx objects present → sum(tx.vsize)  (keeps behavior you had before)
+   *     else if size & nTx present → size - 80 - varint(nTx)
+   *     else → throw (cannot satisfy required domain field)
+   * - sizeWithoutWitnesses is an alias for strippedsize.
+   * - witnessSize = size - strippedsize when SegWit and both available.
+   * - blockSizeEfficiency = size / maxBlockSize (0..1), witnessDataRatio = witnessSize / size.
    */
   public normalizeBlock(universalBlock: UniversalBlock): Block {
-    // Ensure height is available - REQUIRED field
-    if (universalBlock.height === undefined || universalBlock.height === null) {
-      throw new Error(`Block height is required but missing for block ${universalBlock.hash}`);
+    if (!universalBlock || typeof universalBlock !== 'object') {
+      throw new Error('Block object is required');
     }
 
-    // Calculate enhanced size metrics from existing data
-    const sizeMetrics = this.calculateBlockSizeMetrics(universalBlock);
+    const hash = universalBlock.hash;
+    if (!hash) throw new Error('Block hash is required');
 
-    // Normalize transactions if present
-    const transactions =
-      universalBlock.tx && Array.isArray(universalBlock.tx)
-        ? (universalBlock.tx
-            .map((tx) => (typeof tx === 'string' ? null : this.normalizeTransaction(tx)))
-            .filter(Boolean) as Transaction[])
+    const height = this.mustNumber(universalBlock.height, 'block.height');
+    const time = this.mustNumber(universalBlock.time, 'block.time');
+
+    const size = this.mustNumber(universalBlock.size, 'block.size');
+    const strippedsize = this.mustNumber(universalBlock.strippedsize, 'block.strippedsize');
+    const weight = this.mustNumber(universalBlock.weight, 'block.weight');
+    const vsize = this.mustNumber(universalBlock.vsize, 'block.vsize');
+
+    const version = this.mustNumber(universalBlock.version, 'block.version');
+    const versionHex = (universalBlock.versionHex ?? '').toString();
+    if (!versionHex) throw new Error('block.versionHex is required');
+
+    const merkleroot = (universalBlock.merkleroot ?? '').toString();
+    if (!merkleroot) throw new Error('block.merkleroot is required');
+
+    const nonce = this.mustNumber(universalBlock.nonce, 'block.nonce');
+
+    const bits = (universalBlock.bits ?? '').toString();
+    if (!bits) throw new Error('block.bits is required');
+
+    const difficulty = (universalBlock.difficulty ?? '').toString();
+    if (!difficulty) throw new Error('block.difficulty is required');
+
+    // Compute transactionsSize
+    let transactionsSize: number | undefined;
+    if (Array.isArray(universalBlock.tx) && universalBlock.tx.length > 0 && typeof universalBlock.tx[0] !== 'string') {
+      // sum of tx vsize, as in your previous implementation
+      transactionsSize = (universalBlock.tx as UniversalTransaction[]).reduce((acc, t) => {
+        const vs = this.mustTxVsize(t);
+        return acc + vs;
+      }, 0);
+    } else if (Number.isFinite(size) && Number.isFinite(universalBlock.nTx)) {
+      const nTx = this.mustNumber(universalBlock.nTx, 'block.nTx');
+      transactionsSize = size - 80 - this.varintSize(nTx);
+      if (!Number.isFinite(transactionsSize) || transactionsSize < 0) {
+        throw new Error('Failed to compute block.transactionsSize from size and nTx');
+      }
+    } else {
+      throw new Error('block.transactionsSize cannot be computed (neither tx objects nor nTx/size are present)');
+    }
+
+    // witness size (optional)
+    const witnessSize =
+      this.network.hasSegWit && Number.isFinite(size) && Number.isFinite(strippedsize)
+        ? Math.max(0, size - strippedsize)
         : undefined;
 
-    // Calculate efficiency metrics
-    const efficiencyMetrics = this.calculateBlockEfficiencyMetrics(universalBlock, sizeMetrics);
+    // Efficiency metrics
+    const blockSizeEfficiency =
+      Number.isFinite(this.network.maxBlockSize) && this.network.maxBlockSize > 0
+        ? size / this.network.maxBlockSize
+        : undefined;
+    const witnessDataRatio = Number.isFinite(witnessSize) && size > 0 ? (witnessSize as number) / size : undefined;
 
-    return {
-      // Required fields
-      height: universalBlock.height,
-      hash: universalBlock.hash,
+    const out: Block = {
+      height,
+      hash,
 
-      // Enhanced size fields
-      size: universalBlock.size || 0,
-      strippedsize: universalBlock.strippedsize || 0,
-      sizeWithoutWitnesses: universalBlock.strippedsize || 0, // Alias for clarity
-      weight: universalBlock.weight || 0,
-      vsize: sizeMetrics.vsize,
-      witnessSize: sizeMetrics.witnessSize,
-      headerSize: 80, // Bitcoin block header is always 80 bytes
-      transactionsSize: sizeMetrics.transactionsSize,
-
-      // Standard block fields
-      version: universalBlock.version,
-      versionHex: universalBlock.versionHex,
-      merkleroot: universalBlock.merkleroot,
-      time: universalBlock.time,
-      mediantime: universalBlock.mediantime,
-      nonce: universalBlock.nonce,
-      bits: universalBlock.bits,
-      difficulty: universalBlock.difficulty,
-      chainwork: universalBlock.chainwork,
+      // ENHANCED SIZE FIELDS
+      size,
+      strippedsize,
+      sizeWithoutWitnesses: strippedsize, // alias
+      weight,
+      vsize,
+      witnessSize,
+      // headerSize: 80,
+      transactionsSize,
+      version,
+      versionHex,
+      merkleroot,
+      time,
+      nonce,
+      bits,
+      difficulty,
       previousblockhash: universalBlock.previousblockhash,
-      nextblockhash: universalBlock.nextblockhash,
-      tx: transactions,
-      nTx: universalBlock.nTx,
 
-      // Additional fields
-      fee: universalBlock.fee,
-      subsidy: universalBlock.subsidy,
+      // only objects, no hex
+      tx:
+        Array.isArray(universalBlock.tx) && typeof universalBlock.tx[0] !== 'string'
+          ? (universalBlock.tx as UniversalTransaction[]).map((t) => this.normalizeTransaction(t))
+          : undefined,
+
+      nTx: this.optNumber(universalBlock.nTx),
+
+      // ADDITIONAL FIELDS
+      fee: this.optNumber(universalBlock.fee),
+      subsidy: this.optNumber(universalBlock.subsidy),
       miner: universalBlock.miner,
-      pool: universalBlock.pool,
+      pool: universalBlock.pool
+        ? { poolName: universalBlock.pool.poolName ?? '', url: universalBlock.pool.url ?? '' }
+        : undefined,
 
-      // Efficiency metrics
-      blockSizeEfficiency: efficiencyMetrics.blockSizeEfficiency,
-      witnessDataRatio: efficiencyMetrics.witnessDataRatio,
+      // EFFICIENCY METRICS
+      blockSizeEfficiency,
+      witnessDataRatio,
     };
+
+    return out;
   }
 
-  /**
-   * Normalize multiple UniversalBlocks to enhanced Block components
-   */
   public normalizeManyBlocks(universalBlocks: UniversalBlock[]): Block[] {
-    return universalBlocks.map((block) => this.normalizeBlock(block));
+    return universalBlocks.map((b) => this.normalizeBlock(b));
   }
 
+  // =======================
+  // Transactions
+  // =======================
+
   /**
-   * Normalize UniversalTransaction to enhanced Transaction component
+   * REQUIRED by domain Transaction:
+   * - txid, hash
+   * - version, locktime
+   * - size, strippedsize (aka sizeWithoutWitnesses), vsize, weight
+   * - vin[], vout[]
+   *
+   * Notes:
+   * - Accept both `strippedsize` and `strippedSize` from Universal (Hex path may use camel-case).
+   * - `hash` fallback to `txid` if absent in Universal.
+   * - feeRate is computed if fee & vsize present.
    */
   public normalizeTransaction(universalTx: UniversalTransaction): Transaction {
-    // Calculate enhanced size metrics from existing data
-    const sizeMetrics = this.calculateTransactionSizeMetrics(universalTx);
+    if (!universalTx || typeof universalTx !== 'object') {
+      throw new Error('Transaction object is required');
+    }
 
-    // Normalize inputs and outputs
-    const vin = universalTx.vin.map((input) => this.normalizeVin(input));
-    const vout = universalTx.vout.map((output) => this.normalizeVout(output));
+    const txid = (universalTx.txid ?? '').toString();
+    if (!txid) throw new Error('Transaction txid is required');
 
-    // Calculate fee rate if fee is available
-    const feeRate = universalTx.fee && universalTx.vsize ? Math.round(universalTx.fee / universalTx.vsize) : undefined;
+    const version = this.mustNumber(universalTx.version, 'tx.version');
+    const locktime = this.mustNumber(universalTx.locktime, 'tx.locktime');
 
-    return {
-      txid: universalTx.txid,
-      hash: universalTx.hash,
-      version: universalTx.version,
+    const size = this.mustNumber(universalTx.size, 'tx.size');
+    const weight = this.mustNumber(universalTx.weight, 'tx.weight');
+    const vsize = this.mustNumber(universalTx.vsize, 'tx.vsize');
 
-      // Enhanced size fields
-      size: universalTx.size,
-      strippedsize: sizeMetrics.strippedsize,
-      sizeWithoutWitnesses: sizeMetrics.strippedsize, // Alias for clarity
-      vsize: universalTx.vsize,
-      weight: universalTx.weight,
-      witnessSize: sizeMetrics.witnessSize,
+    // Accept both names: strippedsize | strippedSize (from HexTransformer)
+    const strippedsizeSrc = (universalTx as any).strippedsize ?? (universalTx as any).strippedSize;
+    const strippedsize = this.mustNumber(strippedsizeSrc, 'tx.strippedsize');
 
-      locktime: universalTx.locktime,
+    if (!Array.isArray(universalTx.vin)) throw new Error(`Transaction vin is required for txid=${txid}`);
+    if (!Array.isArray(universalTx.vout)) throw new Error(`Transaction vout is required for txid=${txid}`);
+
+    const vin: Vin[] = universalTx.vin as any;
+    const vout: Vout[] = universalTx.vout as any;
+
+    // Optional fee & feeRate
+    const fee = this.optNumber(universalTx.fee);
+    const feeRate = Number.isFinite(fee) && vsize > 0 ? (fee as number) / vsize : undefined;
+
+    const out: Transaction = {
+      txid,
+      hash: (universalTx.hash ?? txid).toString(),
+      version,
+
+      // ENHANCED SIZE FIELDS
+      size,
+      strippedsize,
+      sizeWithoutWitnesses: strippedsize,
+      vsize,
+      weight,
+      witnessSize: this.optNumber((universalTx as any).witnessSize),
+
+      locktime,
       vin,
       vout,
 
-      // Block context
+      // NO hex here (service already decoded)
       blockhash: universalTx.blockhash,
       time: universalTx.time,
       blocktime: universalTx.blocktime,
-
-      // Fee information
-      fee: universalTx.fee,
+      fee,
       feeRate,
-
-      // SegWit and metadata
       wtxid: universalTx.wtxid,
       depends: universalTx.depends,
       spentby: universalTx.spentby,
       bip125_replaceable: universalTx.bip125_replaceable,
     };
+
+    return out;
   }
 
-  /**
-   * Normalize multiple UniversalTransactions to enhanced Transaction components
-   */
   public normalizeManyTransactions(universalTxs: UniversalTransaction[]): Transaction[] {
-    return universalTxs.map((tx) => this.normalizeTransaction(tx));
+    return universalTxs.map((t) => this.normalizeTransaction(t));
   }
 
-  /**
-   * Normalize UniversalBlockStats to enhanced BlockStats component
-   */
-  public normalizeBlockStats(universalStats: UniversalBlockStats): BlockStats {
-    // Calculate witness statistics if available
-    const witnessStats = this.calculateWitnessStatistics(universalStats);
-
-    return {
-      blockhash: universalStats.blockhash,
-      height: universalStats.height,
-
-      // Enhanced size stats
-      total_size: universalStats.total_size,
-      total_stripped_size: universalStats.total_stripped_size,
-      total_witness_size: witnessStats.total_witness_size,
-      total_weight: universalStats.total_weight,
-      total_vsize: witnessStats.total_vsize,
-
-      // Financial stats
-      total_fee: universalStats.total_fee,
-      fee_rate_percentiles: universalStats.fee_rate_percentiles,
-      subsidy: universalStats.subsidy,
-      total_out: universalStats.total_out,
-      utxo_increase: universalStats.utxo_increase,
-      utxo_size_inc: universalStats.utxo_size_inc,
-
-      // Transaction counts
-      ins: universalStats.ins,
-      outs: universalStats.outs,
-      txs: universalStats.txs,
-
-      // Fee statistics
-      minfee: universalStats.minfee,
-      maxfee: universalStats.maxfee,
-      medianfee: universalStats.medianfee,
-      avgfee: universalStats.avgfee,
-      minfeerate: universalStats.minfeerate,
-      maxfeerate: universalStats.maxfeerate,
-      medianfeerate: universalStats.medianfeerate,
-      avgfeerate: universalStats.avgfeerate,
-
-      // Transaction size statistics
-      mintxsize: universalStats.mintxsize,
-      maxtxsize: universalStats.maxtxsize,
-      mediantxsize: universalStats.mediantxsize,
-      avgtxsize: universalStats.avgtxsize,
-
-      // Witness statistics
-      witness_txs: universalStats.witness_txs,
-      witness_ratio: witnessStats.witness_ratio,
-    };
+  private mustTxVsize(t: UniversalTransaction): number {
+    const vs = Number(t.vsize);
+    if (!Number.isFinite(vs)) throw new Error('tx.vsize is required to compute block.transactionsSize');
+    return vs;
   }
 
-  /**
-   * Normalize multiple UniversalBlockStats to enhanced BlockStats components
-   */
-  public normalizeManyBlockStats(universalStats: UniversalBlockStats[]): BlockStats[] {
-    return universalStats.map((stats) => this.normalizeBlockStats(stats));
-  }
+  // =======================
+  // Block stats
+  // =======================
 
   /**
-   * Normalize UniversalVin to Vin component
+   * REQUIRED by domain BlockStats:
+   * - height, blockhash, total_size
+   *
+   * Derived:
+   * - total_witness_size = total_size - total_stripped_size (if both present)
+   * - total_vsize = ceil(total_weight / 4) (if total_weight present)
+   * - witness_ratio = witness_txs / txs (if both present)
    */
-  private normalizeVin(universalVin: any): Vin {
-    return {
-      txid: universalVin.txid,
-      vout: universalVin.vout,
-      scriptSig: universalVin.scriptSig,
-      sequence: universalVin.sequence,
-      coinbase: universalVin.coinbase,
-      txinwitness: universalVin.txinwitness,
-    };
-  }
+  public normalizeBlockStats(u: UniversalBlockStats): BlockStats {
+    if (!u || typeof u !== 'object') throw new Error('BlockStats object is required');
 
-  /**
-   * Normalize UniversalVout to Vout component
-   */
-  private normalizeVout(universalVout: any): Vout {
-    return {
-      value: universalVout.value,
-      n: universalVout.n,
-      scriptPubKey: universalVout.scriptPubKey,
-    };
-  }
+    const height = this.mustNumber(u.height, 'stats.height');
+    const blockhash = (u.blockhash ?? '').toString();
+    if (!blockhash) throw new Error('stats.blockhash is required');
 
-  /**
-   * Calculate enhanced block size metrics from existing Universal block data
-   * No external calculations - only uses data already present in Universal object
-   */
-  private calculateBlockSizeMetrics(block: UniversalBlock): {
-    vsize: number;
-    witnessSize?: number;
-    transactionsSize: number;
-  } {
-    const blockSize = block.size || 0;
-    const strippedSize = block.strippedsize || 0;
-    const weight = block.weight || 0;
+    const total_size = this.mustNumber(u.total_size, 'stats.total_size');
 
-    // Calculate virtual size from weight (BIP 141)
-    const vsize = weight > 0 ? Math.ceil(weight / 4) : strippedSize;
+    const total_stripped_size = this.optNumber(u.total_stripped_size);
+    const total_weight = this.optNumber(u.total_weight);
+    const total_vsize = Number.isFinite(total_weight!) ? Math.ceil((total_weight as number) / 4) : undefined;
 
-    // Calculate witness data size
-    const witnessSize = this.networkConfig.hasSegWit && blockSize > strippedSize ? blockSize - strippedSize : undefined;
+    const total_witness_size = Number.isFinite(total_stripped_size!)
+      ? total_size - (total_stripped_size as number)
+      : undefined;
 
-    // Calculate transactions size (total size minus 80-byte header)
-    const transactionsSize = Math.max(0, blockSize - 80);
+    const txs = this.optNumber(u.txs);
+    const witness_txs = this.optNumber(u.witness_txs);
+    const witness_ratio =
+      Number.isFinite(txs!) && (txs as number) > 0 && Number.isFinite(witness_txs!)
+        ? (witness_txs as number) / (txs as number)
+        : undefined;
 
-    return {
-      vsize,
-      witnessSize,
-      transactionsSize,
-    };
-  }
+    const out: BlockStats = {
+      blockhash,
+      height,
 
-  /**
-   * Calculate block efficiency metrics from existing data
-   */
-  private calculateBlockEfficiencyMetrics(
-    block: UniversalBlock,
-    sizeMetrics: { witnessSize?: number }
-  ): {
-    blockSizeEfficiency?: number;
-    witnessDataRatio?: number;
-  } {
-    const blockSize = block.size || 0;
-    const maxBlockSize = this.networkConfig.maxBlockSize;
-
-    // Calculate block size efficiency as percentage of maximum
-    const blockSizeEfficiency = maxBlockSize > 0 ? (blockSize / maxBlockSize) * 100 : undefined;
-
-    // Calculate witness data ratio
-    const witnessDataRatio =
-      sizeMetrics.witnessSize && blockSize > 0 ? (sizeMetrics.witnessSize / blockSize) * 100 : undefined;
-
-    return {
-      blockSizeEfficiency,
-      witnessDataRatio,
-    };
-  }
-
-  /**
-   * Calculate enhanced transaction size metrics from existing Universal transaction data
-   * Simple calculations based on data already present in Universal object
-   */
-  private calculateTransactionSizeMetrics(tx: UniversalTransaction): {
-    strippedsize: number;
-    witnessSize?: number;
-  } {
-    const txSize = tx.size || 0;
-    const weight = tx.weight || 0;
-
-    // For SegWit transactions, estimate stripped size from weight
-    // Non-witness data has weight factor of 4, witness data has factor of 1
-    // So: weight = (base_size * 4) + witness_size
-    // Rough estimate: base_size ≈ weight / 4
-    let strippedsize = txSize;
-    let witnessSize: number | undefined;
-
-    if (this.networkConfig.hasSegWit && weight > 0) {
-      // Estimate stripped size from weight (this is an approximation)
-      const estimatedBaseSize = Math.floor((weight + 3) / 4); // Round up division
-      strippedsize = Math.min(estimatedBaseSize, txSize);
-
-      // Calculate witness size
-      if (txSize > strippedsize) {
-        witnessSize = txSize - strippedsize;
-      }
-    }
-
-    return {
-      strippedsize,
-      witnessSize,
-    };
-  }
-
-  /**
-   * Calculate witness statistics for block stats from existing data
-   */
-  private calculateWitnessStatistics(stats: UniversalBlockStats): {
-    total_witness_size?: number;
-    total_vsize?: number;
-    witness_ratio?: number;
-  } {
-    const totalSize = stats.total_size || 0;
-    const totalStrippedSize = stats.total_stripped_size;
-    const totalWeight = stats.total_weight;
-    const totalTxs = stats.txs || 0;
-    const witnessTxs = stats.witness_txs;
-
-    // Calculate total witness size
-    const total_witness_size =
-      totalStrippedSize !== undefined && totalSize > totalStrippedSize ? totalSize - totalStrippedSize : undefined;
-
-    // Calculate total virtual size from weight
-    const total_vsize = totalWeight ? Math.ceil(totalWeight / 4) : undefined;
-
-    // Calculate witness transaction ratio
-    const witness_ratio = witnessTxs !== undefined && totalTxs > 0 ? (witnessTxs / totalTxs) * 100 : undefined;
-
-    return {
+      // ENHANCED SIZE STATS
+      total_size,
+      total_stripped_size,
       total_witness_size,
+      total_weight,
       total_vsize,
+
+      total_fee: this.optNumber(u.total_fee),
+      fee_rate_percentiles: Array.isArray(u.fee_rate_percentiles) ? u.fee_rate_percentiles : undefined,
+      subsidy: this.optNumber(u.subsidy),
+      total_out: this.optNumber(u.total_out),
+      utxo_increase: this.optNumber(u.utxo_increase),
+      utxo_size_inc: this.optNumber(u.utxo_size_inc),
+      ins: this.optNumber(u.ins),
+      outs: this.optNumber(u.outs),
+      txs,
+
+      // FEE STATS
+      minfee: this.optNumber(u.minfee),
+      maxfee: this.optNumber(u.maxfee),
+      medianfee: this.optNumber(u.medianfee),
+      avgfee: this.optNumber(u.avgfee),
+      minfeerate: this.optNumber(u.minfeerate),
+      maxfeerate: this.optNumber(u.maxfeerate),
+      medianfeerate: this.optNumber(u.medianfeerate),
+      avgfeerate: this.optNumber(u.avgfeerate),
+
+      // TX SIZE STATS
+      mintxsize: this.optNumber(u.mintxsize),
+      maxtxsize: this.optNumber(u.maxtxsize),
+      mediantxsize: this.optNumber(u.mediantxsize),
+      avgtxsize: this.optNumber(u.avgtxsize),
+
+      // WITNESS STATS
+      witness_txs,
       witness_ratio,
     };
+
+    return out;
+  }
+
+  public normalizeManyBlockStats(list: UniversalBlockStats[]): BlockStats[] {
+    return list.map((s) => this.normalizeBlockStats(s));
+  }
+
+  // =======================
+  // Mempool
+  // =======================
+
+  /**
+   * REQUIRED by domain MempoolInfo:
+   * - loaded, size, bytes, usage, total_fee, maxmempool, mempoolminfee, minrelaytxfee, unbroadcastcount
+   *
+   * No defaults; throw if anything is missing.
+   */
+  public normalizeMempoolInfo(u: UniversalMempoolInfo): MempoolInfo {
+    if (!u || typeof u !== 'object') throw new Error('MempoolInfo object is required');
+
+    const out: MempoolInfo = {
+      loaded: Boolean(u.loaded),
+      size: this.mustNumber(u.size, 'mempool.size'),
+      bytes: this.mustNumber(u.bytes, 'mempool.bytes'),
+      usage: this.mustNumber(u.usage, 'mempool.usage'),
+      total_fee: this.mustNumber(u.total_fee, 'mempool.total_fee'),
+      maxmempool: this.mustNumber(u.maxmempool, 'mempool.maxmempool'),
+      mempoolminfee: this.mustNumber(u.mempoolminfee, 'mempool.mempoolminfee'),
+      minrelaytxfee: this.mustNumber(u.minrelaytxfee, 'mempool.minrelaytxfee'),
+      unbroadcastcount: this.mustNumber(u.unbroadcastcount, 'mempool.unbroadcastcount'),
+    };
+
+    return out;
+  }
+
+  /**
+   * REQUIRED by domain MempoolTxMetadata (all fields except wtxid/unbroadcast optional in domain? No → many required):
+   * - txid, size, vsize, weight, fee, modifiedfee, time, height
+   * - depends[], descendantcount, descendantsize, descendantfees, ancestorcount, ancestorsize, ancestorfees
+   * - fees.{base, modified, ancestor, descendant}, bip125_replaceable
+   *
+   * Throw if anything is missing/invalid.
+   */
+  public normalizeMempoolEntry(u: UniversalMempoolTxMetadata): MempoolTxMetadata {
+    if (!u || typeof u !== 'object') throw new Error('Mempool entry object is required');
+
+    const txid = (u.txid ?? '').toString();
+    if (!txid) throw new Error('Mempool entry txid is required');
+
+    const depends = Array.isArray(u.depends) ? u.depends : [];
+    const fees = u.fees ?? {};
+
+    const out: MempoolTxMetadata = {
+      // Basic
+      txid,
+      wtxid: u.wtxid,
+      vsize: this.mustNumber(u.vsize, 'mempool.vsize'),
+      weight: this.mustNumber(u.weight, 'mempool.weight'),
+      fee: this.mustNumber(u.fee, 'mempool.fee'),
+      modifiedfee: this.mustNumber(u.modifiedfee, 'mempool.modifiedfee'),
+      time: this.mustNumber(u.time, 'mempool.time'),
+      height: this.mustNumber(u.height, 'mempool.height'),
+
+      // Family
+      depends,
+      descendantcount: this.mustNumber(u.descendantcount, 'mempool.descendantcount'),
+      descendantsize: this.mustNumber(u.descendantsize, 'mempool.descendantsize'),
+      descendantfees: this.mustNumber(u.descendantfees, 'mempool.descendantfees'),
+      ancestorcount: this.mustNumber(u.ancestorcount, 'mempool.ancestorcount'),
+      ancestorsize: this.mustNumber(u.ancestorsize, 'mempool.ancestorsize'),
+      ancestorfees: this.mustNumber(u.ancestorfees, 'mempool.ancestorfees'),
+
+      // Fee structure
+      fees: {
+        base: this.mustNumber(fees.base, 'mempool.fees.base'),
+        modified: this.mustNumber(fees.modified, 'mempool.fees.modified'),
+        ancestor: this.mustNumber(fees.ancestor, 'mempool.fees.ancestor'),
+        descendant: this.mustNumber(fees.descendant, 'mempool.fees.descendant'),
+      },
+
+      // Flags
+      bip125_replaceable: Boolean(u.bip125_replaceable),
+
+      // Optional
+      unbroadcast: u.unbroadcast,
+    };
+
+    return out;
+  }
+
+  public normalizeMempoolEntryMap(m: Record<string, UniversalMempoolTxMetadata>): Record<string, MempoolTxMetadata> {
+    const out: Record<string, MempoolTxMetadata> = {};
+    for (const [k, v] of Object.entries(m)) {
+      out[k] = this.normalizeMempoolEntry(v);
+    }
+    return out;
   }
 }

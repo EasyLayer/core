@@ -4,11 +4,13 @@ import { BlocksQueueService } from '../blocks-queue.service';
 import { BlocksQueue } from '../blocks-queue';
 import { BlocksQueueIteratorService } from '../blocks-iterator';
 import { BlocksQueueLoaderService } from '../blocks-loader';
+import { MempoolLoaderService } from '../mempool-loader.service';
 
 describe('BlocksQueueService', () => {
   let service: BlocksQueueService;
   let mockBlocksIterator: jest.Mocked<BlocksQueueIteratorService>;
   let mockBlocksLoader: jest.Mocked<BlocksQueueLoaderService>;
+  let mockMempoolLoader: jest.Mocked<MempoolLoaderService>;
   let mockBlockQueue: jest.Mocked<BlocksQueue<Block>>;
   let config: { maxQueueLength: number; maxBlockHeight: number };
 
@@ -20,6 +22,10 @@ describe('BlocksQueueService', () => {
 
     mockBlocksLoader = {
       startBlocksLoading: jest.fn(),
+    } as any;
+
+    mockMempoolLoader = {
+      refresh: jest.fn(),
     } as any;
 
     // Initialize the mockBlockQueue without directly assigning to read-only properties
@@ -41,15 +47,17 @@ describe('BlocksQueueService', () => {
       providers: [
         { provide: BlocksQueueIteratorService, useValue: mockBlocksIterator },
         { provide: BlocksQueueLoaderService, useValue: mockBlocksLoader },
+        { provide: MempoolLoaderService, useValue: mockMempoolLoader },
         { provide: 'CONFIG', useValue: config },
         {
           provide: BlocksQueueService,
           useFactory: (
             iterator: BlocksQueueIteratorService,
             loader: BlocksQueueLoaderService,
+            mempool: MempoolLoaderService,
             config: any
-          ) => new BlocksQueueService(iterator, loader, config),
-          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, 'CONFIG'],
+          ) => new BlocksQueueService(iterator, loader, mempool, config),
+          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService, 'CONFIG'],
         },
       ],
     }).compile();

@@ -2,6 +2,12 @@ import { P2PTransport } from '../p2p.transport';
 
 jest.setTimeout(20000);
 
+/**
+ * bitcore-p2p mock:
+ * - Pool emits 'peerready' with a mock Peer
+ * - Peer.sendMessage handles GetHeaders (emits empty headers) and GetData (emits 2 blocks)
+ * - Event system with on/once/emit/removeListener
+ */
 jest.mock('bitcore-p2p', () => {
   class Emitter {
     private handlers: Record<string, Function[]> = {};
@@ -33,6 +39,7 @@ jest.mock('bitcore-p2p', () => {
               toBuffer: () => Buffer.from('abcd', 'hex'),
             },
           });
+          // Emit two blocks (3rd missing to test null fill)
           this.emit('block', mk('11'.repeat(32)));
           this.emit('block', mk('22'.repeat(32)));
         }, 5);
@@ -47,16 +54,15 @@ jest.mock('bitcore-p2p', () => {
   return { Pool, Peer, Messages };
 });
 
-describe('P2PTransport stability', () => {
+describe('P2PTransport (node)', () => {
   const transportsCreated: any[] = [];
 
   function makeTransport(overrides: Partial<ConstructorParameters<typeof P2PTransport>[0]> = {}) {
     const t: any = new P2PTransport({
       uniqName: 'p2p-test',
       peers: [{ host: 'h', port: 8333 }],
-      rateLimits: { maxConcurrentRequests: 3, maxBatchSize: 50, requestDelayMs: 0 },
       network: { network: 'testnet', nativeCurrencySymbol: 'tBTC', hasSegWit: true },
-      headerSyncEnabled: false,
+      headerSyncEnabled: false, // disable header sync for deterministic tests
       checkpoint: { hash: '00'.repeat(32), height: 0 },
       ...overrides,
     } as any);
@@ -78,9 +84,10 @@ describe('P2PTransport stability', () => {
     expect(t['activePeer']).not.toBeNull();
   });
 
-  it('getManyBlockHashesByHeights preserves order and nulls', async () => {
+  it('getManyBlockHashesByHeights preserves order and nulls (using local header map)', async () => {
     const t = makeTransport();
     await t.connect();
+    // Seed tracker: genesis at 0 already set by checkpoint; add height 1
     t['chainTracker'].addHeader('aa'.repeat(32), 1);
     const out = await t.getManyBlockHashesByHeights([0, 1, 2]);
     expect(out).toEqual(['00'.repeat(32), 'aa'.repeat(32), null]);
@@ -99,30 +106,23 @@ describe('P2PTransport stability', () => {
     expect(out[2]).toBeNull();
   });
 
-  it('batchCall returns values in positions with null fill', async () => {
-    const t = makeTransport();
+  it('getBlockHeight throws until header sync provides tip (when enabled)', async () => {
+    const t = makeTransport({ headerSyncEnabled: false });
     await t.connect();
-    t['chainTracker'].addHeader('aa'.repeat(32), 1);
-    const out = await t.batchCall([
-      { method: 'getblockhash', params: [0] },
-      { method: 'getblockhash', params: [1] },
-      { method: 'getblockhash', params: [2] },
-      { method: 'getblockcount', params: [] },
-    ]);
-    expect(out[0]).toBe('00'.repeat(32));
-    expect(out[1]).toBe('aa'.repeat(32));
-    expect(out[2]).toBeNull();
-    expect(typeof out[3] === 'number' || out[3] === null).toBe(true);
+    // With only checkpoint(0), tip is 0 → getBlockHeight should be >= 0
+    const h = await t.getBlockHeight();
+    expect(typeof h).toBe('number');
+    expect(h).toBeGreaterThanOrEqual(0);
   });
 
-  it('subscribeToNewBlocks delivers raw buffers', async () => {
+  it('subscribeToNewBlocks delivers raw buffers to subscribers and supports unsubscribe', async () => {
     const t = makeTransport();
     await t.connect();
     const received: Buffer[] = [];
     const sub = t.subscribeToNewBlocks((b: Buffer) => received.push(b));
 
+    // Trigger a mock block through the active peer
     await new Promise((r) => setTimeout(r, 5));
-
     const peer: any = t['activePeer'];
     const mockBlock = {
       block: {

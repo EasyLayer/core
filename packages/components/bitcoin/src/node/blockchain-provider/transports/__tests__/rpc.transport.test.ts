@@ -58,6 +58,7 @@ afterEach(async () => {
 
 /**
  * Dynamic import('zeromq') mock.
+ * We emulate a Subscriber whose async iterator yields ZMQ multipart frames.
  */
 jest.mock(
   'zeromq',
@@ -82,8 +83,11 @@ function makeTransport(
     uniqName: 'rpc-test',
     baseUrl: 'http://user:pass@host',
     responseTimeout: 5000,
+    // Rate limiter lives inside RPC transport — keep config here
     rateLimits: { maxConcurrentRequests: 3, maxBatchSize: 50, requestDelayMs: 0 },
     network: { network: 'testnet', nativeCurrencySymbol: 'tBTC', hasSegWit: true },
+    // Node RPC transport supports ZMQ subscribe in node build
+    zmqEndpoint: 'tcp://example:28332',
     ...overrides,
   } as any);
   transportsCreated.push(t);
@@ -103,28 +107,29 @@ async function waitFor(cond: () => boolean, timeoutMs = 2000, stepMs = 10) {
   }
 }
 
-describe('RPCTransport (isomorphic)', () => {
-  it('batchCall maps responses by id and preserves order with null fill', async () => {
+describe('RPCTransport (node)', () => {
+  it('maps out-of-order JSON-RPC responses by id and preserves order/null via getRawBlocksByHashesVerbose', async () => {
     const a = makeTransport();
+    // Simulate server returning results out-of-order and missing one
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
+      // getblock <hash, verbosity>
       return [
-        { id: calls[2].id, result: 'C', error: null },
-        { id: calls[0].id, result: 'A', error: null },
+        { id: calls[2].id, result: { hash: 'C' }, error: null },
+        { id: calls[0].id, result: { hash: 'A' }, error: null },
+        // calls[1] intentionally missing -> should become null
       ];
     };
-    const out = await a.batchCall([
-      { method: 'm1', params: [] },
-      { method: 'm2', params: [] },
-      { method: 'm3', params: [] },
-    ]);
-    expect(out).toEqual(['A', null, 'C']);
+    const hashes = ['h1', 'h2', 'h3'];
+    const out = await a.getRawBlocksByHashesVerbose(hashes, 1);
+    expect(out).toEqual([{ hash: 'A' }, null, { hash: 'C' }]);
   });
 
-  it('requestHexBlocks returns Buffer (Node/Electron) or buffer-like (browser) and preserves nulls', async () => {
+  it('requestHexBlocks returns Buffer (Node/Electron) and preserves nulls', async () => {
     const a = makeTransport();
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
+      // getblock <hash, 0> returns hex; make index 1 null
       return calls.map((c: any, i: number) =>
         i === 1
           ? { id: c.id, result: null, error: null }
@@ -135,6 +140,7 @@ describe('RPCTransport (isomorphic)', () => {
     const res = await a.requestHexBlocks(hashes);
     expect(res.length).toBe(4);
 
+    // Validate first buffer content equals hex 'abcd'
     const b0 = res[0]!;
     const expected = Buffer.from('abcd', 'hex');
     const a0 = new Uint8Array(b0 as any);
@@ -142,6 +148,7 @@ describe('RPCTransport (isomorphic)', () => {
     expect(a0.length).toBe(aExp.length);
     for (let i = 0; i < a0.length; i++) expect(a0[i]).toBe(aExp[i]);
 
+    // Index 1 must be null
     expect(res[1]).toBeNull();
   });
 
@@ -149,6 +156,7 @@ describe('RPCTransport (isomorphic)', () => {
     const a = makeTransport();
     rpcResponder = (body: string) => {
       const calls = JSON.parse(body);
+      // getblockhash <height> — make third one null
       return calls.map((c: any, i: number) =>
         i === 2
           ? { id: c.id, result: null, error: null }
@@ -159,14 +167,25 @@ describe('RPCTransport (isomorphic)', () => {
     expect(out).toEqual(['hash-0', 'hash-1', null, 'hash-3']);
   });
 
-  // it('subscribeToNewBlocks reads last ZMQ frame and unsubscribe closes stream', async () => {
-  //   const a = makeTransport({ zmqEndpoint: 'tcp://example:28332' });
+  it('getBlockHeight returns number via limiter', async () => {
+    const a = makeTransport();
+    rpcResponder = (_body: string) => [{ id: JSON.parse(_body)[0].id, result: 123456, error: null }];
+    const height = await a.getBlockHeight();
+    expect(typeof height).toBe('number');
+    expect(height).toBe(123456);
+  });
+
+  // it('subscribeToNewBlocks (ZMQ) reads last frame (raw block bytes) and unsubscribe closes stream', async () => {
+  //   const a = makeTransport();
   //   await a.connect();
+
   //   const received: Buffer[] = [];
   //   const sub = a.subscribeToNewBlocks((b: Buffer) => received.push(b));
 
+  //   // Wait until internal ZMQ loop starts (implementation-dependent flag)
   //   await waitFor(() => (a as any)['zmqRunning'] === true, 2000, 10);
 
+  //   // Push multipart frames: topic, sequence, data
   //   queue.push([Buffer.from('rawblock'), Buffer.from('00', 'hex'), Buffer.from('eeff', 'hex')]);
 
   //   await waitFor(() => received.length > 0, 1000, 10);

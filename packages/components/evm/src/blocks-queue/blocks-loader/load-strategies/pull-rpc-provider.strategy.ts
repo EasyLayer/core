@@ -50,17 +50,16 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
       // IMPORTANT: This check is mandatory after preload.
       // We don't want to start downloading receipts if there is no space in the queue
-      if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize * 1)) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        continue;
+      if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize)) {
+        // IMPORTANT: This is essentially the same as the queue being full, so we can return an error to reset the timer.
+        throw new Error('The queue is overloaded, waiting before retry');
+        // await new Promise((resolve) => setTimeout(resolve, 1000));
+        // continue;
       }
 
       if (this._preloadedItemsQueue.length > 0) {
         await this.loadReceiptsAndEnqueueBlocks();
       }
-
-      // Wait 1 second between iterations to avoid overwhelming the system
-      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
 
@@ -289,7 +288,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
-          this.log.error('Exceeded max retries for receipts batch', {
+          this.log.warn('Exceeded max retries for receipts batch', {
             args: { blockCount: blocks.length, error },
           });
           throw error;

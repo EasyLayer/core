@@ -3,6 +3,7 @@ import { Block } from '../blockchain-provider';
 import { BlocksQueue } from './blocks-queue';
 import { BlocksQueueIteratorService } from './blocks-iterator';
 import { BlocksQueueLoaderService } from './blocks-loader';
+import { MempoolLoaderService } from './mempool-loader.service';
 
 @Injectable()
 export class BlocksQueueService {
@@ -12,6 +13,7 @@ export class BlocksQueueService {
   constructor(
     private readonly blocksQueueIterator: BlocksQueueIteratorService,
     private readonly blocksQueueLoader: BlocksQueueLoaderService,
+    private readonly mempoolService: MempoolLoaderService,
     private readonly config: any
   ) {}
 
@@ -48,16 +50,17 @@ export class BlocksQueueService {
   public async reorganizeBlocks(newStartHeight: string | number): Promise<void> {
     this.logger.verbose('Reorganizing blocks', { args: { newStartHeight } });
 
-    // NOTE: We clear the entire queue
-    // because if a reorganization has occurred, this means that all the blocks in the queue
-    // have already gone along the wrong chain
-    await this._queue.reorganize(Number(newStartHeight));
-
-    this.blocksQueueIterator.resolveNextBatch();
-
-    this.logger.verbose('Queue cleared to height', {
-      args: { clearedTo: newStartHeight },
-    });
+    try {
+      // NOTE: We clear the entire queue
+      // because if a reorganization has occurred, this means that all the blocks in the queue
+      // have already gone along the wrong chain
+      await this._queue.reorganize(Number(newStartHeight));
+      await this.mempoolService.refresh(Number(newStartHeight));
+    } catch (error) {
+      this.logger.debug('Queue has NOT been cleared');
+    } finally {
+      this.blocksQueueIterator.resolveNextBatch();
+    }
   }
 
   async confirmProcessedBatch(blockHashes: string[]): Promise<void> {
@@ -65,12 +68,16 @@ export class BlocksQueueService {
       args: { count: blockHashes.length },
     });
 
-    await this._queue.dequeue(blockHashes);
-    this.blocksQueueIterator.resolveNextBatch();
-
-    this.logger.verbose('Batch has been confirmed', {
-      args: { count: blockHashes.length },
-    });
+    try {
+      const lastBlockHeight = await this._queue.dequeue(blockHashes);
+      await this.mempoolService.refresh(lastBlockHeight);
+    } catch (e) {
+      this.logger.debug('Batch has NOT been confirmed', {
+        args: { count: blockHashes.length },
+      });
+    } finally {
+      this.blocksQueueIterator.resolveNextBatch();
+    }
   }
 
   public async getBlocksByHashes(hashes: string[]): Promise<Block[]> {
