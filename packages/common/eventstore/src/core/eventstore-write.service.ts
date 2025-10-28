@@ -130,11 +130,11 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     modelsToSave?: T[];
   }): Promise<void> {
     const ids = modelsToRollback.map((m) => m.aggregateId).filter(Boolean) as string[];
-    if (ids.length === 0) return;
 
-    for (const id of ids) this.eventStoreReadService.cache.del(id);
-
-    await this.adapter.rollbackAggregates(ids, blockHeight);
+    if (ids.length > 0) {
+      for (const id of ids) this.eventStoreReadService.cache.del(id);
+      await this.adapter.rollbackAggregates(ids, blockHeight);
+    }
 
     if (modelsToSave?.length) {
       await this.save(modelsToSave);

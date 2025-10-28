@@ -1,3 +1,12 @@
+## [1.0.4](https://github.com/EasyLayer/core/compare/v1.0.3...v1.0.4) (2025-10-28)
+
+
+### Features
+
+* added helper generators into mempool aggregate; ([67cb0c8](https://github.com/EasyLayer/core/commit/67cb0c82c5d63e939aecc27e327e09458f910ca6))
+
+
+
 ## [1.0.3](https://github.com/EasyLayer/core/compare/v1.0.2...v1.0.3) (2025-10-18)
 
 

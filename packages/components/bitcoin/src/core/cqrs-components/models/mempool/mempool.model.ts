@@ -471,6 +471,30 @@ export class Mempool extends AggregateRoot {
   // Read API (O(1) / O(n) helpers)
   // ====================================================================================
 
+  /** O(n): iterate over known txids from current snapshot fence. */
+  public *txIds(): Iterable<string> {
+    // txIndex.__getMap() stores hash32 -> txid
+    // return only the values (txid)
+    for (const [, txid] of this.txIndex.__getMap()) {
+      yield txid;
+    }
+  }
+
+  /** O(n): iterate over loaded slim transactions. */
+  public *loadedTransactions(): Iterable<LightTransaction> {
+    // txStore.__getMap() stores hash32 -> LightTransaction
+    for (const [, tx] of this.txStore.__getMap()) {
+      yield tx;
+    }
+  }
+
+  /** Async generator over loaded slim tx. */
+  public async *iterLoadedTransactions(): AsyncGenerator<LightTransaction> {
+    for (const [, tx] of this.txStore.__getMap()) {
+      yield tx;
+    }
+  }
+
   public hasTransaction(txid: string): boolean {
     return this.txIndex.hasHash(hashTxid32(txid));
   }
