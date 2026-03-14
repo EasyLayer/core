@@ -12,7 +12,11 @@ import {
 } from '../../core';
 // import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from '../../blockchain-provider/utils';
 import type { NetworkConfig, RateLimits } from '../../core';
-import { RPCTransport as NodeRPC, P2PTransport as NodeP2P } from './transports';
+import {
+  RPCTransport as NodeRPC,
+  P2PTransport as NodeP2P,
+  MempoolSpaceTransport as NodeMempoolSpace,
+} from './transports';
 
 export interface ProviderConnectionConfig {
   /** For RPC: base URL (required), for P2P: not used */
@@ -66,7 +70,7 @@ export interface ProviderConnectionConfig {
 }
 
 export interface ModuleProviderConfig {
-  type: 'rpc' | 'p2p';
+  type: 'rpc' | 'p2p' | 'mempool.space';
   connections: ProviderConnectionConfig[];
 }
 
@@ -118,6 +122,17 @@ export class BlockchainProviderModule {
           if (!c.baseUrl) throw new Error(`RPC connection ${i}: baseUrl required`);
           return new NodeRPC({
             uniqName: c.uniqName ?? `rpc_${i + 1}`,
+            baseUrl: c.baseUrl,
+            responseTimeout: c.responseTimeout,
+            zmqEndpoint: c.zmqEndpoint,
+            network,
+            rateLimits,
+          });
+        }
+        if (cfg.type === 'mempool.space') {
+          if (!c.baseUrl) throw new Error(`Mempool.Space connection ${i}: baseUrl required`);
+          return new NodeMempoolSpace({
+            uniqName: c.uniqName ?? `mempool_space_${i + 1}`,
             baseUrl: c.baseUrl,
             responseTimeout: c.responseTimeout,
             zmqEndpoint: c.zmqEndpoint,

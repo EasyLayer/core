@@ -7,5 +7,5 @@ export interface BlocksLoadingStrategy {
 export enum StrategyNames {
   RPC = 'rpc',
   P2P = 'p2p',
-  // ZMQ = 'zmq',
+  SUBSCRIBE = 'subscribe',
 }

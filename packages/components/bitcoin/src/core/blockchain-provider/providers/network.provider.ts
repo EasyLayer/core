@@ -30,7 +30,7 @@ export class NetworkProvider extends BaseProvider {
       throw new Error('subscribeToNewBlocks is not supported by this transport');
     }
 
-    return (this.transport as any).subscribeToNewBlocks((blockData: Buffer | Uint8Array) => {
+    return this.transport.subscribeToNewBlocks!((blockData: Buffer | Uint8Array) => {
       try {
         // Normalize to Uint8Array without copying when possible
         const u8 =

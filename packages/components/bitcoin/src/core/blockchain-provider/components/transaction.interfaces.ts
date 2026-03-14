@@ -40,7 +40,7 @@ export interface Transaction {
   blockhash?: string;
   time?: number;
   blocktime?: number;
-  fee?: number;
+  fee: number;
   feeRate?: number; // satoshis per vbyte
   wtxid?: string; // SegWit transaction ID
   depends?: string[];

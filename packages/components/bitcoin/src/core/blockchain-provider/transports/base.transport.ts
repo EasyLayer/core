@@ -22,7 +22,7 @@ export abstract class BaseTransport<T extends BaseTransportOptions = BaseTranspo
     this.network = options.network;
   }
 
-  abstract get type(): 'rpc' | 'p2p';
+  abstract get type(): 'rpc' | 'p2p' | 'mempool.space';
   abstract get connectionOptions(): T;
 
   // ===== Connection management =====
