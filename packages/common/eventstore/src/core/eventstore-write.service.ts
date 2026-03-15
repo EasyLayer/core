@@ -20,7 +20,6 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   private retryTimer: ExponentialTimer | null = null;
 
-  // The only wire-related knob on the service level.
   private transportMaxFrameBytes = 1024 * 1024;
 
   private draining: Promise<void> | null = null;

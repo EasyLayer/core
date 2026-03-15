@@ -254,9 +254,7 @@ export class Network extends AggregateRoot {
     }
 
     const blockHeight = lightBlocks[lightBlocks.length - 1]?.height ?? -1;
-    // Event payload size estimation:
-    // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
-    // Total event size: ~9.6MB per blocks batch
+
     this.apply(
       new BitcoinNetworkBlocksAddedEvent(
         {
