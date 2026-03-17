@@ -134,9 +134,12 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
         const ping: Message = { action: Actions.Ping, clientId: this.clientId, timestamp: Date.now() };
         try {
           s.send(JSON.stringify(ping));
-          this.log.verbose('browser-ws ping published');
+          this.log.verbose('WS browser ping sent', { module: 'network-transport' });
         } catch (e: any) {
-          this.log.debug(`browser-ws ping error: ${e?.message ?? e}`);
+          this.log.verbose('WS browser ping send failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: e?.message ?? e },
+          });
         }
       },
       { interval, multiplier, maxInterval }
@@ -160,7 +163,7 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
-          this.log.verbose('browser-ws pong accepted');
+          this.log.verbose('WS browser pong accepted, peer online', { module: 'network-transport' });
         }
         return;
       }

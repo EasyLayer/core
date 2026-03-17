@@ -83,7 +83,7 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     this.opts.child.on('message', this.childMessageHandler);
     this.opts.child.once('exit', () => {
       this.online = false;
-      this.log.warn('IPC parent: child exited');
+      this.log.error('IPC parent: child process exited', { module: 'network-transport' });
     });
     this.startHeartbeat();
   }
@@ -134,12 +134,21 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     try {
       this.opts.child.send?.(msg as any);
       if (typeof msg === 'object') {
-        this.log.verbose(`ipc-parent -> ${msg.action} cid=${(msg as any).correlationId}`);
+        this.log.verbose('IPC parent message sent', {
+          module: 'network-transport',
+          args: { messageAction: msg.action, correlationId: (msg as any).correlationId },
+        });
       } else {
-        this.log.verbose('ipc-parent -> <string>');
+        this.log.verbose('IPC parent message sent', {
+          module: 'network-transport',
+          args: { messageAction: '<string>' },
+        });
       }
     } catch (e: any) {
-      this.log.warn(`IPC parent send error: ${e?.message ?? e}`);
+      this.log.verbose('IPC parent send error', {
+        module: 'network-transport',
+        args: { action: 'send', error: e?.message ?? e },
+      });
     }
   }
 
@@ -192,8 +201,13 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
+          this.log.verbose('IPC parent pong accepted, peer online', {
+            module: 'network-transport',
+          });
         } else {
-          this.log.warn('IPC parent: pong rejected (invalid password)');
+          this.log.verbose('IPC parent pong rejected (invalid password)', {
+            module: 'network-transport',
+          });
         }
         return;
       }
