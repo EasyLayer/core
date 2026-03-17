@@ -17,6 +17,9 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
   async initialize(): Promise<void> {
     const { connected } = await this.ensureConnectedAll();
     if (connected.length === 0) {
+      this.logger.error('Unable to connect to any network providers', {
+        module: this.moduleName,
+      });
       throw new Error('Unable to connect to any providers');
     }
 
@@ -27,7 +30,9 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       if (!healthy) continue;
       await this.ensureP2PInitialized(provider);
       this.activeProviderName = provider.uniqName;
-      this.logger.debug(`Set active P2P provider: ${provider.uniqName}`);
+      this.logger.log(`Active network provider set: ${provider.uniqName} (P2P)`, {
+        module: this.moduleName,
+      });
       return;
     }
 
@@ -37,10 +42,16 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       const healthy = await provider.healthcheck().catch(() => false);
       if (!healthy) continue;
       this.activeProviderName = provider.uniqName;
-      this.logger.debug(`Set active provider: ${provider.uniqName}`);
+      this.logger.log(`Active network provider set: ${provider.uniqName} (RPC)`, {
+        module: this.moduleName,
+      });
       return;
     }
 
+    this.logger.error('No healthy network providers available after connecting all', {
+      module: this.moduleName,
+      args: { connected: connected.map((p) => p.uniqName) },
+    });
     throw new Error('No healthy providers available for node operations');
   }
 
@@ -59,8 +70,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
     this.reconnectionAttempts.delete(name);
     this.activeProviderName = name;
 
-    this.logger.debug(`Manually switched to provider: ${(provider as any)?.constructor?.name}`, {
-      args: { name },
+    this.logger.log(`Manually switched active provider to: ${name}`, {
+      module: this.moduleName,
     });
   }
 
@@ -72,7 +83,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
 
   /* eslint-disable no-empty */
   async handleProviderFailure(providerName: string, error: unknown, methodName: string): Promise<NetworkProvider> {
-    this.logger.warn('Provider operation failed, attempting recovery', {
+    this.logger.debug('Provider operation failed, attempting recovery', {
+      module: this.moduleName,
       args: { providerName, methodName, error: (error as any)?.message ?? 'Unknown error' },
     });
 
@@ -91,7 +103,9 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
             await this.ensureP2PInitialized(failedProvider);
           }
           this.failedProviders.delete(providerName);
-          this.logger.debug(`Recovered provider: ${providerName}`);
+          this.logger.log(`Provider recovered: ${providerName}`, {
+            module: this.moduleName,
+          });
           return failedProvider;
         }
       } catch {}
@@ -117,8 +131,8 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
       this.failedProviders.delete(next.uniqName);
       this.reconnectionAttempts.delete(next.uniqName);
 
-      this.logger.debug('Successfully switched to backup provider', {
-        args: { oldProvider: old, newProvider: this.activeProviderName },
+      this.logger.log(`Switched to backup provider: ${old} → ${this.activeProviderName}`, {
+        module: this.moduleName,
       });
 
       return next;

@@ -32,9 +32,16 @@ function firstFulfilled<T>(promises: Promise<T>[]): Promise<T> {
 export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvider> {
   private currentProviderIndex = 0;
 
+  /**
+   * Called once at startup — throw is correct here.
+   * If no providers connect, the system cannot function at all.
+   */
   async initialize(): Promise<void> {
     const { connected } = await this.ensureConnectedAll();
     if (connected.length === 0) {
+      this.logger.error('Unable to connect to any mempool providers', {
+        module: this.moduleName,
+      });
       throw new Error('Unable to connect to any mempool providers');
     }
     this.logger.log(`Mempool connected providers: ${connected.map((p) => p.uniqName).join(', ')}`);
@@ -49,6 +56,10 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     return result;
   }
 
+  /**
+   * Runtime entry point — returns null on any failure instead of throwing.
+   * Caller receives null and decides what to do (retry, skip, etc.).
+   */
   async executeWithStrategy<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
     options: MempoolRequestOptions = {}
@@ -70,21 +81,14 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
 
   private async executeSingle<T>(
     operation: (provider: MempoolProvider) => Promise<T>,
-    providerName?: string
+    providerName: string = ''
   ): Promise<T> {
-    if (!providerName) throw new Error('Provider name is required for single strategy');
     const provider = await this.getProviderByName(providerName);
-    try {
-      return await operation(provider);
-    } catch (error) {
-      throw new Error(`Provider ${provider.uniqName} failed: ${(error as any)?.message ?? error}`);
-    }
+    return await operation(provider);
   }
 
   private async executeParallel<T>(operation: (provider: MempoolProvider) => Promise<T>, timeout: number): Promise<T> {
     const healthy = await this.getHealthyProviders();
-    if (healthy.length === 0) throw new Error('No healthy providers available for parallel execution');
-
     const tasks = healthy.map((provider) =>
       Promise.race([
         operation(provider),
@@ -92,11 +96,7 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
       ])
     );
 
-    try {
-      return await firstFulfilled(tasks);
-    } catch {
-      throw new Error('All parallel operations failed');
-    }
+    return await firstFulfilled(tasks);
   }
 
   private async executeFastest<T>(operation: (provider: MempoolProvider) => Promise<T>, timeout: number): Promise<T> {
@@ -105,16 +105,21 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
 
   private async executeRoundRobin<T>(operation: (provider: MempoolProvider) => Promise<T>): Promise<T> {
     const healthy = await this.getHealthyProviders();
-    if (healthy.length === 0) throw new Error('No healthy providers available for round-robin execution');
 
     const first = healthy[this.currentProviderIndex % healthy.length]!;
     this.currentProviderIndex = (this.currentProviderIndex + 1) % healthy.length;
 
     try {
       return await operation(first);
-    } catch {
+    } catch (firstError) {
+      this.logger.debug(`Mempool provider "${first.uniqName}" failed in round-robin, trying next`, {
+        module: this.moduleName,
+        args: { error: (firstError as any)?.message },
+      });
+
       const second = healthy[this.currentProviderIndex % healthy.length]!;
       this.currentProviderIndex = (this.currentProviderIndex + 1) % healthy.length;
+
       return await operation(second);
     }
   }
@@ -125,7 +130,12 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
   ): Promise<Array<{ providerName: string; value: T }>> {
     const { timeout = 30000 } = options;
     const healthy = await this.getHealthyProviders();
-    if (healthy.length === 0) throw new Error('No healthy providers available for multiple execution');
+    if (healthy.length === 0) {
+      this.logger.error('No healthy mempool providers available for multiple execution', {
+        module: this.moduleName,
+      });
+      return [];
+    }
 
     const results = await Promise.allSettled(
       healthy.map(async (provider) => {
@@ -136,8 +146,9 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
           ]);
           return { ok: true as const, providerName: provider.uniqName, value: value as T };
         } catch (e) {
-          this.logger.warn('Provider operation failed in multiple execution', {
-            args: { providerName: provider.uniqName, error: (e as any)?.message },
+          this.logger.debug(`Mempool provider "${provider.uniqName}" failed in multiple execution`, {
+            module: this.moduleName,
+            args: { error: (e as any)?.message },
           });
           return { ok: false as const, providerName: provider.uniqName };
         }
@@ -150,13 +161,19 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
         out.push({ providerName: r.value.providerName, value: r.value.value as T });
       }
     }
-    if (out.length === 0) throw new Error('All providers failed in multiple execution');
+
+    if (out.length === 0) {
+      this.logger.error('All mempool providers failed in multiple execution', {
+        module: this.moduleName,
+        args: { providers: healthy.map((p) => p.uniqName) },
+      });
+    }
+
     return out;
   }
 
   getProviderStats(): { total: number; healthy: number; failed: number } {
     const total = this.providers.size;
-    // No global failed tracking here; health is dynamic per-request
     return { total, healthy: total, failed: 0 };
   }
 }

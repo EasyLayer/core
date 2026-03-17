@@ -22,12 +22,13 @@ import type { BlocksQueue } from '../../blocks-queue';
  */
 export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.SUBSCRIBE;
+  private readonly moduleName = 'blocks-queue';
 
   // Active subscription promise with .unsubscribe() or undefined when not subscribed
   private _subscription?: Promise<void> & { unsubscribe: () => void };
 
   constructor(
-    private readonly log: Logger,
+    private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     _config?: unknown // no BTC-specific knobs required here; kept for symmetry
@@ -36,8 +37,11 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
   /**
    * Main entrypoint:
    * - If not subscribed, performs initial catch-up to `currentNetworkHeight`.
-   * - Subscribes to provider's new-block stream.
+   * - Subscribes to provider's new-block stream via ZMQ/RPC.
    * - Enqueues incoming blocks until stopped or an error/backpressure occurs.
+   *
+   * All errors (transport, block processing, setup) are logged here.
+   * `subscribeToNewBlocks` only propagates errors — it does not log them.
    *
    * Contract:
    * - Resolves when subscription is gracefully stopped (via `stop()` or provider completion).
@@ -46,17 +50,24 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
   async load(currentNetworkHeight: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       if (this._subscription) {
-        this.log.debug('BTC subscribe strategy: already subscribed; skipping re-subscribe');
         resolve();
         return;
       }
 
+      this.logger.verbose('Subscribe strategy starting', {
+        module: this.moduleName,
+      });
+
       (async () => {
+        // Track whether we settled via error to avoid misleading "graceful" log
+        let settledWithError = false;
+
         try {
           // 1) Initial one-shot catch-up to the provided network tip
           await this.performInitialCatchup(currentNetworkHeight);
 
-          // 2) Start streaming subscription of normalized full blocks
+          // 2) Start streaming subscription of normalized full blocks.
+          //    All errors from subscribeToNewBlocks surface via onError callback.
           this._subscription = this.blockchainProvider.subscribeToNewBlocks(
             async (block: Block) => {
               try {
@@ -66,49 +77,69 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
                   return;
                 }
 
-                // IMPORTANT: we don't need to check currentNetworkHeight here
-                // because we subscribe on new blocks
-
-                // Backpressure: if queue is full, tear down subscription so supervisor can retry later
+                // Backpressure: queue is full → tear down so supervisor can retry later
                 if (this.queue.isQueueFull) {
+                  settledWithError = true;
                   this._subscription?.unsubscribe();
-                  reject(new Error('The queue is full'));
+                  reject(new Error('Blocks queue is full'));
                   return;
                 }
 
                 await this.enqueueBlock(block);
-              } catch (err) {
-                // Any processing error should tear down subscription and bubble up
+              } catch (error) {
+                // Any block-processing error → tear down and bubble up for supervised restart
+                this.logger.debug('Block processing error', {
+                  module: this.moduleName,
+                  args: { action: 'load', error },
+                });
+                settledWithError = true;
                 this._subscription?.unsubscribe();
-                reject(err as Error);
+                reject(error);
               }
             },
-            (transportError) => {
-              // Transport failures (ZMQ/P2P disconnects, etc.) → bubble up for supervised restart
-              this.log.warn('BTC subscription transport error', {
-                args: { error: transportError },
-                methodName: 'load',
+            (subscriptionError) => {
+              // Single entry point for all errors propagated from subscribeToNewBlocks:
+              // transport failures (ZMQ/P2P disconnects), provider capability errors, etc.
+              this.logger.debug('Subscription error', {
+                module: this.moduleName,
+                args: { action: 'load', error: subscriptionError },
               });
+              settledWithError = true;
               try {
                 this._subscription?.unsubscribe();
               } catch {
-                // ignore
+                // ignore cleanup errors
               }
-              reject(transportError);
+              reject(subscriptionError);
             }
           );
 
-          this.log.debug('BTC subscription started; waiting for new blocks');
+          this.logger.debug('Waiting for new blocks', {
+            module: this.moduleName,
+          });
 
-          // Wait until `unsubscribe()` is called or stream naturally completes
+          // Wait until `unsubscribe()` is called or stream naturally completes.
+          // If subscribeToNewBlocks rejects (transport error), this throws and
+          // falls into the catch below — but reject() was already called via
+          // onError above, so the second reject() is a safe no-op.
           await this._subscription;
 
-          this.log.debug('BTC subscription completed gracefully');
-          resolve();
+          if (!settledWithError) {
+            this.logger.verbose('Subscription completed gracefully', {
+              module: this.moduleName,
+            });
+            resolve();
+          }
         } catch (setupError) {
-          reject(setupError as Error);
+          // Covers: performInitialCatchup failure, subscribeToNewBlocks setup rejection,
+          // or the awaited subscription promise rejection surfacing here
+          this.logger.verbose('Subscribe strategy: setup/await error', {
+            module: this.moduleName,
+            args: { action: 'load', error: setupError },
+          });
+          reject(setupError);
         } finally {
-          // Always ensure resources are released
+          // Always ensure resources are released regardless of exit path
           this.cleanup();
         }
       })();
@@ -120,20 +151,26 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
    * This triggers the `load()` promise to resolve.
    */
   public async stop(): Promise<void> {
-    this.log.debug('Stopping BTC subscription strategy');
-
     if (!this._subscription) {
-      this.log.debug('No active BTC subscription to stop');
+      this.logger.verbose('No active BTC subscription to stop', {
+        module: this.moduleName,
+      });
       return;
     }
 
+    this.logger.debug('Stopping BTC subscription strategy', {
+      module: this.moduleName,
+    });
+
     try {
       this._subscription.unsubscribe();
-      this.log.debug('Unsubscribed from BTC new blocks');
+      this.logger.verbose('Unsubscribed from BTC new blocks', {
+        module: this.moduleName,
+      });
     } catch (e) {
-      this.log.debug('Error while unsubscribing BTC', {
-        args: { error: e },
-        methodName: 'stop',
+      this.logger.verbose('Error while unsubscribing BTC', {
+        module: this.moduleName,
+        args: { action: 'stop', error: e },
       });
     } finally {
       this._subscription = undefined;
@@ -159,9 +196,9 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
 
     const count = toH - fromH + 1;
 
-    this.log.debug('BTC initial catch-up: requesting blocks', {
+    this.logger.verbose('BTC initial catch-up: requesting blocks', {
+      module: this.moduleName,
       args: { from: fromH, to: toH, blocksCount: count },
-      methodName: 'performInitialCatchup',
     });
 
     const heights: number[] = [];
@@ -176,9 +213,9 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
 
     await this.enqueueBlocks(blocks);
 
-    this.log.debug('BTC initial catch-up completed', {
+    this.logger.verbose('BTC initial catch-up completed', {
+      module: this.moduleName,
       args: { blocksProcessed: blocks.length },
-      methodName: 'performInitialCatchup',
     });
   }
 
@@ -191,9 +228,9 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
   private async enqueueBlock(block: Block): Promise<void> {
     if (block.height <= this.queue.lastHeight) {
       // May happen during reorgs or when the provider briefly replays tips
-      this.log.debug('Skipping BTC block with height ≤ lastHeight', {
+      this.logger.verbose('Skipping BTC block with height ≤ lastHeight', {
+        module: this.moduleName,
         args: { blockHeight: block.height, lastHeight: this.queue.lastHeight },
-        methodName: 'enqueueBlock',
       });
       return;
     }
@@ -222,16 +259,19 @@ export class SubscribeBitcoinProviderStrategy implements BlocksLoadingStrategy {
       try {
         if (typeof this._subscription.unsubscribe === 'function') {
           this._subscription.unsubscribe();
-          this.log.debug('Successfully unsubscribed from BTC block stream');
+          this.logger.verbose('Successfully unsubscribed from BTC block stream', {
+            module: this.moduleName,
+          });
         }
       } catch (unsubscribeError) {
-        this.log.debug('Failed to unsubscribe from BTC block stream', {
-          args: { error: unsubscribeError },
-          methodName: 'cleanup',
+        this.logger.verbose('Failed to unsubscribe from BTC block stream', {
+          args: { action: 'cleanup', error: unsubscribeError },
         });
       }
     }
     this._subscription = undefined;
-    this.log.debug('BTC subscription cleanup completed');
+    this.logger.verbose('BTC subscription cleanup completed', {
+      module: this.moduleName,
+    });
   }
 }

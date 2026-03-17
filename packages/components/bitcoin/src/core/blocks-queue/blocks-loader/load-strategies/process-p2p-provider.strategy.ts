@@ -6,19 +6,20 @@ import type { BlocksQueue } from '../../blocks-queue';
 
 export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.P2P;
+  private readonly moduleName = 'blocks-queue';
 
   // Hold the active subscription (Promise<void> & { unsubscribe(): void }) or undefined
   private _subscription?: Promise<void> & { unsubscribe: () => void };
 
   /**
    * Creates an instance of ProcessP2PProviderStrategy.
-   * @param log - The application logger.
+   * @param logger - The application logger.
    * @param blockchainProvider - The blockchain provider service.
    * @param queue - The blocks queue.
    * @param config - Configuration object (no special config needed for P2P).
    */
   constructor(
-    private readonly log: Logger,
+    private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: any
@@ -27,66 +28,111 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
   }
 
   /**
-   * Starts the blocks loading process with initial catch-up and subscription setup.
+   * Main entrypoint:
+   * - If not subscribed, performs initial catch-up to `currentNetworkHeight`.
+   * - Subscribes to provider's new-block stream via P2P.
+   * - Enqueues incoming blocks until stopped or an error/backpressure occurs.
    *
-   * This method:
-   * 1. Performs initial catch-up to sync with current network height
-   * 2. Sets up P2P subscription to new blocks
-   * 3. Handles incoming blocks with termination condition checks
-   * 4. Returns a Promise that resolves only when stopped or rejects on errors
+   * All errors (transport, block processing, setup) are logged here.
+   * `subscribeToNewBlocks` only propagates errors — it does not log them.
    *
-   * @param currentNetworkHeight - The current network block height to catch up to
-   * @throws {Error} When subscription fails, queue is full, or critical errors occur
-   * @returns {Promise<void>} Resolves when subscription is stopped, rejects on errors for restart
+   * Contract:
+   * - Resolves when subscription is gracefully stopped (via `stop()` or provider completion).
+   * - Rejects on errors so the supervisor can restart the strategy with delay/jitter.
    */
   public async load(currentNetworkHeight: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       if (this._subscription) {
-        this.log.verbose('Already subscribed to new blocks via P2P');
         resolve();
         return;
       }
 
-      // Use async IIFE to handle async operations inside Promise
+      this.logger.verbose('P2P strategy starting', {
+        module: this.moduleName,
+      });
+
       (async () => {
+        // Track whether we settled via error to avoid misleading "graceful" log
+        let settledWithError = false;
+
         try {
-          // First perform catch-up to current network height
+          // 1) Initial one-shot catch-up to the provided network tip
           await this.performInitialCatchup(currentNetworkHeight);
 
-          // Create subscription to new blocks via P2P
-          this._subscription = this.blockchainProvider.subscribeToNewBlocks(async (block) => {
-            try {
-              if (this.queue.isMaxHeightReached) {
-                // Don't unsubscribe automatically, just skip processing
-                return;
-              }
+          // 2) Start streaming subscription of normalized full blocks.
+          //    All errors from subscribeToNewBlocks surface via onError callback.
+          this._subscription = this.blockchainProvider.subscribeToNewBlocks(
+            async (block) => {
+              try {
+                // Stop condition: upper height limit reached (external policy)
+                if (this.queue.isMaxHeightReached) {
+                  // Do not reject: just ignore future blocks (soft stop via supervisor)
+                  return;
+                }
 
-              // Check if the queue is full
-              if (this.queue.isQueueFull) {
+                // Backpressure: queue is full → tear down so supervisor can retry later
+                if (this.queue.isQueueFull) {
+                  settledWithError = true;
+                  this._subscription?.unsubscribe();
+                  reject(new Error('The queue is full'));
+                  return;
+                }
+
+                await this.enqueueBlock(block);
+              } catch (error) {
+                // Any block-processing error → tear down and bubble up for supervised restart
+                this.logger.debug('P2P strategy: block processing error', {
+                  module: this.moduleName,
+                  args: { action: 'load', error },
+                });
+                settledWithError = true;
                 this._subscription?.unsubscribe();
-                reject(new Error('The queue is full'));
-                return;
+                reject(error);
               }
-
-              // Enqueue the new block
-              await this.enqueueBlock(block);
-            } catch (error) {
-              this._subscription?.unsubscribe();
-              reject(error);
+            },
+            (subscriptionError) => {
+              // Single entry point for all errors propagated from subscribeToNewBlocks:
+              // transport failures (P2P disconnects), provider capability errors, etc.
+              this.logger.debug('P2P strategy: subscription error', {
+                module: this.moduleName,
+                args: { action: 'load', error: subscriptionError },
+              });
+              settledWithError = true;
+              try {
+                this._subscription?.unsubscribe();
+              } catch {
+                // ignore cleanup errors
+              }
+              reject(subscriptionError);
             }
+          );
+
+          this.logger.debug('Waiting for new blocks', {
+            module: this.moduleName,
           });
 
-          this.log.verbose('P2P subscription created, waiting for new blocks');
-
-          // Wait for the subscription to complete (will hang until unsubscribed, error, or termination condition)
+          // Wait until `unsubscribe()` is called or stream naturally completes.
+          // If subscribeToNewBlocks rejects (transport error), this throws and
+          // falls into the catch below — but reject() was already called via
+          // onError above, so the second reject() is a safe no-op.
           await this._subscription;
 
-          this.log.verbose('P2P subscription completed successfully');
-          resolve();
+          if (!settledWithError) {
+            this.logger.verbose('P2P subscription completed successfully', {
+              module: this.moduleName,
+            });
+            resolve();
+          }
         } catch (setupError) {
+          // Covers: performInitialCatchup failure, subscribeToNewBlocks setup rejection,
+          // or the awaited subscription promise rejection surfacing here
+          this.logger.verbose('P2P strategy: setup/await error', {
+            module: this.moduleName,
+            args: { action: 'load', error: setupError },
+          });
           reject(setupError);
         } finally {
-          // Always clean up subscription resources
+          // Always ensure resources are released regardless of exit path
           this.cleanup();
         }
       })();
@@ -100,18 +146,18 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
    * @returns {Promise<void>} Resolves when cleanup is complete
    */
   public async stop(): Promise<void> {
-    this.log.verbose('Stopping P2P subscription strategy');
+    this.logger.verbose('Stopping P2P subscription strategy');
 
     if (!this._subscription) {
-      this.log.verbose('No active P2P subscription to stop');
+      this.logger.verbose('No active P2P subscription to stop');
       return;
     }
 
     try {
       this._subscription.unsubscribe();
-      this.log.verbose('Unsubscribed from P2P new blocks');
+      this.logger.verbose('Unsubscribed from P2P new blocks');
     } catch (error) {
-      this.log.verbose('Error while unsubscribing from P2P', {
+      this.logger.verbose('Error while unsubscribing from P2P', {
         args: { error },
         methodName: 'stop',
       });
@@ -130,10 +176,10 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
       try {
         if (typeof this._subscription.unsubscribe === 'function') {
           this._subscription.unsubscribe();
-          this.log.verbose('Successfully unsubscribed from P2P block subscription');
+          this.logger.verbose('Successfully unsubscribed from P2P block subscription');
         }
       } catch (unsubscribeError) {
-        this.log.verbose('Failed to unsubscribe from P2P block subscription', {
+        this.logger.verbose('Failed to unsubscribe from P2P block subscription', {
           args: { error: unsubscribeError },
           methodName: 'cleanup',
         });
@@ -142,7 +188,7 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
 
     // Clear the subscription reference
     this._subscription = undefined;
-    this.log.verbose('P2P load method cleanup completed');
+    this.logger.verbose('P2P load method cleanup completed');
   }
 
   /**
@@ -157,7 +203,7 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
   private async performInitialCatchup(targetHeight: number): Promise<void> {
     const queueHeight = this.queue.lastHeight;
 
-    this.log.verbose('Performing P2P initial catch-up', {
+    this.logger.verbose('Performing P2P initial catch-up', {
       args: {
         from: queueHeight + 1,
         to: targetHeight,
@@ -183,7 +229,7 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
     // Enqueue blocks in correct order
     await this.enqueueBlocks(blocks);
 
-    this.log.verbose('P2P initial catch-up completed successfully', {
+    this.logger.verbose('P2P initial catch-up completed successfully', {
       args: { blocksProcessed: blocks.length },
     });
   }
@@ -194,7 +240,7 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
   private async enqueueBlock(block: Block): Promise<void> {
     if (block.height <= this.queue.lastHeight) {
       // Skip blocks with height less than or equal to lastHeight
-      this.log.verbose('Skipping block with height less than or equal to lastHeight in P2P subscription', {
+      this.logger.verbose('Skipping block with height less than or equal to lastHeight in P2P subscription', {
         args: {
           blockHeight: block.height,
           lastHeight: this.queue.lastHeight,
@@ -225,7 +271,7 @@ export class ProcessP2PProviderStrategy implements BlocksLoadingStrategy {
       if (block) {
         if (block.height <= this.queue.lastHeight) {
           // Skip blocks with height less than or equal to lastHeight
-          this.log.verbose('Skipping block with height less than or equal to lastHeight in P2P catchup', {
+          this.logger.verbose('Skipping block with height less than or equal to lastHeight in P2P catchup', {
             args: {
               blockHeight: block.height,
               lastHeight: this.queue.lastHeight,

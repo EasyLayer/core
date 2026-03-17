@@ -197,6 +197,7 @@ export class Mempool extends AggregateRoot {
     );
 
     logger.log('Mempool successfully initialized', {
+      module: 'mempool-model',
       args: {
         lastHeight: height,
       },
@@ -247,7 +248,7 @@ export class Mempool extends AggregateRoot {
         { aggregatedMetadata: filtered }
       )
     );
-    logger.log('Mempool refreshed.');
+    logger.log('Mempool refreshed', { module: 'mempool-model' });
   }
 
   /**
@@ -310,7 +311,8 @@ export class Mempool extends AggregateRoot {
         )
       );
 
-      logger.log('Mempool synced.', {
+      logger.log('Mempool synced', {
+        module: 'mempool-model',
         args: { mempool: this.getMemoryUsage() },
       });
 
@@ -353,7 +355,8 @@ export class Mempool extends AggregateRoot {
             loadedForEvent.push({ txid: slim.txid, transaction: slim, providerName });
           }
         } catch (e: unknown) {
-          logger.debug('sync provider failed', {
+          logger.debug('Mempool provider sync failed', {
+            module: 'mempool-model',
             args: { providerName, error: (e as Error)?.message ?? String(e) },
           });
         } finally {

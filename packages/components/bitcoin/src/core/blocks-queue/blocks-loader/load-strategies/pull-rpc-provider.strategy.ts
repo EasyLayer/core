@@ -17,6 +17,7 @@ interface BlockInfo {
  */
 export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.RPC;
+  private readonly moduleName = 'blocks-queue';
 
   // Budget of expected RPC reply bytes (not raw block bytes)
   private _maxRpcReplyBytes: number = 10 * 1024 * 1024;
@@ -28,14 +29,14 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
   /**
    * Creates an instance of PullNetworkProviderStrategy.
-   * @param log - The application logger.
+   * @param logger - The application logger.
    * @param blockchainProvider - The blockchain provider service.
    * @param queue - The blocks queue.
    * @param config - Configuration object.
    *
    */
   constructor(
-    private readonly log: Logger,
+    private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly queue: BlocksQueue<Block>,
     config: {
@@ -67,6 +68,11 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       // We only upload new hashes if we've already used them all.
       if (this._preloadedItemsQueue.length === 0) {
         await this.preloadBlocksInfo(currentNetworkHeight);
+
+        this.logger.debug('Preloaded block infos for RPC strategy', {
+          module: this.moduleName,
+          args: { preloadedBlocks: this._preloadedItemsQueue.length },
+        });
       }
 
       // IMPORTANT: This check is mandatory after preload.
@@ -118,6 +124,8 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
    * @returns A promise that resolves once all stats have been enqueued.
    */
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
+    const previousMaxPreloadCount = this._maxPreloadCount;
+
     // Dynamic adjustment based on timing comparison with previous loadAndEnqueue
     if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
       const timingRatio = this._lastLoadAndEnqueueDuration / this._previousLoadAndEnqueueDuration;
@@ -128,6 +136,18 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
         // Current loadAndEnqueue was significantly faster - can reduce preload buffer
         this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
       }
+    }
+
+    if (this._maxPreloadCount !== previousMaxPreloadCount) {
+      this.logger.verbose('Adjusted RPC preload count based on previous load duration', {
+        module: this.moduleName,
+        args: {
+          previousMaxPreloadCount,
+          nextMaxPreloadCount: this._maxPreloadCount,
+          previousLoadAndEnqueueDuration: this._previousLoadAndEnqueueDuration,
+          lastLoadAndEnqueueDuration: this._lastLoadAndEnqueueDuration,
+        },
+      });
     }
 
     const lastHeight = this.queue.lastHeight;
@@ -211,6 +231,15 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     const batches: Block[][] = await Promise.all(activeTasks);
     const blocks: Block[] = batches.flat();
 
+    this.logger.debug('Loaded RPC block batches', {
+      module: this.moduleName,
+      args: {
+        taskCount: activeTasks.length,
+        totalBlocks: blocks.length,
+        totalInfosPulled,
+      },
+    });
+
     await this.enqueueBlocks(blocks);
 
     // Release large arrays ASAP to help GC
@@ -243,9 +272,9 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
-          this.log.verbose('Exceeded max retries for fetching blocks batch.', {
-            methodName: 'loadBlocks',
-            args: { batchLength: infos.length },
+          this.logger.verbose('Exceeded max retries for fetching blocks batch.', {
+            module: this.moduleName,
+            args: { batchLength: infos.length, error, action: 'loadBlocks' },
           });
           throw error;
         }
@@ -268,7 +297,8 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
       if (block.height <= this.queue.lastHeight) {
         // Skip old blocks quietly
-        this.log.verbose('Skipping block with height less than or equal to lastHeight', {
+        this.logger.verbose('Skipping block with height less than or equal to lastHeight', {
+          module: this.moduleName,
           args: { blockHeight: block.height, lastHeight: this.queue.lastHeight },
         });
         continue;

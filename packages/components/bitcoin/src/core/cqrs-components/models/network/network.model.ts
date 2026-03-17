@@ -215,6 +215,7 @@ export class Network extends AggregateRoot {
     );
 
     logger.log('Network successfully initialized', {
+      module: 'network-model',
       args: {
         lastIndexedHeight: startHeight,
         nextBlockToProcess: startHeight + 1,
@@ -267,6 +268,7 @@ export class Network extends AggregateRoot {
     );
 
     logger.log('Blocks successfully added', {
+      module: 'network-model',
       args: { blockHeight },
     });
   }
@@ -322,7 +324,10 @@ export class Network extends AggregateRoot {
           )
         );
 
-        logger.log('Blocks successfully reorganized', { args: { blockHeight: reorgHeight } });
+        logger.log('Blocks successfully reorganized', {
+          module: 'network-model',
+          args: { blockHeight: reorgHeight },
+        });
 
         return;
       }

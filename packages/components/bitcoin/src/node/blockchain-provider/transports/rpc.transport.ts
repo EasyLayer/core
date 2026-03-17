@@ -41,6 +41,7 @@ const isNodeLike =
 export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   readonly type = 'rpc' as const;
   private baseUrl: string;
+  private displayUrl: string; // URL without credentials, safe for logging
   private headers: Record<string, string>;
   private responseTimeout: number;
   private zmqEndpoint?: string;
@@ -70,6 +71,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     url.username = '';
     url.password = '';
     this.baseUrl = url.toString();
+    this.displayUrl = this.baseUrl; // already stripped credentials
 
     // Setup headers with basic auth if needed
     this.headers = { 'Content-Type': 'application/json' };
@@ -108,7 +110,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     return this.executeWithErrorHandling(async () => {
       // Verify RPC connectivity
       const healthy = await this.healthcheck();
-      if (!healthy) throw new Error('RPC node is not responding');
+      if (!healthy) throw new Error(`RPC node is not responding at ${this.displayUrl}`);
 
       // Initialize ZMQ if configured
       if (isNodeLike && this.zmqEndpoint) {
@@ -298,8 +300,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   }
 
   /**
-   * Execute JSON-RPC 2.0 batch call
-   * Preserves order through ID matching
+   * Execute JSON-RPC 2.0 batch call.
+   * Preserves order through ID matching.
+   *
+   * Throws on connection-level failures (network error, timeout, non-OK HTTP).
+   * Returns null per-item only for item-level RPC errors (unknown txid, etc.).
    */
   private async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
     if (calls.length === 0) return [];
@@ -312,49 +317,52 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       params: call.params,
     }));
 
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.responseTimeout);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.responseTimeout);
 
-      const response = await fetch(this.baseUrl, {
+    let response: Response;
+    try {
+      response = await fetch(this.baseUrl, {
         method: 'POST',
         headers: this.headers,
         body: JSON.stringify(batch),
         signal: controller.signal,
       });
-
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        // Network error - return nulls for all requests
-        return new Array(calls.length).fill(null);
-      }
-
-      const results = await response.json();
-
-      // Handle single response (non-batch)
-      if (!Array.isArray(results)) {
-        return [results.error ? null : results.result ?? null];
-      }
-
-      // Map responses by ID
-      const responseMap = new Map<number, any>();
-      for (const res of results) {
-        if (typeof res.id === 'number') {
-          responseMap.set(res.id, res);
-        }
-      }
-
-      // Map back to original order
-      return batch.map((req) => {
-        const res = responseMap.get(req.id);
-        if (!res || res.error) return null;
-        return res.result ?? null;
-      });
     } catch (error) {
-      // Request failed - return nulls
-      return new Array(calls.length).fill(null);
+      // Network-level failure: connection refused, DNS, abort (timeout), etc.
+      const cause = (error as Error).message ?? String(error);
+      throw new Error(`RPC connection failed for provider "${this.uniqName}" at ${this.displayUrl}: ${cause}`);
+    } finally {
+      clearTimeout(timer);
     }
+
+    if (!response.ok) {
+      throw new Error(
+        `RPC HTTP error for provider "${this.uniqName}" at ${this.displayUrl}: ${response.status} ${response.statusText}`
+      );
+    }
+
+    const results = await response.json();
+
+    // Handle single response (non-batch)
+    if (!Array.isArray(results)) {
+      return [results.error ? null : results.result ?? null];
+    }
+
+    // Map responses by ID
+    const responseMap = new Map<number, any>();
+    for (const res of results) {
+      if (typeof res.id === 'number') {
+        responseMap.set(res.id, res);
+      }
+    }
+
+    // Map back to original order; per-item RPC errors return null (not thrown)
+    return batch.map((req) => {
+      const res = responseMap.get(req.id);
+      if (!res || res.error) return null;
+      return res.result ?? null;
+    });
   }
 
   // ===== ZMQ subscription for new blocks =====
@@ -363,14 +371,27 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     callback: (blockData: ByteData) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
+    if (!this.zmqEndpoint) {
+      // Propagate immediately — caller must handle this
+      const err = new Error(
+        `Provider "${this.uniqName}": zmqEndpoint is not configured, block subscription is not available`
+      );
+      onError?.(err);
+      // Return a no-op unsubscribe so the caller does not crash
+      return { unsubscribe: () => {} };
+    }
+
     const subscriber: BlockSubscriber = { onData: callback, onError };
     this.blockSubscriptions.add(subscriber);
 
     // Start ZMQ if this is the first subscriber
-    if (this.blockSubscriptions.size === 1 && this.zmqEndpoint && !this.zmqRunning) {
+    if (this.blockSubscriptions.size === 1 && !this.zmqRunning) {
       this.initializeZMQ().catch((err) => {
+        const wrapped = new Error(
+          `Provider "${this.uniqName}": ZMQ initialization failed at ${this.zmqEndpoint}: ${(err as Error).message}`
+        );
         for (const sub of this.blockSubscriptions) {
-          sub.onError?.(err instanceof Error ? err : new Error(String(err)));
+          sub.onError?.(wrapped);
         }
       });
     }
@@ -397,8 +418,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
 
       // Start processing messages
       this.processZMQMessages().catch((err) => {
+        const wrapped = new Error(
+          `Provider "${this.uniqName}": ZMQ message processing error at ${this.zmqEndpoint}: ${(err as Error).message}`
+        );
         for (const sub of this.blockSubscriptions) {
-          sub.onError?.(err instanceof Error ? err : new Error(String(err)));
+          sub.onError?.(wrapped);
         }
         if (this.zmqRunning) {
           this.scheduleZMQReconnect(err);
@@ -439,8 +463,11 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
 
     this.zmqReconnectTimer = setTimeout(() => {
       this.initializeZMQ().catch((err) => {
+        const wrapped = new Error(
+          `Provider "${this.uniqName}": ZMQ reconnect attempt ${attempt} failed at ${this.zmqEndpoint}: ${(err as Error).message}`
+        );
         for (const sub of this.blockSubscriptions) {
-          sub.onError?.(err instanceof Error ? err : new Error(String(err)));
+          sub.onError?.(wrapped);
         }
       });
     }, delay);

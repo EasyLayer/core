@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequestOptions } from './managers';
 import type {
   NetworkProvider,
@@ -39,7 +39,6 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
  */
 @Injectable()
 export class BlockchainProviderService {
-  logger = new Logger(BlockchainProviderService.name);
   private readonly normalizer: BitcoinNormalizer;
 
   constructor(
@@ -150,6 +149,7 @@ export class BlockchainProviderService {
   // BlockchainProviderService — optional error handler
   public subscribeToNewBlocks(callback: (block: Block) => void, onError?: (err: Error) => void): Subscription {
     this.ensureNetworkProviders();
+
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
@@ -162,36 +162,35 @@ export class BlockchainProviderService {
       .getActiveProvider()
       .then((provider) => {
         const networkProvider = provider as NetworkProvider;
+
         if (typeof networkProvider.subscribeToNewBlocks !== 'function') {
-          rejectSubscription(new Error('Active provider does not support block subscriptions'));
+          const err = new Error('Active provider does not support block subscriptions');
+          rejectSubscription(err);
+          onError?.(err);
           return;
         }
 
         const sub = networkProvider.subscribeToNewBlocks(
           (uBlock) => {
             try {
-              // Merkle verify as before
               const isValid =
                 uBlock.height === 0
                   ? BitcoinMerkleVerifier.verifyGenesisMerkleRoot(uBlock)
                   : BitcoinMerkleVerifier.verifyBlockMerkleRoot(uBlock, this.networkConfig.hasSegWit);
+
               if (!isValid) {
-                this.logger.warn('Merkle root verification failed for subscribed block', {
-                  args: { blockHash: uBlock.hash, height: uBlock.height },
-                });
-                return;
+                throw new Error(`Merkle root verification failed for block ${uBlock.hash} at height ${uBlock.height}`);
               }
+
               const normalized = this.normalizer.normalizeBlock(uBlock);
               callback(normalized);
             } catch (err) {
-              this.logger.warn('Failed to process block in subscription', { args: { error: err } });
               onError?.(err as Error);
             }
           },
-          (err) => {
-            // bubble transport errors
-            this.logger.warn('Subscription transport error', { args: { error: err } });
-            onError?.(err);
+          (transportErr) => {
+            rejectSubscription(transportErr);
+            onError?.(transportErr);
           }
         );
 
@@ -201,11 +200,8 @@ export class BlockchainProviderService {
         };
       })
       .catch((error) => {
-        this.logger.warn('Failed to get provider for subscription', {
-          args: { error },
-          methodName: 'subscribeToNewBlocks()',
-        });
         rejectSubscription(error as Error);
+        onError?.(error as Error);
       });
 
     return subscriptionPromise;
@@ -231,11 +227,6 @@ export class BlockchainProviderService {
       const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
-      const msg = error instanceof Error && error.message ? error.message : String(error ?? 'Unknown error');
-      this.logger.warn('Network provider operation failed, attempting recovery', {
-        args: { methodName, error: msg },
-      });
-
       try {
         const currentProvider = await this.networkConnectionManager.getActiveProvider();
         const recoveredProvider = (await this.networkConnectionManager.handleProviderFailure(
@@ -246,10 +237,7 @@ export class BlockchainProviderService {
 
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        this.logger.warn('Network provider recovery failed', {
-          args: { methodName, originalError: error, recoveryError },
-        });
-        throw recoveryError;
+        throw new Error(`Network provider recovery failed for "${methodName}": ${(recoveryError as Error).message}`);
       }
     }
   }
@@ -530,7 +518,7 @@ export class BlockchainProviderService {
     txids: string[],
     useHex: boolean = false,
     verbosity: 1 | 2 = 1,
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<Transaction[]> {
     if (useHex) {
       const uni = await this.mempoolConnectionManager.executeWithStrategy(
@@ -557,7 +545,7 @@ export class BlockchainProviderService {
    * @param options Mempool request options (strategy, timeout, etc.)
    * @returns Current blockchain height
    */
-  public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions = {}): Promise<number> {
+  public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions): Promise<number> {
     this.ensureMempoolProviders();
     const height = await this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getCurrentBlockHeight(),
@@ -575,7 +563,7 @@ export class BlockchainProviderService {
    * @param options Mempool request options (strategy, timeout, etc.)
    * @returns Mempool information
    */
-  public async getMempoolInfo(options: MempoolRequestOptions = {}): Promise<MempoolInfo> {
+  public async getMempoolInfo(options: MempoolRequestOptions): Promise<MempoolInfo> {
     const uni = await this.mempoolConnectionManager.executeWithStrategy(
       async (p: MempoolProvider) => await p.getMempoolInfo(),
       options
@@ -594,7 +582,7 @@ export class BlockchainProviderService {
    */
   public async getMempoolEntries(
     txids: string[],
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<(MempoolTxMetadata | null)[]> {
     const entries = await this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getMempoolEntries(txids),
@@ -663,7 +651,7 @@ export class BlockchainProviderService {
   public async estimateSmartFeeFromMempool(
     confTarget: number,
     estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE',
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<any> {
     this.ensureMempoolProviders();
     return this.mempoolConnectionManager.executeWithStrategy(

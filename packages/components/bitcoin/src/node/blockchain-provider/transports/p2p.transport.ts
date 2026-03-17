@@ -170,7 +170,16 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       this.pool.connect();
 
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('P2P connection timeout')), this.connectionTimeout);
+        const timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Provider "${this.uniqName}": P2P connection timeout after ${this.connectionTimeout}ms` +
+                  ` (peers: ${this.peers.map((p) => `${p.host}:${p.port}`).join(', ')})`
+              )
+            ),
+          this.connectionTimeout
+        );
         this.pool.once('peerready', (peer: Peer) => {
           clearTimeout(timeout);
           this.activePeer = peer;
@@ -212,7 +221,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     return this.executeWithErrorHandling(async () => {
       const tipHeight = this.chainTracker.getTipHeight();
       if (tipHeight < 0) {
-        throw new Error('Block height not available - header sync not complete');
+        throw new Error(`Provider "${this.uniqName}": block height not available — header sync is not complete yet`);
       }
       return tipHeight;
     }, 'getBlockHeight');
@@ -355,18 +364,24 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     };
   }
 
-  /* eslint-disable no-empty */
   private async initializeHeaderSync(): Promise<void> {
-    if (!this.activePeer) throw new Error('No active peer for header sync');
+    if (!this.activePeer) {
+      throw new Error(`Provider "${this.uniqName}": cannot start header sync — no active peer`);
+    }
     try {
       await this.syncAllHeadersFromTrustedPeer();
       this.headerSyncComplete = true;
-    } catch {}
+    } catch (err) {
+      // Header sync failure is non-fatal for the transport itself (subscription still works),
+      // but height-based operations will return null until sync eventually completes.
+      // We intentionally do NOT propagate this to blockSubscribers — it is not a stream error.
+      // The error is preserved on headerSyncPromise for callers who await it directly.
+      throw new Error(`Provider "${this.uniqName}": header sync failed: ${(err as Error).message}`);
+    }
   }
-  /* eslint-enable no-empty */
 
   private async syncAllHeadersFromTrustedPeer(): Promise<void> {
-    if (!this.activePeer) throw new Error('No active peer for header sync');
+    if (!this.activePeer) throw new Error(`Provider "${this.uniqName}": no active peer for header sync`);
     while (true) {
       const headers = await this.requestHeadersBatch();
       if (!headers || headers.length === 0) break;
@@ -379,10 +394,13 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   }
 
   private async requestHeadersBatch(): Promise<Array<{ hash: string; previousblockhash: string }> | null> {
-    if (!this.activePeer) throw new Error('No active peer available');
+    if (!this.activePeer) throw new Error(`Provider "${this.uniqName}": no active peer available for header request`);
 
     return new Promise<Array<{ hash: string; previousblockhash: string }> | null>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Header batch request timeout')), 30000);
+      const timeout = setTimeout(
+        () => reject(new Error(`Provider "${this.uniqName}": header batch request timed out`)),
+        30000
+      );
 
       const locator = this.buildLocator();
       const getHeadersMessage = new Messages.GetHeaders({ starts: locator, stop: Buffer.alloc(32) });
@@ -403,7 +421,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
           resolve(parsedHeaders);
         } catch (error) {
-          reject(new Error(`Failed to parse headers: ${error}`));
+          reject(new Error(`Provider "${this.uniqName}": failed to parse header batch: ${(error as Error).message}`));
         }
       };
 
@@ -433,7 +451,11 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     bits: string;
     nonce: number;
   } {
-    if (headerBuffer.length !== 80) throw new Error(`Invalid header length: ${headerBuffer.length}, expected 80`);
+    if (headerBuffer.length !== 80) {
+      throw new Error(
+        `Provider "${this.uniqName}": invalid header buffer length ${headerBuffer.length}, expected 80 bytes`
+      );
+    }
     const previousblockhash = headerBuffer.slice(4, 36).reverse().toString('hex');
     const merkleroot = headerBuffer.slice(36, 68).reverse().toString('hex');
     const time = headerBuffer.readUInt32LE(68);
@@ -474,7 +496,13 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       }
     });
 
-    this.pool.on('error', () => {});
+    this.pool.on('error', (err: Error) => {
+      // Propagate pool-level errors to all active block subscribers
+      const wrapped = new Error(`Provider "${this.uniqName}": P2P pool error: ${err?.message ?? String(err)}`);
+      for (const sub of this.blockSubscribers) {
+        sub.onError?.(wrapped);
+      }
+    });
   }
 
   /* eslint-disable no-empty */
@@ -491,6 +519,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
         }
       }
 
+      // Update chain tracker — non-critical, swallow failures silently
       try {
         const blockHash = message.block.hash?.toString('hex');
         if (blockHash) {
@@ -508,6 +537,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
     peer.on('headers', (message: any) => {
       if (message?.headers) {
         message.headers.forEach((headerBuffer: Buffer) => {
+          // Non-critical per-header failures — swallow silently
           try {
             const header = this.parseHeaderBuffer(headerBuffer);
             const prevHeight = this.chainTracker.getHeight(header.previousblockhash);

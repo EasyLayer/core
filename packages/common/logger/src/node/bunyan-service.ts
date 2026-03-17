@@ -122,13 +122,13 @@ const state: State = { root: undefined, enabled: true };
 export function configureRootBunyan(opts: RootLoggerOptions) {
   state.enabled = opts.enabled !== false;
   if (!state.enabled) {
-    state.root = bunyan.createLogger({ name: opts.name || 'App', level: bunyan.FATAL + 1 });
+    state.root = bunyan.createLogger({ name: opts.name || 'app', level: bunyan.FATAL + 1 });
     return state.root!;
   }
   if (opts.filePath) process.env.LOGS_FILE = opts.filePath;
 
   const options: LoggerOptions = {
-    name: opts.name || 'App',
+    name: opts.name || 'app',
     level: lvlMap[opts.level ?? 'info'],
     streams: [{ type: 'raw', stream: new BunyanStream() }],
   };
