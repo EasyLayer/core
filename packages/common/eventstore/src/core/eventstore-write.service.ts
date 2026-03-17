@@ -36,6 +36,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   }
 
   async onModuleInit(): Promise<void> {
+    this.logger.verbose('Startup outbox drain started', { module: 'eventstore' });
     await this.runDrainOnce();
   }
 
@@ -71,6 +72,11 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     // One DB transaction that writes aggregate tables + outbox.
     const persisted = await this.adapter.persistAggregatesAndOutbox(aggregates);
 
+    this.logger.debug('Aggregates saved to event store', {
+      module: 'eventstore',
+      args: { aggregates: aggregates.length },
+    });
+
     // Refresh read cache; maybe create persisted snapshot if aggregate says it's time.
     for (const a of aggregates) {
       if (a.aggregateId) {
@@ -98,12 +104,19 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   }): Promise<void> {
     const backlogBefore = await this.adapter.hasBacklogBefore(persisted.firstTs, persisted.firstId);
     if (backlogBefore) {
+      this.logger.verbose('Outbox backlog detected, falling back to strict drain', {
+        module: 'eventstore',
+        args: { firstId: persisted.firstId },
+      });
       await this.runDrainOnce();
       return;
     }
 
     const anyPending = await this.adapter.hasAnyPendingAfterWatermark();
     if (anyPending) {
+      this.logger.verbose('Pending rows after watermark detected, falling back to strict drain', {
+        module: 'eventstore',
+      });
       await this.runDrainOnce();
       return;
     }
@@ -116,6 +129,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         published = true;
       } catch (e) {
         this.logger.verbose('Fast-path publish failed, outbox retained for drain retry', {
+          module: 'eventstore',
           args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
         });
       }
@@ -125,11 +139,12 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         // If delete throws, rows stay in outbox and drain will redeliver (at-least-once) — acceptable.
         try {
           await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
-          // advance watermark so next hasAnyPendingAfterWatermark() skips
+          // BUG-6 fix: advance watermark so next hasAnyPendingAfterWatermark() skips
           // already-delivered ids, making fast-path reachable on subsequent saves.
           this.adapter.advanceWatermark(persisted.lastId);
         } catch (e) {
           this.logger.verbose('Fast-path outbox ACK delete failed, drain will redeliver', {
+            module: 'eventstore',
             args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
           });
         }
@@ -153,6 +168,10 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     if (ids.length > 0) {
       for (const id of ids) this.eventStoreReadService.cache.del(id);
       await this.adapter.rollbackAggregates(ids, blockHeight);
+      this.logger.debug('Aggregates rolled back', {
+        module: 'eventstore',
+        args: { aggregateIds: ids, blockHeight },
+      });
     }
 
     if (modelsToSave?.length) {
@@ -175,10 +194,11 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         if (sent === 0) break;
       } catch (e) {
         this.logger.verbose('Outbox drain chunk failed', {
+          module: 'eventstore',
           args: { action: 'drainOutboxCompletely', error: (e as any)?.message },
         });
         this.startRetryTimerIfNeeded();
-        // stop the loop after scheduling retry — avoids tight CPU spin on persistent errors.
+        // BUG-3 fix: stop the loop after scheduling retry — avoids tight CPU spin on persistent errors.
         break;
       }
     }
@@ -186,6 +206,10 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   private startRetryTimerIfNeeded(): void {
     if (this.retryTimer) return;
+    this.logger.verbose('Outbox retry timer started', {
+      module: 'eventstore',
+      args: { action: 'startRetryTimerIfNeeded' },
+    });
     this.retryTimer = exponentialIntervalAsync(
       async (reset) => {
         try {
@@ -193,6 +217,10 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
           reset();
           this.retryTimer?.destroy();
           this.retryTimer = null;
+          this.logger.verbose('Outbox retry timer cleared, drain succeeded', {
+            module: 'eventstore',
+            args: { action: 'retryTimer' },
+          });
         } catch {
           // keep retrying
         }
@@ -215,6 +243,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     } catch (err: any) {
       // Snapshot errors are swallowed by policy — never fail the main save flow.
       this.logger.verbose('Snapshot create failed (swallowed by policy)', {
+        module: 'eventstore',
         args: { action: 'maybeCreateSnapshot', aggregateId: aggregate.aggregateId, error: err?.message },
       });
     }

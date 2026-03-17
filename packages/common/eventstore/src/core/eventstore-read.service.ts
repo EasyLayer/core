@@ -73,10 +73,21 @@ export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
     if (!id) return model;
 
     const cached = this._cache.get(id) as K | null;
-    if (cached) return cached;
+    if (cached) {
+      this.logger.verbose('Aggregate served from cache', {
+        module: 'eventstore',
+        args: { aggregateId: id },
+      });
+      return cached;
+    }
 
     // Single adapter call: rehydrate to the latest persisted height (snapshot + tail events).
     await this.adapter.restoreExactStateLatest(model);
+
+    this.logger.debug('Aggregate rehydrated from event store', {
+      module: 'eventstore',
+      args: { aggregateId: id, version: model.version },
+    });
 
     this._cache.set(id, model);
     return model;
