@@ -44,6 +44,11 @@ export class BlocksQueueService implements OnModuleInit {
       maxQueueSize: this.config.maxQueueSize,
       maxBlockHeight: this.config.maxBlockHeight,
       blockSize: this.config.blockSize,
+      plannerConfig: {
+        // maxAvgBytes must match the network's maximum block size so the EMA upper-clamp
+        // is physically meaningful. Bitcoin mainnet = 4MB, legacy chains = 1MB.
+        maxAvgBytes: this.config.maxBlockSize,
+      },
     });
 
     this.logger.verbose('Blocks queue initialized', {

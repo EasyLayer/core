@@ -5,8 +5,19 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
   private activeProviderName!: string;
   private failedProviders: Set<string> = new Set();
   private reconnectionAttempts: Map<string, number> = new Map();
+  // 3 attempts with immediate retry — enough to survive transient blips without long delays.
+  // After 3 failures, switch to the next provider without waiting.
   private readonly maxReconnectionAttempts = 3;
   private p2pInitialized: Set<string> = new Set();
+
+  // TTL for failedProviders entries — providers are automatically un-blacklisted after 5 min.
+  // Prevents permanent dead state when all providers hit the failed list during a network blip.
+  private failedAt: Map<string, number> = new Map();
+  private readonly failedProviderTtlMs = 5 * 60 * 1000; // 5 min
+
+  // Guard against concurrent handleProviderFailure calls corrupting state.
+  // JS is single-threaded but interleaved awaits can cause double-increments etc.
+  private isRecovering = false;
 
   /**
    * Single-active strategy with automatic failover.
@@ -15,7 +26,15 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
    * 3) Initialize P2P once per provider.
    */
   async initialize(): Promise<void> {
-    const { connected } = await this.ensureConnectedAll();
+    const { connected, failed } = await this.ensureConnectedAll();
+
+    if (failed.length > 0) {
+      this.logger.verbose('Some network providers failed to connect on init', {
+        module: this.moduleName,
+        args: { failed: failed.map((p) => p.uniqName) },
+      });
+    }
+
     if (connected.length === 0) {
       this.logger.error('Unable to connect to any network providers', {
         module: this.moduleName,
@@ -68,6 +87,7 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
 
     this.failedProviders.delete(name);
     this.reconnectionAttempts.delete(name);
+    this.failedAt.delete(name);
     this.activeProviderName = name;
 
     this.logger.log(`Manually switched active provider to: ${name}`, {
@@ -83,62 +103,92 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
 
   /* eslint-disable no-empty */
   async handleProviderFailure(providerName: string, error: unknown, methodName: string): Promise<NetworkProvider> {
-    this.logger.debug('Provider operation failed, attempting recovery', {
-      module: this.moduleName,
-      args: { providerName, methodName, error: (error as any)?.message ?? 'Unknown error' },
-    });
-
-    const failedProvider = await this.getProviderByName(providerName);
-    this.failedProviders.add(providerName);
-
-    const attempts = this.reconnectionAttempts.get(providerName) ?? 0;
-    this.reconnectionAttempts.set(providerName, attempts + 1);
-
-    // Try to reconnect the same provider a few times
-    if (attempts < this.maxReconnectionAttempts) {
-      try {
-        const ok = await this.ensureConnected(failedProvider);
-        if (ok) {
-          if (failedProvider.transportType === 'p2p') {
-            await this.ensureP2PInitialized(failedProvider);
-          }
-          this.failedProviders.delete(providerName);
-          this.logger.log(`Provider recovered: ${providerName}`, {
-            module: this.moduleName,
-          });
-          return failedProvider;
-        }
-      } catch {}
+    // If another concurrent failure is already being handled, wait briefly and
+    // return whatever provider is active after recovery completes.
+    // Prevents double-increment of reconnectionAttempts and unpredictable activeProviderName writes.
+    if (this.isRecovering) {
+      await new Promise((r) => setTimeout(r, 300));
+      return this.getActiveProvider() as Promise<NetworkProvider>;
     }
 
-    // Fallback to another healthy provider
-    for (const next of this.providers.values()) {
-      if (next.uniqName === providerName) continue;
-      if (this.failedProviders.has(next.uniqName)) continue;
+    this.isRecovering = true;
 
-      const ok = await this.ensureConnected(next);
-      if (!ok) {
-        this.failedProviders.add(next.uniqName);
-        continue;
+    try {
+      // Clean up stale failedProviders entries (TTL-based auto-recovery).
+      // Ensures providers that recovered externally are not permanently blacklisted.
+      const now = Date.now();
+      for (const [name, ts] of this.failedAt) {
+        if (now - ts > this.failedProviderTtlMs) {
+          this.failedProviders.delete(name);
+          this.reconnectionAttempts.delete(name);
+          this.failedAt.delete(name);
+        }
       }
 
-      if (next.transportType === 'p2p') {
-        await this.ensureP2PInitialized(next);
-      }
-
-      const old = this.activeProviderName;
-      this.activeProviderName = next.uniqName;
-      this.failedProviders.delete(next.uniqName);
-      this.reconnectionAttempts.delete(next.uniqName);
-
-      this.logger.log(`Switched to backup provider: ${old} → ${this.activeProviderName}`, {
+      this.logger.verbose('Provider operation failed, attempting recovery', {
         module: this.moduleName,
+        args: { providerName, methodName, error: (error as any)?.message ?? 'Unknown error' },
       });
 
-      return next;
-    }
+      const failedProvider = await this.getProviderByName(providerName);
+      this.failedProviders.add(providerName);
+      this.failedAt.set(providerName, now);
 
-    throw new Error('No working providers available');
+      const attempts = this.reconnectionAttempts.get(providerName) ?? 0;
+      this.reconnectionAttempts.set(providerName, attempts + 1);
+
+      // Try to reconnect the same provider a few times before switching
+      if (attempts < this.maxReconnectionAttempts) {
+        try {
+          const ok = await this.ensureConnected(failedProvider);
+          if (ok) {
+            if (failedProvider.transportType === 'p2p') {
+              await this.ensureP2PInitialized(failedProvider);
+            }
+            this.failedProviders.delete(providerName);
+            this.failedAt.delete(providerName);
+            this.reconnectionAttempts.delete(providerName); // reset so next failure starts fresh
+            this.logger.log(`Provider recovered: ${providerName}`, {
+              module: this.moduleName,
+            });
+            return failedProvider;
+          }
+        } catch {}
+      }
+
+      // Fallback to another healthy provider
+      for (const next of this.providers.values()) {
+        if (next.uniqName === providerName) continue;
+        if (this.failedProviders.has(next.uniqName)) continue;
+
+        const ok = await this.ensureConnected(next);
+        if (!ok) {
+          this.failedProviders.add(next.uniqName);
+          this.failedAt.set(next.uniqName, Date.now());
+          continue;
+        }
+
+        if (next.transportType === 'p2p') {
+          await this.ensureP2PInitialized(next);
+        }
+
+        const old = this.activeProviderName;
+        this.activeProviderName = next.uniqName;
+        this.failedProviders.delete(next.uniqName);
+        this.failedAt.delete(next.uniqName);
+        this.reconnectionAttempts.delete(next.uniqName); // reset so next failure starts fresh
+
+        this.logger.log(`Switched to backup provider: ${old} → ${this.activeProviderName}`, {
+          module: this.moduleName,
+        });
+
+        return next;
+      }
+
+      throw new Error('No working providers available');
+    } finally {
+      this.isRecovering = false;
+    }
   }
   /* eslint-enable no-empty */
 

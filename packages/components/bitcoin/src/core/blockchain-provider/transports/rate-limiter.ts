@@ -125,8 +125,12 @@ export class RateLimiter {
           const ir = batch.requests[i]!;
           results[ir.originalIndex] = i < batchResults.length ? (batchResults[i] as T | null) : null;
         }
-      } catch {
-        // Swallow batch-level errors: leave `null` for those positions to preserve array shape and order.
+      } catch (err) {
+        // Re-throw transport-level errors (connection refused, timeout, HTTP failures).
+        // These must propagate so executeNetworkProviderMethod can trigger provider failover.
+        // Item-level RPC errors (block not found, invalid hash) are already handled inside
+        // batchCall() as per-item null values and never reach this catch block.
+        throw err;
       }
     }
 

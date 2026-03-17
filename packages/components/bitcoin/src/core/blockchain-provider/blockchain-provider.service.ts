@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { NetworkConnectionManager, MempoolConnectionManager, MempoolRequestOptions } from './managers';
 import type {
   NetworkProvider,
@@ -40,6 +40,7 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
 @Injectable()
 export class BlockchainProviderService {
   private readonly normalizer: BitcoinNormalizer;
+  private readonly logger = new Logger(BlockchainProviderService.name);
 
   constructor(
     private readonly networkConnectionManager: NetworkConnectionManager,
@@ -117,7 +118,16 @@ export class BlockchainProviderService {
     const validBlocks: UniversalBlock[] = [];
 
     for (const block of blocks) {
-      if (block === null) continue;
+      if (block === null) {
+        // null from RPC = block not found at this height/hash.
+        // Legitimate for single-block queries; suspicious in batch load context
+        // (may cause queue height-sequence errors downstream).
+        this.logger.verbose('Block returned null from provider in batch', {
+          module: 'blockchain-provider',
+          args: { action: 'processAndValidateBlocks' },
+        });
+        continue;
+      }
 
       if (verifyMerkle) {
         const isValid = this.verifyBlockMerkleRoot(block);
@@ -157,6 +167,10 @@ export class BlockchainProviderService {
       resolveSubscription = resolve;
       rejectSubscription = reject;
     }) as Subscription;
+
+    // Pre-assign a no-op so unsubscribe() is always callable even if getActiveProvider()
+    // hasn't resolved yet (e.g. during fast shutdown or onModuleDestroy).
+    subscriptionPromise.unsubscribe = () => {};
 
     this.networkConnectionManager
       .getActiveProvider()
@@ -223,21 +237,25 @@ export class BlockchainProviderService {
   ): Promise<T> {
     this.ensureNetworkProviders();
 
+    let provider: NetworkProvider | undefined;
     try {
-      const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
+      provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
+      // Capture providerName here — before any async recovery that might change activeProvider
+      const providerName = provider?.uniqName ?? 'unknown';
       try {
-        const currentProvider = await this.networkConnectionManager.getActiveProvider();
         const recoveredProvider = (await this.networkConnectionManager.handleProviderFailure(
-          currentProvider.uniqName,
+          providerName,
           error,
           methodName
         )) as NetworkProvider;
-
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        throw new Error(`Network provider recovery failed for "${methodName}": ${(recoveryError as Error).message}`);
+        throw new Error(
+          `Network provider "${providerName}" failed for "${methodName}": ${(error as Error).message}. ` +
+            `Recovery also failed: ${(recoveryError as Error).message}`
+        );
       }
     }
   }
@@ -403,6 +421,14 @@ export class BlockchainProviderService {
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<BlockStats[]> {
     return this.executeNetworkProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
+
+      const nullCount = rawStats.filter((s: any) => s === null).length;
+      if (nullCount > 0) {
+        this.logger.verbose('Some block stats returned null from provider', {
+          module: 'blockchain-provider',
+          args: { action: 'getManyBlocksStatsByHeights', nullCount, total: rawStats.length },
+        });
+      }
 
       const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);

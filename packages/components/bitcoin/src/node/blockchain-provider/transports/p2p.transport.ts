@@ -558,7 +558,10 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   private requestHexBlocksBatch(hashes: string[]): Promise<(ByteData | null)[]> {
     return new Promise<(ByteData | null)[]>((resolve) => {
-      if (!this.activePeer) {
+      // Capture peer locally to avoid listener leak if activePeer changes
+      // during the async wait (e.g. on peerdisconnect).
+      const peer = this.activePeer;
+      if (!peer) {
         resolve(hashes.map(() => null));
         return;
       }
@@ -583,7 +586,8 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
       const done = () => {
         clearTimeout(timer);
-        this.activePeer?.removeListener('block', onBlock);
+        // Use locally captured peer reference — this.activePeer may be null by now
+        peer.removeListener('block', onBlock);
 
         const ordered: (ByteData | null)[] = new Array(hashes.length).fill(null);
         for (const [h, buf] of received) {
@@ -594,22 +598,67 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
       };
 
       const timer = setTimeout(() => {
-        this.activePeer?.removeListener('block', onBlock);
+        peer.removeListener('block', onBlock);
         done();
       }, timeoutMs);
 
-      this.activePeer.on('block', onBlock);
+      peer.on('block', onBlock);
 
       try {
         const inventory = hashes.map((h) => ({ type: 2, hash: Buffer.from(h, 'hex').reverse() }));
         const getDataMessage = new Messages.GetData(inventory);
-        this.activePeer.sendMessage(getDataMessage);
+        peer.sendMessage(getDataMessage);
       } catch {
         clearTimeout(timer);
-        this.activePeer?.removeListener('block', onBlock);
+        peer.removeListener('block', onBlock);
         resolve(hashes.map(() => null));
       }
     });
+  }
+
+  // ===== P2P status methods (called from NetworkProvider) =====
+
+  /**
+   * Wait until header sync completes or timeout expires.
+   * Resolves immediately if sync is already complete.
+   * Rejects if sync was not started or times out.
+   */
+  async waitForHeaderSync(timeoutMs: number = 300_000): Promise<void> {
+    if (this.headerSyncComplete) return;
+
+    if (!this.headerSyncPromise) {
+      throw new Error(`Provider "${this.uniqName}": header sync was not started (headerSyncEnabled=false)`);
+    }
+
+    await Promise.race([
+      this.headerSyncPromise,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Provider "${this.uniqName}": header sync timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        )
+      ),
+    ]);
+  }
+
+  /**
+   * Returns true once all headers have been fetched from peers.
+   * Used by NetworkProvider.getP2PStatus().
+   */
+  async isHeaderSyncComplete(): Promise<boolean> {
+    return this.headerSyncComplete;
+  }
+
+  /**
+   * Returns current header sync progress.
+   * While syncing: total=0 (tip unknown until first batch completes).
+   * When done: synced=total=getMappingCount(), percentage=100.
+   */
+  async getHeaderSyncProgress(): Promise<{ synced: number; total: number; percentage: number }> {
+    const synced = this.chainTracker.getMappingCount();
+    const total = this.headerSyncComplete ? synced : 0;
+    const percentage = this.headerSyncComplete ? 100 : 0;
+    return { synced, total, percentage };
   }
 
   private extractPreviousBlockHash(blockBuffer: Buffer): string | null {

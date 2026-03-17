@@ -4,8 +4,9 @@ import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/ex
 import type { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import {
-  PullRpcProviderStrategy,
-  ProcessP2PProviderStrategy,
+  RpcProviderStrategy,
+  RpcZmqProviderStrategy,
+  P2PProviderStrategy,
   BlocksLoadingStrategy,
   StrategyNames,
 } from './load-strategies';
@@ -89,7 +90,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
           await this.mempoolService.refresh(currentNetworkHeight);
 
           // Get the strategy that should work now
-          this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
+          this._currentStrategy = this.getCurrentStrategy();
 
           this.logger.verbose('Loading strategy created', {
             module: this.moduleName,
@@ -135,35 +136,25 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
 
     this._strategies.set(
       StrategyNames.RPC,
-      new PullRpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+      new RpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+    );
+
+    this._strategies.set(
+      StrategyNames.RPC_ZMQ,
+      new RpcZmqProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
 
     this._strategies.set(
       StrategyNames.P2P,
-      new ProcessP2PProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+      new P2PProviderStrategy(this.logger, this.blockchainProviderService, queue)
     );
   }
 
-  // Business rule method to determine which strategy should work
-  private getCurrentStrategy(queue: BlocksQueue<Block>, currentNetworkHeight?: number): BlocksLoadingStrategy {
-    const configStrategy = this.config.queueLoaderStrategyName;
-
-    // If config is PULL - always use PULL
-    if (configStrategy === StrategyNames.RPC) {
-      return this._strategies.get(StrategyNames.RPC)!;
-    }
-
-    // If config is SUBSCRIBE but big height difference - use PULL
-    if (currentNetworkHeight !== undefined) {
-      const heightDifference = currentNetworkHeight - queue.lastHeight;
-      const threshold = this.config.strategyThreshold || 10; // TODO: think about this number
-
-      if (heightDifference > threshold) {
-        return this._strategies.get(StrategyNames.RPC)!;
-      }
-    }
-
-    // Default to use configured strategy
-    return this._strategies.get(StrategyNames.P2P)!;
+  // Each strategy is self-contained: handles its own catch-up → real-time transition internally.
+  // The loader is a pure supervisor — picks the configured strategy and runs it.
+  // No threshold switching needed here anymore.
+  private getCurrentStrategy(): BlocksLoadingStrategy {
+    const configStrategy = this.config.queueLoaderStrategyName as StrategyNames;
+    return this._strategies.get(configStrategy) ?? this._strategies.get(StrategyNames.RPC)!;
   }
 }

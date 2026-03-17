@@ -415,15 +415,14 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       this.zmqSocket.connect(this.zmqEndpoint);
       this.zmqSocket.subscribe('rawblock');
       this.zmqRunning = true;
+      // Reset reconnect counter on successful init so future disconnects
+      // start exponential backoff from the beginning, not from the last failure count.
+      this.zmqReconnectAttempts = 0;
 
-      // Start processing messages
+      // Start processing messages.
+      // On error: scheduleZMQReconnect is the single entry point that notifies subscribers
+      // and schedules retry. Do NOT notify subscribers here — that is scheduleZMQReconnect's job.
       this.processZMQMessages().catch((err) => {
-        const wrapped = new Error(
-          `Provider "${this.uniqName}": ZMQ message processing error at ${this.zmqEndpoint}: ${(err as Error).message}`
-        );
-        for (const sub of this.blockSubscriptions) {
-          sub.onError?.(wrapped);
-        }
         if (this.zmqRunning) {
           this.scheduleZMQReconnect(err);
         }
@@ -453,6 +452,19 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   private scheduleZMQReconnect(_cause: unknown): void {
     this.cleanupZMQ();
     if (!this.zmqEndpoint) return;
+
+    // Notify all subscribers about the disconnect BEFORE scheduling reconnect.
+    // The strategy (SubscribeBlockStrategy) will catch the error, reject its Promise,
+    // and the loader supervisor will restart it — performing performInitialCatchup()
+    // to recover any blocks missed during the reconnection window.
+    const disconnectErr = new Error(
+      `Provider "${this.uniqName}": ZMQ connection lost at ${this.zmqEndpoint}, reconnecting...`
+    );
+    for (const sub of this.blockSubscriptions) {
+      sub.onError?.(disconnectErr);
+    }
+    // Clear subscriptions — callers will re-subscribe after strategy restarts
+    this.blockSubscriptions.clear();
 
     const attempt = ++this.zmqReconnectAttempts;
     const delay = Math.min(30_000, 500 * Math.pow(2, attempt));

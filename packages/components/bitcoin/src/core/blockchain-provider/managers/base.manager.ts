@@ -54,7 +54,11 @@ export abstract class BaseConnectionManager<
       await provider.connect();
       this.connected.add(provider.uniqName);
       return true;
-    } catch {
+    } catch (error) {
+      this.logger.verbose('Provider connection attempt failed', {
+        module: this.moduleName,
+        args: { providerName: provider.uniqName, action: 'connect', error: (error as Error).message },
+      });
       return false;
     }
   }

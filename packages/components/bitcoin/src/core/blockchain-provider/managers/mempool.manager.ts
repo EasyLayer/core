@@ -37,7 +37,15 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
    * If no providers connect, the system cannot function at all.
    */
   async initialize(): Promise<void> {
-    const { connected } = await this.ensureConnectedAll();
+    const { connected, failed } = await this.ensureConnectedAll();
+
+    if (failed.length > 0) {
+      this.logger.debug('Some mempool providers failed to connect on init', {
+        module: this.moduleName,
+        args: { failed: failed.map((p) => p.uniqName) },
+      });
+    }
+
     if (connected.length === 0) {
       this.logger.error('Unable to connect to any mempool providers', {
         module: this.moduleName,
@@ -105,6 +113,7 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
 
   private async executeRoundRobin<T>(operation: (provider: MempoolProvider) => Promise<T>): Promise<T> {
     const healthy = await this.getHealthyProviders();
+    if (healthy.length === 0) throw new Error('No healthy mempool providers available');
 
     const first = healthy[this.currentProviderIndex % healthy.length]!;
     this.currentProviderIndex = (this.currentProviderIndex + 1) % healthy.length;
@@ -112,7 +121,10 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     try {
       return await operation(first);
     } catch (firstError) {
-      this.logger.debug(`Mempool provider "${first.uniqName}" failed in round-robin, trying next`, {
+      // If there is only one healthy provider, retrying it makes no sense
+      if (healthy.length < 2) throw firstError;
+
+      this.logger.verbose(`Mempool provider "${first.uniqName}" failed in round-robin, trying next`, {
         module: this.moduleName,
         args: { error: (firstError as any)?.message },
       });
@@ -172,8 +184,9 @@ export class MempoolConnectionManager extends BaseConnectionManager<MempoolProvi
     return out;
   }
 
-  getProviderStats(): { total: number; healthy: number; failed: number } {
+  async getProviderStats(): Promise<{ total: number; healthy: number; failed: number }> {
     const total = this.providers.size;
-    return { total, healthy: total, failed: 0 };
+    const healthyProviders = await this.getHealthyProviders();
+    return { total, healthy: healthyProviders.length, failed: total - healthyProviders.length };
   }
 }
