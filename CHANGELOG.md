@@ -1,3 +1,13 @@
+# [1.1.0](https://github.com/EasyLayer/core/compare/v1.0.4...v1.1.0) (2026-03-17)
+
+
+### Features
+
+* added compression to sqlite as well; ([21aec9b](https://github.com/EasyLayer/core/commit/21aec9b996109ac14909e657419f14e759bb9bfa))
+* added mempoolspace transport; ([cd5ba0a](https://github.com/EasyLayer/core/commit/cd5ba0a97d70e6cd48d5dbb1d6a427fa0b7a1972))
+
+
+
 ## [1.0.4](https://github.com/EasyLayer/core/compare/v1.0.3...v1.0.4) (2025-10-28)
 
 
