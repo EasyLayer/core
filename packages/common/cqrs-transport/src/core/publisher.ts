@@ -5,12 +5,13 @@ import type { OutboxBatchSender } from '@easylayer/common/network-transport';
 import type { WireEventRecord } from './event-record.interface';
 
 export class Publisher implements OnModuleDestroy {
+  private readonly moduleName = 'cqrs-transport';
   private subject$ = new Subject<DomainEvent>();
   private systemModelNamesSet: Set<string>;
 
   constructor(
     private readonly outboxBatchSender: OutboxBatchSender,
-    private readonly log: Logger,
+    private readonly logger: Logger,
     systemModelNames: string[]
   ) {
     this.systemModelNamesSet = new Set(systemModelNames ?? []);
@@ -46,11 +47,13 @@ export class Publisher implements OnModuleDestroy {
         const domainEvent: DomainEvent = this.createDomainEventFromWire(wireEvent);
         this.subject$.next(domainEvent);
       } catch (error) {
-        this.log.debug('Failed to parse system event payload', {
+        this.logger.verbose('System event payload parse failed', {
+          module: this.moduleName,
           args: {
+            action: 'emitSystemEventsLocally',
             modelName: wireEvent.modelName,
             eventType: wireEvent.eventType,
-            err: (error as any)?.message,
+            error: (error as any)?.message,
           },
         });
       }

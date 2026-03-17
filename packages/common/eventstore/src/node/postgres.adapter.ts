@@ -157,12 +157,16 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
           outboxIds.push(newId.toString());
         }
-
-        // Clear unsaved events after a successful flush for this aggregate.
-        agg.markEventsAsSaved();
+        // Do NOT call markEventsAsSaved() here — wait for COMMIT first.
       }
 
       await qr.query('COMMIT');
+
+      // mark events as saved only AFTER a successful COMMIT.
+      // If COMMIT throws, ROLLBACK happens and INTERNAL_EVENTS must remain intact for retry.
+      for (const agg of aggregates) {
+        agg.markEventsAsSaved();
+      }
 
       const firstId = firstIdBn ? String(firstIdBn) : '0';
       const lastId = lastIdBn ? String(lastIdBn) : '0';
@@ -347,12 +351,14 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       await deliver(events);
 
       // ACK delete accepted ids.
+      // NOTE (at-least-once): if deliver() succeeds but this delete throws, lastSeenId is NOT
+      // advanced and the next drain will re-deliver the same events. This is intentional.
       const ids = accepted.map((r) => r.id);
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
       await qr.query('BEGIN');
       try {
-        const step = 10000;
+        const step = PostgresAdapter.DELETE_ID_CHUNK;
         for (let i = 0; i < ids.length; i += step) {
           const chunk = ids.slice(i, i + step).map((x) => String(x).trim());
           const placeholders = chunk.map((_, idx) => `$${idx + 1}`).join(',');
@@ -370,6 +376,12 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
       return events.length;
     });
+  }
+
+  /** advance watermark after successful fast-path publish+delete. */
+  public advanceWatermark(lastId: string): void {
+    const id = BigInt(lastId);
+    if (id > this.lastSeenId) this.lastSeenId = id;
   }
 
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
@@ -438,6 +450,10 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   /**
    * Stream events and apply them to the model using the DataSource QueryRunner.
+   *
+   * Postgres: true row-by-row streaming via qr.stream() — no batchSize needed (cursor is in DB driver).
+   * SQLite/Browser: batched paging with batchSize parameter (those drivers do not support streaming).
+   *
    * IMPORTANT:
    * - Process *one row at a time* and call model.loadFromHistory([event]) immediately.
    * - If `blockHeight` is provided → only finalized events with height ≤ H (exclude NULL).

@@ -9,6 +9,6 @@ export interface WireEventRecord {
   blockHeight: number;
   /** Serialized JSON string (already decompressed if DB compressed it) */
   payload: string;
-  /** Milliseconds since epoch for ordering/telemetry */
+  /** Microseconds since epoch (monotonic, from DomainEvent.timestamp). */
   timestamp: number;
 }

@@ -1,5 +1,5 @@
 import type { DynamicModule, Provider, Type } from '@nestjs/common';
-import { Module } from '@nestjs/common';
+import { Module, Logger } from '@nestjs/common';
 import type { IEventHandler, ICommandHandler, IQueryHandler } from './interfaces';
 import {
   EVENT_HANDLER_INSTANCES,
@@ -25,6 +25,9 @@ export interface CQRSModuleParameters {
 
 @Module({})
 export class CqrsModule {
+  private static readonly logger = new Logger(CqrsModule.name);
+  private static readonly moduleName = 'cqrs-transport';
+
   static forRoot(params: CQRSModuleParameters = {}): DynamicModule {
     const eventClasses = params.events ?? [];
     const commandClasses = params.commands ?? [];
@@ -33,6 +36,10 @@ export class CqrsModule {
     // const sagaFactories = (params.sagas ?? []).filter(
     //   (s: any) => typeof s === 'function' && !s.prototype
     // ) as Function[];
+
+    this.logger.verbose('Starting cqrs module registration', {
+      module: this.moduleName,
+    });
 
     // We put ALL classes in providers so that Nest can create instances with DI
     const handlerProviders: Provider[] = [...eventClasses, ...commandClasses, ...queryClasses]; //...sagaClasses

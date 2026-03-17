@@ -28,8 +28,8 @@ export async function toEventDataModel(
   const json = JSON.stringify(payload ?? {}); // string once
   const uncompressedBytes = Buffer.byteLength(json, 'utf8');
 
-  // if (dbDriver === 'postgres' && CompressionUtils.shouldCompress(json)) {
-  const minSize = dbDriver === 'sqlite' ? 6144 : 2048; // SQLite: 6KB, Postgres: 2KB
+  // SQLite: 6KB threshold (disk only, no network benefit); Postgres: 2KB.
+  const minSize = dbDriver === 'sqlite' ? 6144 : 2048;
 
   if (CompressionUtils.shouldCompress(json, minSize)) {
     const deflated = await CompressionUtils.compressToBuffer(json);

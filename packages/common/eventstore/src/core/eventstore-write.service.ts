@@ -20,7 +20,9 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   private retryTimer: ExponentialTimer | null = null;
 
-  private transportMaxFrameBytes = 1024 * 1024;
+  // Default 10 MB — must match transport-sdk maxWireBytes and SDK client maxWireBytes.
+  // Bitcoin block events can reach 2–4 MB serialized; 1 MB caused permanent outbox stall.
+  private transportMaxFrameBytes = 10 * 1024 * 1024;
 
   private draining: Promise<void> | null = null;
 
@@ -107,13 +109,31 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     }
 
     if (persisted.rawEvents.length > 0) {
+      // Step 1: publish. If transport is unavailable, outbox rows are retained and drain will retry.
+      let published = false;
       try {
         await this.publisherProvider.publisher.publishWireStreamBatchWithAck(persisted.rawEvents);
+        published = true;
       } catch (e) {
-        this.logger.verbose('Outbox publish error', { args: { error: (e as any)?.message } });
+        this.logger.verbose('Fast-path publish failed, outbox retained for drain retry', {
+          args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
+        });
       }
 
-      await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
+      if (published) {
+        // Step 2: delete outbox rows and advance watermark. Only reached on successful publish.
+        // If delete throws, rows stay in outbox and drain will redeliver (at-least-once) — acceptable.
+        try {
+          await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
+          // advance watermark so next hasAnyPendingAfterWatermark() skips
+          // already-delivered ids, making fast-path reachable on subsequent saves.
+          this.adapter.advanceWatermark(persisted.lastId);
+        } catch (e) {
+          this.logger.verbose('Fast-path outbox ACK delete failed, drain will redeliver', {
+            args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
+          });
+        }
+      }
     }
   }
 
@@ -154,9 +174,12 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         });
         if (sent === 0) break;
       } catch (e) {
-        this.logger.verbose('Outbox drain error — scheduling retry', { args: { error: (e as any)?.message } });
+        this.logger.verbose('Outbox drain chunk failed', {
+          args: { action: 'drainOutboxCompletely', error: (e as any)?.message },
+        });
         this.startRetryTimerIfNeeded();
-        // throw e;
+        // stop the loop after scheduling retry — avoids tight CPU spin on persistent errors.
+        break;
       }
     }
   }
@@ -190,9 +213,9 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
       // Snapshot successfully created → reset the counter on the aggregate
       aggregate.resetSnapshotCounter();
     } catch (err: any) {
-      // We swallow snapshot errors by policy: log & continue
-      this.logger.debug('Snapshot create failed (ignored)', {
-        args: { aggregateId: aggregate.aggregateId, error: err?.message },
+      // Snapshot errors are swallowed by policy — never fail the main save flow.
+      this.logger.verbose('Snapshot create failed (swallowed by policy)', {
+        args: { action: 'maybeCreateSnapshot', aggregateId: aggregate.aggregateId, error: err?.message },
       });
     }
   }
