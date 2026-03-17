@@ -423,12 +423,25 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
   private collectSystemProps(): any {
     const result: any = {};
 
-    // Excluded system fields - manually defined array
+    // Excluded system fields — these are stored as separate DB columns or are
+    // runtime-configuration that must NOT be persisted in the snapshot payload.
+    // BUG-8 fix: added all internal config fields so they are not overwritten by
+    // Object.assign on fromSnapshot(). In particular _snapshotAdapters contains
+    // functions which JSON.stringify silently drops — restoring them from snapshot
+    // would break adapter calls on the next toSnapshot() with a TypeError.
     const excludedFields = [
       '_version',
       '_aggregateId',
       '_lastBlockHeight',
       '_versionsFromSnapshot',
+      // Config fields — controlled by constructor options, not by snapshot state:
+      '_snapshotsEnabled',
+      '_snapshotInterval',
+      '_snapshotMinKeep',
+      '_snapshotKeepWindow',
+      '_allowPruning',
+      // Adapter functions cannot survive JSON round-trip — exclude entirely:
+      '_snapshotAdapters',
       INTERNAL_EVENTS.toString(),
     ];
 

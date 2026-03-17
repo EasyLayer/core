@@ -155,6 +155,7 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
                 row.payload, // same BLOB
                 row.isCompressed ? 1 : 0,
                 row.timestamp,
+                row.uncompressedBytes, // caused ulen=NULL → budget miscalc → OOM
               ]
             );
 
@@ -180,12 +181,16 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
 
             outboxIds.push(newId.toString());
           }
-
-          // Mark as saved after successful flush for this aggregate.
-          agg.markEventsAsSaved();
+          // Do NOT call markEventsAsSaved() here — wait for COMMIT first.
         }
 
         await qr.query('COMMIT');
+
+        // mark events as saved only AFTER successful COMMIT.
+        // If COMMIT throws, ROLLBACK happens and INTERNAL_EVENTS must remain intact for retry.
+        for (const agg of aggregates) {
+          agg.markEventsAsSaved();
+        }
 
         // Manual flush to persistent storage (IndexedDB) after COMMIT.
         await this.persistToDiskIfSupported();
@@ -242,32 +247,35 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
   public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
     if (aggregateIds.length === 0) return;
 
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    await qr.query('BEGIN'); // sql.js supports plain BEGIN
-    try {
-      // 1) Per-aggregate event tables
-      for (const id of aggregateIds) {
-        await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+    // wrap in writeLock — all write operations must be serialized in browser adapter.
+    await this.writeLock.runExclusive(async () => {
+      const qr = this.dataSource.createQueryRunner();
+      await qr.connect();
+      await qr.query('BEGIN'); // sql.js supports plain BEGIN
+      try {
+        // 1) Per-aggregate event tables
+        for (const id of aggregateIds) {
+          await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
+        }
+
+        // 2) Snapshots after the rollback height
+        const placeholders = aggregateIds.map(() => '?').join(',');
+        await qr.manager.query(
+          `DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`,
+          [blockHeight, ...aggregateIds]
+        );
+
+        // 3) Outbox: clear completely (safer in browser after reorg)
+        await qr.manager.query(`DELETE FROM "outbox"`);
+
+        await qr.query('COMMIT');
+      } catch (e) {
+        await qr.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        await qr.release();
       }
-
-      // 2) Snapshots after the rollback height
-      const placeholders = aggregateIds.map(() => '?').join(',');
-      await qr.manager.query(`DELETE FROM "snapshots" WHERE "blockHeight" > ? AND "aggregateId" IN (${placeholders})`, [
-        blockHeight,
-        ...aggregateIds,
-      ]);
-
-      // 3) Outbox: clear completely (safer in browser after reorg)
-      await qr.manager.query(`DELETE FROM "outbox"`);
-
-      await qr.query('COMMIT');
-    } catch (e) {
-      await qr.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      await qr.release();
-    }
+    });
 
     // Reset streaming watermark
     this.lastSeenId = 0n;
@@ -405,6 +413,12 @@ export class BrowserSqljsAdapter<T extends AggregateRoot = AggregateRoot> extend
 
       return events.length;
     });
+  }
+
+  /** advance watermark after successful fast-path publish+delete. */
+  public advanceWatermark(lastId: string): void {
+    const id = BigInt(lastId);
+    if (id > this.lastSeenId) this.lastSeenId = id;
   }
 
   // ─────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────

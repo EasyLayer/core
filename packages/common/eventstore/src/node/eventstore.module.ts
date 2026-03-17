@@ -29,16 +29,29 @@ type EventStoreConfig = TypeOrmModuleOptions & {
   name: string;
   database: string;
   aggregates: AggregateRoot[];
+  /**
+   * Hard cap per transport frame in bytes.
+   * Must match transport-sdk maxWireBytes and SDK client settings.
+   * Default: 10 MB (Bitcoin block events can reach 2–4 MB serialized).
+   */
+  transportMaxFrameBytes?: number;
 };
 
 @Module({})
 export class EventStoreModule {
+  private static readonly logger = new Logger(EventStoreModule.name);
+  private static readonly moduleName = 'eventstore';
+
   static async forRootAsync(config: EventStoreConfig): Promise<DynamicModule> {
     if (typeof window !== 'undefined') {
       throw new Error(`Node module cannot be used in browser runtime.`);
     }
 
-    const { isGlobal, name, database, aggregates, ...restOptions } = config;
+    this.logger.verbose('Starting eventstore module registration', {
+      module: this.moduleName,
+    });
+
+    const { isGlobal, name, database, aggregates, transportMaxFrameBytes, ...restOptions } = config;
 
     // Entities: outbox + per-aggregate event tables + snapshots.
     const ddlDriverForEntities: DriverType = config.type === 'postgres' ? 'postgres' : 'sqlite';
@@ -54,7 +67,10 @@ export class EventStoreModule {
       entities,
       synchronize: false,
       database,
-      ...(config.type === 'postgres' ? { type: 'postgres', extra: { min: 5, max: 20 } } : { type: 'sqlite' as const }),
+      // merge extra pool settings — user config wins for any keys they provide.
+      ...(config.type === 'postgres'
+        ? { type: 'postgres', extra: { min: 5, max: 20, ...(restOptions as any).extra } }
+        : { type: 'sqlite' as const }),
     } as any;
 
     const allTableNames = entities.map(getTableName);
@@ -77,14 +93,18 @@ export class EventStoreModule {
               throw new Error('Invalid DataSource options');
             }
 
-            logger.log('Connecting to database...');
+            logger.log('Connecting to database...', {
+              module: this.moduleName,
+            });
             const ds = new DataSource(options);
             await ds.initialize();
 
             await ensureSchema(ds, allTableNames, logger);
             await ensureNonNegativeGuards(ds, ddlDriverForEntities, outboxTable, aggregateTables, logger);
 
-            logger.log('Connected and schema ensured.');
+            logger.log('Connected and schema ensured.', {
+              module: this.moduleName,
+            });
             return ds;
           },
         }),
@@ -108,7 +128,9 @@ export class EventStoreModule {
         {
           provide: EventStoreWriteService,
           useFactory: (adapter: BaseAdapter, publisher: PublisherProvider, readService: EventStoreReadService) => {
-            return new EventStoreWriteService(adapter, publisher, readService, {});
+            return new EventStoreWriteService(adapter, publisher, readService, {
+              transportMaxFrameBytes,
+            });
           },
           inject: [EVENT_STORE_ADAPTER, PublisherProvider, EventStoreReadService],
         },

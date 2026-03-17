@@ -220,8 +220,9 @@ export class BitcoinNormalizer {
     const vin: Vin[] = universalTx.vin as any;
     const vout: Vout[] = universalTx.vout as any;
 
+    const fee = this.mustNumber(universalTx.fee, 'fee');
+
     // Optional fee & feeRate
-    const fee = this.optNumber(universalTx.fee);
     const feeRate = Number.isFinite(fee) && vsize > 0 ? (fee as number) / vsize : undefined;
 
     const out: Transaction = {

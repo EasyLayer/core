@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { BlockchainProviderService, MempoolTxMetadata } from '../blockchain-provider';
 import type { MempoolCommandExecutor } from './interfaces';
@@ -15,8 +15,9 @@ import type { MempoolCommandExecutor } from './interfaces';
  * - External consumer MUST call `unlock()` when the cycle under this snapshot is finished.
  */
 @Injectable()
-export class MempoolLoaderService {
+export class MempoolLoaderService implements OnModuleInit {
   private readonly log = new Logger(MempoolLoaderService.name);
+  private readonly moduleName = 'blocks-queue';
 
   // Enable switch (off by default; flip via start()).
   private enabled = false;
@@ -30,14 +31,30 @@ export class MempoolLoaderService {
     private readonly executor: MempoolCommandExecutor
   ) {}
 
+  onModuleInit() {
+    this.log.verbose('Mempool loader service initialized', {
+      module: this.moduleName,
+    });
+  }
+
   /** One-time flip to enable the synchronizer. Idempotent. */
   public start(): void {
-    if (!this.enabled) this.enabled = true;
+    if (!this.enabled) {
+      this.enabled = true;
+      this.log.verbose('Mempool refresh enabled', {
+        module: this.moduleName,
+      });
+    }
   }
 
   /** External signal that current cycle is finished → allow next refresh. */
   public unlock(): void {
-    if (this.locked) this.locked = false;
+    if (this.locked) {
+      this.locked = false;
+      this.log.verbose('Mempool refresh unlocked', {
+        module: this.moduleName,
+      });
+    }
   }
 
   /**
@@ -53,11 +70,18 @@ export class MempoolLoaderService {
   public async refresh(height: number): Promise<void> {
     if (!this.enabled) return;
     if (this.locked) {
-      this.log.verbose('Refresh skipped: locked (a cycle is in progress)');
+      this.log.verbose('Mempool refresh skipped because previous cycle is still in progress', {
+        module: this.moduleName,
+      });
       return;
     }
 
     // 1) Fetch raw snapshots from all providers.
+    this.log.verbose('Mempool refresh started', {
+      module: this.moduleName,
+      args: { height },
+    });
+
     const raw = await this.provider.getRawMempoolFromAll(true);
 
     // 2) Deduplicate across providers (no fee logic here).
@@ -71,10 +95,18 @@ export class MempoolLoaderService {
         perProvider,
       });
       this.locked = true;
-      this.log.verbose('Snapshot dispatched to aggregate; synchronizer locked');
+      this.log.verbose('Mempool snapshot dispatched and loader locked', {
+        module: this.moduleName,
+        args: { height, providers: Object.keys(perProvider).length },
+      });
     } catch (e) {
-      this.log.verbose('Executor.handleSnapshot failed; leaving unlocked to allow retry', {
-        error: (e as Error)?.message ?? String(e),
+      this.log.verbose('Failed to dispatch mempool snapshot, will retry on next trigger', {
+        module: this.moduleName,
+        args: {
+          height,
+          action: 'refresh',
+          error: (e as any)?.message ?? String(e),
+        },
       });
     }
   }
@@ -119,7 +151,8 @@ export class MempoolLoaderService {
       }
     }
 
-    this.log.debug('Per-provider snapshot built', {
+    this.log.verbose('Per-provider snapshot built', {
+      module: this.moduleName,
       args: {
         providers: Object.keys(out).length,
         totalTxids: Object.values(out).reduce((sum, arr) => sum + arr.length, 0),

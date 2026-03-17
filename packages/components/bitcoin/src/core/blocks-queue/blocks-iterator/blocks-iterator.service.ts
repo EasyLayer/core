@@ -1,13 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Injectable, Inject, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, Inject, OnModuleDestroy, Logger, OnModuleInit } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import type { BlocksCommandExecutor } from '../interfaces';
 
 @Injectable()
-export class BlocksQueueIteratorService implements OnModuleDestroy {
-  log = new Logger(BlocksQueueIteratorService.name);
+export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit {
+  private readonly logger = new Logger(BlocksQueueIteratorService.name);
+  private readonly moduleName = 'blocks-queue';
   private _queue!: BlocksQueue<Block>;
   private _isIterating: boolean = false;
   private batchProcessedPromise!: Promise<void>;
@@ -15,6 +16,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   private _blocksBatchSize: number = 1024;
   private _timer: ExponentialTimer | null = null;
   private readonly _monitoringInterval: number;
+  private readonly _startInterval: number = 1000;
 
   constructor(
     @Inject('BlocksCommandExecutor')
@@ -42,8 +44,16 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     return this._isIterating;
   }
 
+  onModuleInit() {
+    this.logger.verbose('Blocks queue iterator service initialized', {
+      module: this.moduleName,
+    });
+  }
+
   onModuleDestroy() {
-    this.log.verbose('Shutting down iterator');
+    this.logger.verbose('Blocks queue iterator service is shutting down', {
+      module: this.moduleName,
+    });
     this._timer?.destroy();
     this._timer = null;
     this._resolveNextBatch();
@@ -54,14 +64,9 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
    * Starts iterating over the block queue and processing blocks.
    */
   public async startQueueIterating(queue: BlocksQueue<Block>): Promise<void> {
-    this.log.verbose('Start blocks iterating', {
-      args: { initialQueueLength: queue.length },
-    });
-
     // NOTE: We use this to make sure that
     // method startQueueIterating() is executed only once in its entire life.
     if (this._isIterating) {
-      this.log.verbose('Blocks iterating skipped: already iterating');
       // Iterating Blocks already started
       return;
     }
@@ -71,8 +76,15 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     // TODO: think where put this
     this._queue = queue;
 
-    this.log.verbose('Queue assigned to iterator', {
-      args: { currentSize: this._queue.currentSize },
+    this.logger.debug('Start blocks iterating from height', {
+      module: this.moduleName,
+      args: {
+        initialQueueLength: queue.length,
+        currentSize: this._queue.currentSize,
+        blocksBatchSize: this._blocksBatchSize,
+        startInterval: this._startInterval,
+        maxInterval: this._monitoringInterval,
+      },
     });
 
     this._timer = exponentialIntervalAsync(
@@ -81,42 +93,40 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
         // we wait for the resolving of the promise of the previous batch (confirm batch method)
         await this.batchProcessedPromise;
 
-        this.log.verbose('Previous batch resolved, fetching next batch');
-
         const batch = await this.peekNextBatch();
 
         if (batch.length > 0) {
           await this.processBatch(batch);
-          this.log.verbose('Batch processed, resetting interval');
           resetInterval();
-        } else {
-          this.log.verbose('No blocks to process this tick');
         }
       },
       {
-        interval: 500, // Start with 500ms for first attempts
+        interval: this._startInterval, // Start with 500ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval
         multiplier: 2, // Exponential backoff multiplier
       }
     );
 
-    this.log.verbose('Iterator exponential timer started');
+    this.logger.debug('Iterator exponential timer started', {
+      module: this.moduleName,
+    });
   }
 
   private async processBatch(batch: Block[]) {
     // Init the promise for the next wait
     this.initBatchProcessedPromise();
 
-    this.log.verbose('Iterator process batch with length', { args: { batchLength: batch.length } });
+    this.logger.verbose('Iterator process batch with length', {
+      module: this.moduleName,
+      args: { batchLength: batch.length },
+    });
 
     try {
       await this.blocksCommandExecutor.handleBatch({ batch, requestId: uuidv4() });
-
-      this.log.verbose('handleBatch succeeded');
     } catch (error) {
-      this.log.verbose('Failed to process the batch, will retry', {
-        methodName: 'processBatch',
-        args: error,
+      this.logger.verbose('Failed to process the batch, will retry', {
+        module: this.moduleName,
+        args: { action: 'process', error },
       });
 
       // IMPORTANT: We call this to resolve queue promise
@@ -141,6 +151,10 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
    * @returns Promise resolving to array of blocks ready for processing
    */
   private async peekNextBatch(): Promise<Block[]> {
+    this.logger.verbose('Previous batch resolved, fetching next batch', {
+      module: this.moduleName,
+    });
+
     // Maximum batch size in bytes - this is our memory/processing limit
     const maxBatchSize = this._blocksBatchSize;
 
@@ -148,7 +162,8 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     // This ensures we always make progress while respecting resource constraints
     const batch: Block[] = await this._queue.getBatchUpToSize(maxBatchSize);
 
-    this.log.verbose('Fetched batch for processing', {
+    this.logger.verbose('Fetched batch for processing', {
+      module: this.moduleName,
       args: {
         batchLength: batch.length,
         maxBatchSize,

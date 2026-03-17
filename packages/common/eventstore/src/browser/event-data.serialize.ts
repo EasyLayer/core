@@ -1,6 +1,6 @@
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { DriverType, EventDataModel, EventReadRow } from '../core';
-import { utf8ToBuffer, bufferToUtf8 } from './bytes';
+import { utf8ToBuffer, bufferToUtf8, byteLengthUtf8 } from './bytes';
 
 /**
  * Single-pass serialization; ONE buffer feeds BOTH:
@@ -21,7 +21,8 @@ export async function toEventDataModel(event: DomainEvent, version: number): Pro
 
   const type = Object.getPrototypeOf(event).constructor.name;
   const json = JSON.stringify(payload ?? {}); // string once
-  const uncompressedBytes = Buffer.byteLength(json, 'utf8');
+  // BUG-4 fix: use byteLengthUtf8 (TextEncoder-based) — Buffer is not available in browser runtime.
+  const uncompressedBytes = byteLengthUtf8(json);
 
   const buf = utf8ToBuffer(json);
   return {
@@ -37,12 +38,12 @@ export async function toEventDataModel(event: DomainEvent, version: number): Pro
 }
 
 // Builds a DomainEvent for aggregate rehydration.
-// - Decompress/UTF-8 decode BLOB payload.
+// - UTF-8 decode BLOB payload (browser adapter never compresses — isCompressed is always false).
 // - JSON.parse to get the event payload object.
 // - Intended ONLY for domain path: model.loadFromHistory([...]).
 export async function toDomainEvent(
   aggregateId: string,
-  { type, requestId, blockHeight, payload, isCompressed, version, timestamp }: EventDataModel
+  { type, requestId, blockHeight, payload, isCompressed: _isCompressed, version, timestamp }: EventDataModel
 ) {
   const jsonStr = bufferToUtf8(payload);
   const userPayload = JSON.parse(jsonStr);

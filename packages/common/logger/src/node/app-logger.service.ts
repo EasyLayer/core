@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { BunyanInstance } from './bunyan-service';
 import { configureRootBunyan, getRootBunyan, isLoggingEnabled, deerrorize } from './bunyan-service';
-import type { IAppLogger, LogMeta, RootLoggerOptions } from '../core';
+import type { IAppLogger, LogLevel, LogMeta, RootLoggerOptions } from '../core';
 import { ContextService } from './context';
 
 /** Application logger (bunyan backend) with ALS context. */
@@ -26,9 +26,9 @@ export class AppLogger implements IAppLogger {
   /** Return a child logger; preserves the same ALS context reference. */
   child(component: string): IAppLogger {
     const childLogger = this.logger.child({ component }, true);
-    const wrap = (level: keyof IAppLogger, message: string, meta?: LogMeta, withCtx?: boolean) => {
+    const wrap = (level: LogLevel, message: string, meta?: LogMeta, withCtx?: boolean) => {
       if (!isLoggingEnabled()) return;
-      const payload = withCtx ? this.withDebugCtx(meta) : this.clean(meta);
+      const payload = this.normalizeMeta(level, meta, withCtx);
       // @ts-ignore
       childLogger[level](payload, message);
     };
@@ -37,7 +37,7 @@ export class AppLogger implements IAppLogger {
       debug: (m, meta) => wrap('debug', m, meta, true),
       info: (m, meta) => wrap('info', m, meta, false),
       warn: (m, meta) => wrap('warn', m, meta, false),
-      error: (m, meta) => wrap('error', m, meta, false),
+      error: (m, meta) => wrap('error', m, meta, true),
       fatal: (m, meta) => wrap('fatal', m, meta, false),
       child: (sub) => this.child(`${component}:${sub}`),
     };
@@ -48,7 +48,7 @@ export class AppLogger implements IAppLogger {
   }
   debug(m: string, meta?: LogMeta) {
     this.do('debug', m, meta, true);
-  } // requestId only here
+  }
   info(m: string, meta?: LogMeta) {
     this.do('info', m, meta, false);
   }
@@ -56,20 +56,35 @@ export class AppLogger implements IAppLogger {
     this.do('warn', m, meta, false);
   }
   error(m: string, meta?: LogMeta) {
-    this.do('error', m, meta, false);
+    this.do('error', m, meta, true);
   }
   fatal(m: string, meta?: LogMeta) {
     this.do('fatal', m, meta, false);
   }
 
-  private do(level: keyof IAppLogger, message: string, meta?: LogMeta, withCtx = false) {
+  private do(level: LogLevel, message: string, meta?: LogMeta, withCtx = false) {
     if (!isLoggingEnabled()) return;
-    const m = withCtx ? this.withDebugCtx(meta) : this.clean(meta);
+    const payload = this.normalizeMeta(level, meta, withCtx);
     // @ts-ignore
-    this.logger[level](m, message);
+    this.logger[level](payload, message);
   }
 
-  private withDebugCtx(meta?: LogMeta): any {
+  private normalizeMeta(level: LogLevel, meta?: LogMeta, withCtx = false): any {
+    const cleaned = this.clean(meta);
+    const base = withCtx ? this.withRequestCtx(cleaned) : cleaned;
+
+    if (level === 'trace') {
+      return base;
+    }
+
+    const { serviceName, ...rest } = base as LogMeta;
+    return {
+      module: rest.module ?? 'unknown',
+      ...rest,
+    };
+  }
+
+  private withRequestCtx(meta?: LogMeta): LogMeta {
     const m = this.clean(meta);
     const req = m.requestId ?? this.ctx?.get<string>('requestId');
     const batch = m.batchRequestIds ?? this.ctx?.get<string[]>('batchRequestIds');
@@ -78,7 +93,7 @@ export class AppLogger implements IAppLogger {
     return m;
   }
 
-  private clean(meta?: LogMeta): any {
+  private clean(meta?: LogMeta): LogMeta {
     return deerrorize(meta || {});
   }
 }

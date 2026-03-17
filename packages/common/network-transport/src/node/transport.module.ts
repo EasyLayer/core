@@ -1,4 +1,4 @@
-import { Module, DynamicModule } from '@nestjs/common';
+import { Module, DynamicModule, Logger } from '@nestjs/common';
 import { OutboxBatchSender } from '../core';
 import type { TransportKind, TransportPort } from '../core';
 import type {
@@ -36,11 +36,18 @@ export interface TransportModuleOptions {
 
 @Module({})
 export class NetworkTransportModule {
+  private static readonly logger = new Logger(NetworkTransportModule.name);
+  private static readonly moduleName = 'network-transport';
+
   static forRoot(options: TransportModuleOptions): DynamicModule {
     const { isGlobal, transports = [], outbox } = options ?? {};
 
     const imports: DynamicModule[] = [];
     const map: Array<{ kind: TransportKind; token: any }> = [];
+
+    this.logger.verbose('Starting network-transport module registration', {
+      module: this.moduleName,
+    });
 
     for (const t of transports) {
       const kind = (t as any).type as TransportKind;

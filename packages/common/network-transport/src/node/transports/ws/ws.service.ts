@@ -21,7 +21,7 @@ export interface WsServiceOptions {
   /** App-level heartbeat (exponential backoff). */
   ping?: { factor?: number; minMs?: number; maxMs?: number; staleMs?: number; password?: string };
   /** Max message size (bytes). */
-  maxWireBytes?: number; // default: 1 MiB
+  maxWireBytes?: number; // default: 10 MiB — must match eventstore transportMaxFrameBytes
 }
 
 /**
@@ -73,7 +73,8 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     this.token = opts.token;
     this.expectedClientId = opts.clientId;
     this.ackTimeoutMs = Math.max(1, opts.ackTimeoutMs ?? 4_500);
-    this.maxWireBytes = Math.max(1024, opts.maxWireBytes ?? 1024 * 1024);
+    // Default 10 MB — must match transport-sdk maxWireBytes and eventstore transportMaxFrameBytes.
+    this.maxWireBytes = Math.max(1024, opts.maxWireBytes ?? 10 * 1024 * 1024);
 
     // Bare HTTP(S) server only for upgrade; no HTTP routes.
     if (opts.tls) {
@@ -87,9 +88,11 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
 
     this.wss = new WebSocketServer({ server: this.server, path: this.path, maxPayload: this.maxWireBytes });
     this.wss.on('connection', (ws, req) => this.onConnection(ws, req));
-    this.wss.on('error', (err) => this.log.warn('wss error', err as any));
+    this.wss.on('error', (err) =>
+      this.log.warn('WSS server error', { module: 'network-transport', args: { error: (err as any)?.message } })
+    );
     this.server.listen(opts.port, opts.host, () =>
-      this.log.log(`WS server listening at ${opts.host}:${opts.port}${this.path}`)
+      this.log.log(`WS server listening at ${opts.host}:${opts.port}${this.path}`, { module: 'network-transport' })
     );
 
     // Heartbeat with exponential backoff
@@ -169,7 +172,10 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     try {
       const { token, clientId } = parseAuth(req, this.token);
       if (this.expectedClientId && clientId !== this.expectedClientId) {
-        this.log.warn(`Unexpected clientId: got=${clientId}, want=${this.expectedClientId}`);
+        this.log.debug('WS unexpected clientId', {
+          module: 'network-transport',
+          args: { got: clientId, want: this.expectedClientId },
+        });
       }
 
       // Enforce single active client: close previous if any
@@ -185,12 +191,18 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
       ws.on('close', (code, reason) => this.onClose(code, String(reason)));
       ws.on('error', (err) => this.onError(err));
 
-      this.log.log(`WS client connected: clientId=${clientId ?? '<n/a>'}`);
+      this.log.debug('WS client connected', {
+        module: 'network-transport',
+        args: { clientId: clientId ?? null },
+      });
 
       // Ask heartbeat to ping sooner after a new connection
       this.heartbeatReset?.();
     } catch (e: any) {
-      this.log.warn(`WS connection rejected: ${String(e?.message ?? e)}`);
+      this.log.debug('WS connection rejected', {
+        module: 'network-transport',
+        args: { error: String(e?.message ?? e) },
+      });
       try {
         ws.close(1008, 'unauthorized');
       } catch {}
@@ -214,8 +226,15 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
         if (!want || want === got) {
           this.online = true;
           this.lastPongAt = Date.now();
+          this.log.verbose('WS pong accepted, peer online', {
+            module: 'network-transport',
+            args: { clientId: this.socketClientId },
+          });
         } else {
           this.online = false; // invalid pong
+          this.log.warn('WS pong rejected (invalid password)', {
+            module: 'network-transport',
+          });
         }
         break;
       }
@@ -227,7 +246,7 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
       }
       case Actions.QueryRequest: {
         const { name, dto } = (msg.payload as any) || {};
-        this.handleQuery(name, dto);
+        void this.handleQuery(name, dto);
         break;
       }
       default:
@@ -260,11 +279,17 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     }
     this.socket = null;
     this.socketClientId = null;
-    this.log.warn(`WS client disconnected: ${code} ${reason || ''}`.trim());
+    this.log.warn('WS client disconnected', {
+      module: 'network-transport',
+      args: { code, reason: reason || '' },
+    });
   }
 
   private onError(err: any) {
-    this.log.warn(`WS error: ${String(err?.message ?? err)}`);
+    this.log.debug('WS socket error', {
+      module: 'network-transport',
+      args: { error: String(err?.message ?? err) },
+    });
   }
 
   /* eslint-disable no-empty */
@@ -297,7 +322,10 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
           ws.send(JSON.stringify(ping));
         } catch (e) {
           this.online = false;
-          this.log.warn(`WS ping failed: ${String((e as any)?.message ?? e)}`);
+          this.log.verbose('WS ping send failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: String((e as any)?.message ?? e) },
+          });
         }
       },
       { multiplier, interval, maxInterval }

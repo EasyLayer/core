@@ -27,10 +27,12 @@ export class NetworkProvider extends BaseProvider {
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
     if (typeof (this.transport as any).subscribeToNewBlocks !== 'function') {
-      throw new Error('subscribeToNewBlocks is not supported by this transport');
+      throw new Error(
+        `Provider "${(this.transport as any).uniqName}": subscribeToNewBlocks is not supported by transport type "${(this.transport as any).type}"`
+      );
     }
 
-    return (this.transport as any).subscribeToNewBlocks((blockData: Buffer | Uint8Array) => {
+    return this.transport.subscribeToNewBlocks!((blockData: Buffer | Uint8Array) => {
       try {
         // Normalize to Uint8Array without copying when possible
         const u8 =
@@ -46,7 +48,16 @@ export class NetworkProvider extends BaseProvider {
         const parsed = UniversalTransformer.parseBlockBytes(u8, this.network);
         callback(parsed as UniversalBlock);
       } catch (err) {
-        onError?.(err instanceof Error ? err : new Error(String(err)));
+        // Wrap with context so the caller knows where the failure occurred
+        const wrapped =
+          err instanceof Error
+            ? new Error(
+                `Provider "${(this.transport as any).uniqName}": failed to parse incoming block bytes: ${err.message}`
+              )
+            : new Error(
+                `Provider "${(this.transport as any).uniqName}": failed to parse incoming block bytes: ${String(err)}`
+              );
+        onError?.(wrapped);
       }
     }, onError);
   }

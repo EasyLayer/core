@@ -111,6 +111,14 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
 
   abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
 
+  /**
+   * Advance the outbox delivery watermark to lastId (inclusive).
+   * Called after a successful fast-path publish+delete so that
+   * hasAnyPendingAfterWatermark() does not treat already-delivered rows
+   * as "pending" on the next save() call.
+   */
+  abstract advanceWatermark(lastId: string): void;
+
   abstract createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void>;
 
   // ─────────────────────────────── SNAPSHOTS / REHYDRATION ───────────────────────────────

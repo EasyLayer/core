@@ -47,6 +47,8 @@ export class Mempool extends AggregateRoot {
   private loadTracker = new LoadTracker(); // hash32 -> { timestamp, feeRate, providerName }
   private providerTx = new ProviderTxMap(); // provider -> Set<hash32>
 
+  private lastUpdatedMs = Date.now();
+
   constructor({
     aggregateId,
     blockHeight,
@@ -125,7 +127,7 @@ export class Mempool extends AggregateRoot {
       locktime: full.locktime,
       vin: lightVin,
       vout: lightVout,
-      feeRate: full.feeRate, // may be absent upstream; kept if present
+      feeRate: full.feeRate ? full.feeRate : full.fee / full.vsize,
     };
   }
 
@@ -195,6 +197,7 @@ export class Mempool extends AggregateRoot {
     );
 
     logger.log('Mempool successfully initialized', {
+      module: 'mempool-model',
       args: {
         lastHeight: height,
       },
@@ -245,7 +248,7 @@ export class Mempool extends AggregateRoot {
         { aggregatedMetadata: filtered }
       )
     );
-    logger.log('Mempool refreshed.');
+    logger.log('Mempool refreshed', { module: 'mempool-model' });
   }
 
   /**
@@ -308,7 +311,8 @@ export class Mempool extends AggregateRoot {
         )
       );
 
-      logger.log('Mempool synced.', {
+      logger.log('Mempool synced', {
+        module: 'mempool-model',
         args: { mempool: this.getMemoryUsage() },
       });
 
@@ -351,7 +355,8 @@ export class Mempool extends AggregateRoot {
             loadedForEvent.push({ txid: slim.txid, transaction: slim, providerName });
           }
         } catch (e: unknown) {
-          logger.debug('sync provider failed', {
+          logger.debug('Mempool provider sync failed', {
+            module: 'mempool-model',
             args: { providerName, error: (e as Error)?.message ?? String(e) },
           });
         } finally {
@@ -440,6 +445,7 @@ export class Mempool extends AggregateRoot {
     this.batchSizer.clear();
     this.prevDuration = undefined;
     // this.initialSyncDone = false;
+    this.lastUpdatedMs = Date.now();
   }
 
   /** Persist txs loaded on this tick; maintain fee snapshot for telemetry. */
@@ -454,6 +460,7 @@ export class Mempool extends AggregateRoot {
 
       this.txStore.set(h, transaction);
       this.loadTracker.add(h, { timestamp: Date.now(), feeRate: fee, providerName });
+      this.lastUpdatedMs = Date.now();
     }
   }
 
@@ -470,6 +477,10 @@ export class Mempool extends AggregateRoot {
   // ====================================================================================
   // Read API (O(1) / O(n) helpers)
   // ====================================================================================
+
+  public getLastUpdatedMs(): number {
+    return this.lastUpdatedMs;
+  }
 
   /** O(n): iterate over known txids from current snapshot fence. */
   public *txIds(): Iterable<string> {
@@ -492,6 +503,12 @@ export class Mempool extends AggregateRoot {
   public async *iterLoadedTransactions(): AsyncGenerator<LightTransaction> {
     for (const [, tx] of this.txStore.__getMap()) {
       yield tx;
+    }
+  }
+
+  public *iterMetadata(): Iterable<MempoolTxMetadata> {
+    for (const [, md] of this.metaStore.__getMap()) {
+      yield md;
     }
   }
 

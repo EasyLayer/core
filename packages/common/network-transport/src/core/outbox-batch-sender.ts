@@ -14,7 +14,7 @@ interface WireEventRecord {
   blockHeight: number;
   /** Serialized JSON string (already decompressed if DB compressed it) */
   payload: string;
-  /** Milliseconds since epoch for ordering/telemetry */
+  /** Microseconds since epoch (monotonic, from DomainEvent.timestamp). */
   timestamp: number;
 }
 
@@ -29,8 +29,14 @@ export class OutboxBatchSender {
   private logger = new Logger(OutboxBatchSender.name);
   private transport: TransportPort | null = null;
 
+  private readonly moduleName = 'network-transport';
+
   public setTransport(next: TransportPort | null): void {
     this.transport = next ?? null;
+    this.logger.debug('Transport set', {
+      module: this.moduleName,
+      args: { kind: next?.kind },
+    });
   }
 
   public getProducer(): TransportPort | null {
@@ -39,6 +45,11 @@ export class OutboxBatchSender {
 
   public async streamWireWithAck(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
     if (!this.transport) {
+      // No transport bound — silently skip. Outbox drain will retry when transport becomes available.
+      this.logger.verbose('No transport set, batch skipped', {
+        module: this.moduleName,
+        args: { eventCount: events.length },
+      });
       return { ok: true, okIndices: [] };
     }
 

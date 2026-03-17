@@ -20,6 +20,7 @@ export abstract class BaseConnectionManager<
     healthcheck(): Promise<boolean>;
   },
 > {
+  protected readonly moduleName = 'blockchain-provider';
   protected providers: Map<string, T> = new Map();
   protected logger: Logger;
   protected connected: Set<string> = new Set();
@@ -33,7 +34,8 @@ export abstract class BaseConnectionManager<
         throw new Error(`A provider with the name "${name}" has already been added.`);
       }
       this.providers.set(name, provider);
-      this.logger.debug('Provider registered', {
+      this.logger.verbose('Provider registered', {
+        module: this.moduleName,
         args: { providerName: name, providerType: (provider as any)?.type },
       });
     }
@@ -52,7 +54,11 @@ export abstract class BaseConnectionManager<
       await provider.connect();
       this.connected.add(provider.uniqName);
       return true;
-    } catch {
+    } catch (error) {
+      this.logger.verbose('Provider connection attempt failed', {
+        module: this.moduleName,
+        args: { providerName: provider.uniqName, action: 'connect', error: (error as Error).message },
+      });
       return false;
     }
   }
@@ -76,12 +82,16 @@ export abstract class BaseConnectionManager<
    */
   async destroy(): Promise<void> {
     for (const provider of this.providers.values()) {
-      this.logger.debug('Disconnecting provider', { args: { providerName: provider.uniqName } });
+      this.logger.verbose('Disconnecting provider', {
+        module: this.moduleName,
+        args: { providerName: provider.uniqName },
+      });
       try {
         await provider.disconnect();
       } catch (error) {
-        this.logger.warn('Error disconnecting provider during cleanup', {
-          args: { error, providerName: provider.uniqName },
+        this.logger.verbose('Error disconnecting provider during cleanup', {
+          module: this.moduleName,
+          args: { error, providerName: provider.uniqName, action: 'destroy' },
         });
       } finally {
         this.connected.delete(provider.uniqName);
@@ -101,7 +111,10 @@ export abstract class BaseConnectionManager<
     try {
       await provider.disconnect();
     } catch (error) {
-      this.logger.warn('Error disconnecting provider during removal', { args: { error, name } });
+      this.logger.verbose('Error disconnecting provider during removal', {
+        module: this.moduleName,
+        args: { error, name, action: 'remove' },
+      });
     } finally {
       this.connected.delete(name);
     }

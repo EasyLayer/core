@@ -1,6 +1,5 @@
 import type { Logger } from '@nestjs/common';
 import type { EventBus } from '@easylayer/common/cqrs';
-import { AppLogger } from '@easylayer/common/logger';
 import type { OutboxBatchSender } from '@easylayer/common/network-transport';
 import { Publisher, Subscriber } from '../core';
 

@@ -109,9 +109,12 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
         };
         try {
           ipcRenderer.send('transport:message', ping);
-          this.log.verbose('ipc-renderer ping published');
+          this.log.verbose('IPC renderer ping sent', { module: 'network-transport' });
         } catch (e: any) {
-          this.log.debug(`ipc-renderer ping error: ${e?.message ?? e}`);
+          this.log.verbose('IPC renderer ping send failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: e?.message ?? e },
+          });
         }
       },
       { interval, multiplier, maxInterval }
@@ -135,7 +138,7 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
-          this.log.verbose('ipc-renderer pong accepted');
+          this.log.verbose('IPC renderer pong accepted, peer online', { module: 'network-transport' });
         }
         return;
       }

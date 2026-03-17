@@ -2,12 +2,6 @@ import { P2PTransport } from '../p2p.transport';
 
 jest.setTimeout(20000);
 
-/**
- * bitcore-p2p mock:
- * - Pool emits 'peerready' with a mock Peer
- * - Peer.sendMessage handles GetHeaders (emits empty headers) and GetData (emits 2 blocks)
- * - Event system with on/once/emit/removeListener
- */
 jest.mock('bitcore-p2p', () => {
   class Emitter {
     private handlers: Record<string, Function[]> = {};
@@ -19,6 +13,7 @@ jest.mock('bitcore-p2p', () => {
       const idx = arr.indexOf(fn);
       if (idx >= 0) arr.splice(idx, 1);
     }
+    listenerCount(e: string) { return (this.handlers[e] || []).length; }
   }
   class Messages {
     static GetData = class { constructor(public inventory: any) {} };
@@ -39,7 +34,6 @@ jest.mock('bitcore-p2p', () => {
               toBuffer: () => Buffer.from('abcd', 'hex'),
             },
           });
-          // Emit two blocks (3rd missing to test null fill)
           this.emit('block', mk('11'.repeat(32)));
           this.emit('block', mk('22'.repeat(32)));
         }, 5);
@@ -62,7 +56,7 @@ describe('P2PTransport (node)', () => {
       uniqName: 'p2p-test',
       peers: [{ host: 'h', port: 8333 }],
       network: { network: 'testnet', nativeCurrencySymbol: 'tBTC', hasSegWit: true },
-      headerSyncEnabled: false, // disable header sync for deterministic tests
+      headerSyncEnabled: false,
       checkpoint: { hash: '00'.repeat(32), height: 0 },
       ...overrides,
     } as any);
@@ -77,6 +71,8 @@ describe('P2PTransport (node)', () => {
     }
   });
 
+  // ===== Existing tests =====
+
   it('connect establishes active peer', async () => {
     const t = makeTransport();
     await t.connect();
@@ -84,10 +80,9 @@ describe('P2PTransport (node)', () => {
     expect(t['activePeer']).not.toBeNull();
   });
 
-  it('getManyBlockHashesByHeights preserves order and nulls (using local header map)', async () => {
+  it('getManyBlockHashesByHeights preserves order and nulls from local header map', async () => {
     const t = makeTransport();
     await t.connect();
-    // Seed tracker: genesis at 0 already set by checkpoint; add height 1
     t['chainTracker'].addHeader('aa'.repeat(32), 1);
     const out = await t.getManyBlockHashesByHeights([0, 1, 2]);
     expect(out).toEqual(['00'.repeat(32), 'aa'.repeat(32), null]);
@@ -103,40 +98,139 @@ describe('P2PTransport (node)', () => {
     expect(out.length).toBe(3);
     expect(Buffer.isBuffer(out[0])).toBe(true);
     expect(Buffer.isBuffer(out[1])).toBe(true);
-    expect(out[2]).toBeNull();
+    expect(out[2]).toBeNull(); // c was not emitted by mock
   });
 
-  it('getBlockHeight throws until header sync provides tip (when enabled)', async () => {
+  it('getBlockHeight returns number from checkpoint', async () => {
     const t = makeTransport({ headerSyncEnabled: false });
     await t.connect();
-    // With only checkpoint(0), tip is 0 → getBlockHeight should be >= 0
     const h = await t.getBlockHeight();
     expect(typeof h).toBe('number');
     expect(h).toBeGreaterThanOrEqual(0);
   });
 
-  it('subscribeToNewBlocks delivers raw buffers to subscribers and supports unsubscribe', async () => {
+  it('subscribeToNewBlocks delivers raw buffers and supports unsubscribe', async () => {
     const t = makeTransport();
     await t.connect();
     const received: Buffer[] = [];
     const sub = t.subscribeToNewBlocks((b: Buffer) => received.push(b));
 
-    // Trigger a mock block through the active peer
     await new Promise((r) => setTimeout(r, 5));
     const peer: any = t['activePeer'];
-    const mockBlock = {
+    peer.emit('block', {
       block: {
         hash: Buffer.from('aa'.repeat(32), 'hex'),
         toBuffer: () => Buffer.from('abcd', 'hex'),
       },
-    };
-    peer.emit('block', mockBlock);
+    });
 
     await new Promise((r) => setTimeout(r, 5));
-
     expect(received.length).toBeGreaterThan(0);
     expect(Buffer.isBuffer(received[0])).toBe(true);
-
     sub.unsubscribe();
+  });
+
+  it('requestHexBlocks: listener is removed after blocks arrive (no leak)', async () => {
+    const t = makeTransport();
+    await t.connect();
+    const peer: any = t['activePeer'];
+
+    const a = '11'.repeat(32);
+    const b = '22'.repeat(32);
+    const listenersBefore = peer.listenerCount('block');
+
+    const resultPromise = t.requestHexBlocks([a, b]);
+    // Give it time to start listening
+    await new Promise((r) => setTimeout(r, 30));
+    await resultPromise;
+
+    // After blocks arrive and done() resolves, listener must be removed
+    const listenersAfter = peer.listenerCount('block');
+    expect(listenersAfter).toBe(listenersBefore);
+  });
+
+  it('requestHexBlocks: returns nulls for all if peer is null (no active peer)', async () => {
+    const t = makeTransport();
+    // Don't connect — activePeer stays null
+    const out = await t.requestHexBlocks(['11'.repeat(32), '22'.repeat(32)]);
+    expect(out).toEqual([null, null]);
+  });
+
+  // ===== New tests for P2P status methods (3.2) =====
+
+  describe('isHeaderSyncComplete()', () => {
+    it('returns false before header sync runs', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      await t.connect();
+      const result = await t.isHeaderSyncComplete();
+      expect(result).toBe(false);
+    });
+
+    it('returns true after header sync completes', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      // Manually force complete flag
+      t['headerSyncComplete'] = true;
+      const result = await t.isHeaderSyncComplete();
+      expect(result).toBe(true);
+    });
+  });
+
+  describe('getHeaderSyncProgress()', () => {
+    it('returns zero total and percentage while syncing', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      await t.connect();
+      t['chainTracker'].addHeader('aa'.repeat(32), 1);
+
+      const progress = await t.getHeaderSyncProgress();
+      expect(progress.synced).toBe(2); // checkpoint + 1 added header
+      expect(progress.total).toBe(0);  // total unknown while not complete
+      expect(progress.percentage).toBe(0);
+    });
+
+    it('returns 100% when sync is complete', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      t['headerSyncComplete'] = true;
+      t['chainTracker'].addHeader('aa'.repeat(32), 1);
+
+      const progress = await t.getHeaderSyncProgress();
+      expect(progress.percentage).toBe(100);
+      expect(progress.total).toBe(progress.synced);
+      expect(progress.synced).toBeGreaterThan(0);
+    });
+  });
+
+  describe('waitForHeaderSync()', () => {
+    it('resolves immediately when already complete', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      t['headerSyncComplete'] = true;
+      await expect(t.waitForHeaderSync(1000)).resolves.toBeUndefined();
+    });
+
+    it('throws when headerSyncEnabled is false and sync was never started', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      t['headerSyncComplete'] = false;
+      t['headerSyncPromise'] = null;
+      await expect(t.waitForHeaderSync(100)).rejects.toThrow('header sync was not started');
+    });
+
+    it('times out when sync does not complete in time', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      t['headerSyncComplete'] = false;
+      // Hang forever — never resolves
+      t['headerSyncPromise'] = new Promise(() => {});
+
+      await expect(t.waitForHeaderSync(50)).rejects.toThrow('header sync timed out after 50ms');
+    });
+
+    it('resolves when headerSyncPromise resolves', async () => {
+      const t = makeTransport({ headerSyncEnabled: false });
+      t['headerSyncComplete'] = false;
+      let resolveSync!: () => void;
+      t['headerSyncPromise'] = new Promise<void>((res) => { resolveSync = res; });
+
+      const waitPromise = t.waitForHeaderSync(2000);
+      resolveSync();
+      await expect(waitPromise).resolves.toBeUndefined();
+    });
   });
 });

@@ -4,8 +4,12 @@ import type { SnapshotReadRow } from './snapshots.model';
 import type { EventReadRow } from './event-data.model';
 import type { FindEventsOptions, BaseAdapter } from './base-adapter';
 
-/** Minimal TTL-based LRU for hot aggregates (read-path acceleration). (kept) */
-class LruCache<T> {
+/**
+ * TTL-based cache with LFU (Least Frequently Used) eviction.
+ * Eviction picks the entry with the lowest hit count when max capacity is reached.
+ * NOTE: this is LFU, not true LRU. Expired entries are pruned lazily on get().
+ */
+class LfuCache<T> {
   private map = new Map<string, { v: T; exp: number; hit: number }>();
   constructor(
     private ttlMs = 60_000,
@@ -56,11 +60,11 @@ export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
   logger = new Logger(EventStoreReadService.name);
 
   // Read-path cache for hot aggregates.
-  private _cache = new LruCache<T>(60_000, 1000);
+  private _cache = new LfuCache<T>(60_000, 1000);
 
   constructor(private readonly adapter: BaseAdapter<T>) {}
 
-  get cache(): LruCache<T> {
+  get cache(): LfuCache<T> {
     return this._cache;
   }
 
@@ -69,10 +73,21 @@ export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
     if (!id) return model;
 
     const cached = this._cache.get(id) as K | null;
-    if (cached) return cached;
+    if (cached) {
+      this.logger.verbose('Aggregate served from cache', {
+        module: 'eventstore',
+        args: { aggregateId: id },
+      });
+      return cached;
+    }
 
     // Single adapter call: rehydrate to the latest persisted height (snapshot + tail events).
     await this.adapter.restoreExactStateLatest(model);
+
+    this.logger.debug('Aggregate rehydrated from event store', {
+      module: 'eventstore',
+      args: { aggregateId: id, version: model.version },
+    });
 
     this._cache.set(id, model);
     return model;

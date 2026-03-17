@@ -1,4 +1,4 @@
-import { DynamicModule, Module, Type } from '@nestjs/common';
+import { DynamicModule, Logger, Module, Type } from '@nestjs/common';
 import { BlockchainProviderService } from '../blockchain-provider';
 import { BlocksQueueService } from './blocks-queue.service';
 import { BlocksQueueIteratorService } from './blocks-iterator';
@@ -21,10 +21,17 @@ export interface BlocksQueueModuleOptions {
 
 @Module({})
 export class BlocksQueueModule {
+  private static readonly logger = new Logger(BlocksQueueModule.name);
+  private static readonly moduleName = 'blocks-queue';
+
   static async forRootAsync(config: BlocksQueueModuleOptions): Promise<DynamicModule> {
     const { blocksCommandExecutor, mempoolCommandExecutor, ...restConfig } = config;
 
-    return {
+    this.logger.verbose('Starting blocks queue module registration', {
+      module: this.moduleName,
+    });
+
+    const dynamicModule: DynamicModule = {
       module: BlocksQueueModule,
       imports: [],
       providers: [
@@ -63,5 +70,7 @@ export class BlocksQueueModule {
       ],
       exports: [BlocksQueueService, MempoolLoaderService],
     };
+
+    return dynamicModule;
   }
 }

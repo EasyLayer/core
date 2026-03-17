@@ -190,12 +190,16 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
             outboxIds.push(newId.toString());
           }
-
-          // Clear unsaved events after successful inserts for this aggregate.
-          agg.markEventsAsSaved();
+          // Do NOT call markEventsAsSaved() here — wait for COMMIT first.
         }
 
         await qr.query('COMMIT');
+
+        // mark events as saved only AFTER successful COMMIT.
+        // If COMMIT throws, ROLLBACK happens and INTERNAL_EVENTS must remain intact for retry.
+        for (const agg of aggregates) {
+          agg.markEventsAsSaved();
+        }
 
         const firstId = firstIdBn ? String(firstIdBn) : '0';
         const lastId = lastIdBn ? String(lastIdBn) : '0';
@@ -411,6 +415,12 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     });
   }
 
+  /** advance watermark after successful fast-path publish+delete. */
+  public advanceWatermark(lastId: string): void {
+    const id = BigInt(lastId);
+    if (id > this.lastSeenId) this.lastSeenId = id;
+  }
+
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
   /** Persist the CURRENT aggregate state as a new snapshot. (kept from original) */
@@ -434,7 +444,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   /** Return latest snapshot (full DB row) for aggregateId. */
   public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "aggregateId","blockHeight","version","payload","isCompressed","createdAt"
+      `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = ?
        ORDER BY "blockHeight" DESC
@@ -457,7 +467,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   /** Return latest snapshot (full DB row) ≤ given height. */
   public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
     const rows = await this.dataSource.query(
-      `SELECT "aggregateId","blockHeight","version","payload","isCompressed","createdAt"
+      `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
        WHERE "aggregateId" = ? AND "blockHeight" <= ?
        ORDER BY "blockHeight" DESC

@@ -12,7 +12,11 @@ import {
 } from '../../core';
 // import { KeyManagementService, ScriptUtilService, WalletService, TransactionService } from '../../blockchain-provider/utils';
 import type { NetworkConfig, RateLimits } from '../../core';
-import { RPCTransport as NodeRPC, P2PTransport as NodeP2P } from './transports';
+import {
+  RPCTransport as NodeRPC,
+  P2PTransport as NodeP2P,
+  MempoolSpaceTransport as NodeMempoolSpace,
+} from './transports';
 
 export interface ProviderConnectionConfig {
   /** For RPC: base URL (required), for P2P: not used */
@@ -66,7 +70,7 @@ export interface ProviderConnectionConfig {
 }
 
 export interface ModuleProviderConfig {
-  type: 'rpc' | 'p2p';
+  type: 'rpc' | 'p2p' | 'mempool.space';
   connections: ProviderConnectionConfig[];
 }
 
@@ -109,13 +113,28 @@ export interface BlockchainProviderModuleOptions {
  */
 @Module({})
 export class BlockchainProviderModule {
+  private static readonly logger = new Logger(BlockchainProviderModule.name);
+  private static readonly moduleName = 'blockchain-provider';
+
   static async forRootAsync(opts: BlockchainProviderModuleOptions): Promise<DynamicModule> {
     const { networkProviders, mempoolProviders, network, rateLimits, isGlobal } = opts;
+    // Capture for use inside closures where `this` is unavailable
+    const logger = BlockchainProviderModule.logger;
+    const moduleName = BlockchainProviderModule.moduleName;
+
+    logger.verbose('Starting blockchain provider module registration', {
+      module: moduleName,
+    });
 
     const buildTransports = (cfg: ModuleProviderConfig) =>
       (cfg.connections ?? []).map((c, i) => {
         if (cfg.type === 'rpc') {
-          if (!c.baseUrl) throw new Error(`RPC connection ${i}: baseUrl required`);
+          if (!c.baseUrl) {
+            logger.error(`RPC connection [${i}]: baseUrl is required but not provided`, {
+              module: moduleName,
+            });
+            throw new Error(`RPC connection ${i}: baseUrl required`);
+          }
           return new NodeRPC({
             uniqName: c.uniqName ?? `rpc_${i + 1}`,
             baseUrl: c.baseUrl,
@@ -125,7 +144,28 @@ export class BlockchainProviderModule {
             rateLimits,
           });
         }
-        if (!c.peers?.length) throw new Error(`P2P connection ${i}: peers required`);
+        if (cfg.type === 'mempool.space') {
+          if (!c.baseUrl) {
+            logger.error(`Mempool.Space connection [${i}]: baseUrl is required but not provided`, {
+              module: moduleName,
+            });
+            throw new Error(`Mempool.Space connection ${i}: baseUrl required`);
+          }
+          return new NodeMempoolSpace({
+            uniqName: c.uniqName ?? `mempool_space_${i + 1}`,
+            baseUrl: c.baseUrl,
+            responseTimeout: c.responseTimeout,
+            zmqEndpoint: c.zmqEndpoint,
+            network,
+            rateLimits,
+          });
+        }
+        if (!c.peers?.length) {
+          logger.error(`P2P connection [${i}]: peers are required but not provided`, {
+            module: moduleName,
+          });
+          throw new Error(`P2P connection ${i}: peers required`);
+        }
         return new NodeP2P({
           uniqName: c.uniqName ?? `p2p_${i + 1}`,
           peers: c.peers,
@@ -144,9 +184,19 @@ export class BlockchainProviderModule {
         provide: NetworkConnectionManager,
         useFactory: async () => {
           const provs = buildNetworkProviders();
-          const logger = new Logger(NetworkConnectionManager.name);
-          const cm = new NetworkConnectionManager({ providers: provs, logger });
-          if (provs.length) await cm.initialize();
+          const cmLogger = new Logger(NetworkConnectionManager.name);
+          const cm = new NetworkConnectionManager({ providers: provs, logger: cmLogger });
+          if (provs.length) {
+            try {
+              await cm.initialize();
+            } catch (error) {
+              logger.debug('Failed to initialize network connection manager', {
+                module: moduleName,
+                args: { error: (error as Error).message },
+              });
+              throw error;
+            }
+          }
           return cm;
         },
         inject: [],
@@ -155,9 +205,19 @@ export class BlockchainProviderModule {
         provide: MempoolConnectionManager,
         useFactory: async () => {
           const provs = buildMempoolProviders();
-          const logger = new Logger(MempoolConnectionManager.name);
-          const cm = new MempoolConnectionManager({ providers: provs, logger });
-          if (provs.length) await cm.initialize();
+          const cmLogger = new Logger(MempoolConnectionManager.name);
+          const cm = new MempoolConnectionManager({ providers: provs, logger: cmLogger });
+          if (provs.length) {
+            try {
+              await cm.initialize();
+            } catch (error) {
+              logger.debug('Failed to initialize mempool connection manager', {
+                module: moduleName,
+                args: { error: (error as Error).message },
+              });
+              throw error;
+            }
+          }
           return cm;
         },
         inject: [],

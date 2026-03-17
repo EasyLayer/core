@@ -2,6 +2,7 @@ export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
 
 export interface LogMeta {
   serviceName?: string;
+  module?: string;
   methodName?: string;
   args?: unknown;
   requestId?: string;

@@ -69,7 +69,7 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
       if (ok) {
         this.lastPongAt = Date.now();
         this.online = true;
-        this.log.verbose('browser-http pong accepted');
+        this.log.verbose('HTTP browser pong accepted, peer online', { module: 'network-transport' });
       }
       return;
     }
@@ -125,9 +125,12 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
             this.opts.webhook.token,
             this.opts.webhook.timeoutMs
           );
-          this.log.verbose('browser-http ping published');
+          this.log.verbose('HTTP browser ping sent', { module: 'network-transport' });
         } catch (e: any) {
-          this.log.debug(`browser-http ping error: ${e?.message ?? e}`);
+          this.log.verbose('HTTP browser ping send failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: e?.message ?? e },
+          });
         }
       },
       { interval, multiplier, maxInterval }

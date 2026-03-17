@@ -65,12 +65,15 @@ describe('BlocksQueueIteratorService', () => {
       blockTimeMs: 60_000,
     } as any);
 
-    (service as any).log = mockLogger;
+    // FIX: service uses this.logger, not this.log
+    (service as any).logger = mockLogger;
   });
 
   afterEach(() => {
     try { service?.onModuleDestroy?.(); } catch {}
   });
+
+  // ===== constructor =====
 
   describe('constructor', () => {
     it('should initialize with correct batch size', () => {
@@ -81,6 +84,8 @@ describe('BlocksQueueIteratorService', () => {
       expect(typeof service.resolveNextBatch).toBe('function');
     });
   });
+
+  // ===== initBatchProcessedPromise =====
 
   describe('initBatchProcessedPromise', () => {
     it('should create a promise and resolve it immediately if queue is empty', async () => {
@@ -104,6 +109,8 @@ describe('BlocksQueueIteratorService', () => {
     });
   });
 
+  // ===== processBatch =====
+
   describe('processBatch', () => {
     it('should call blocksCommandExecutor.handleBatch with correct arguments', async () => {
       (service as any)._queue = { length: 1, getBatchUpToSize: async () => [] };
@@ -113,7 +120,7 @@ describe('BlocksQueueIteratorService', () => {
         expect.objectContaining({
           batch,
           requestId: expect.any(String),
-        }),
+        })
       );
     });
 
@@ -124,20 +131,28 @@ describe('BlocksQueueIteratorService', () => {
       expect((service as any).batchProcessedPromise).toBeInstanceOf(Promise);
     });
 
-    it('should log error and continue on handleBatch failure', async () => {
+    it('should log verbose and resolve next batch on handleBatch failure', async () => {
       (service as any)._queue = { length: 1, getBatchUpToSize: async () => [] };
       blocksCommandExecutorMock.handleBatch.mockRejectedValueOnce(new Error('Processing failed'));
       const batch = [createTestBlock(3, [createTransaction(90)])];
       await (service as any).processBatch(batch);
+
+      // Actual log call in service:
+      // this.logger.verbose('Failed to process the batch, will retry', {
+      //   module: this.moduleName,
+      //   args: { action: 'process', error },
+      // });
       expect(mockLogger.verbose).toHaveBeenCalledWith(
         'Failed to process the batch, will retry',
         expect.objectContaining({
-          methodName: 'processBatch',
-          args: expect.any(Error),
-        }),
+          module: 'blocks-queue',
+          args: expect.objectContaining({ action: 'process' }),
+        })
       );
     });
   });
+
+  // ===== peekNextBatch =====
 
   describe('peekNextBatch', () => {
     it('should return empty array when queue is empty', async () => {
@@ -173,14 +188,17 @@ describe('BlocksQueueIteratorService', () => {
     });
   });
 
+  // ===== resolveNextBatch getter =====
+
   describe('resolveNextBatch getter', () => {
     it('should return the resolveNextBatch function', () => {
       (service as any)._queue = { length: 0 };
       (service as any).initBatchProcessedPromise();
-      const fn = service.resolveNextBatch;
-      expect(typeof fn).toBe('function');
+      expect(typeof service.resolveNextBatch).toBe('function');
     });
   });
+
+  // ===== isIterating getter =====
 
   describe('isIterating getter', () => {
     it('should return false initially', () => {
@@ -199,8 +217,10 @@ describe('BlocksQueueIteratorService', () => {
     });
   });
 
+  // ===== startQueueIterating =====
+
   describe('startQueueIterating', () => {
-    it('should start iterating only once', async () => {
+    it('should start iterating only once — second call is a no-op', async () => {
       const q = new BlocksQueue<Block>({
         lastHeight: 0,
         maxBlockHeight: Number.MAX_SAFE_INTEGER,
@@ -208,11 +228,14 @@ describe('BlocksQueueIteratorService', () => {
         maxQueueSize: 10 * 1024 * 1024,
       });
       await service.startQueueIterating(q);
-      await service.startQueueIterating(q);
-      expect(mockLogger.verbose).toHaveBeenCalledWith('Blocks iterating skipped: already iterating');
+      const callsBefore = mockLogger.debug.mock.calls.length;
+      await service.startQueueIterating(q); // second call — should be no-op
+      // No additional debug logs should be emitted on second call
+      expect(mockLogger.debug.mock.calls.length).toBe(callsBefore);
+      expect(service.isIterating).toBe(true);
     });
 
-    it('should assign queue and log initialization', async () => {
+    it('should log initialization and assign queue', async () => {
       const q = new BlocksQueue<Block>({
         lastHeight: 0,
         maxBlockHeight: Number.MAX_SAFE_INTEGER,
@@ -220,17 +243,19 @@ describe('BlocksQueueIteratorService', () => {
         maxQueueSize: 10 * 1024 * 1024,
       });
       await service.startQueueIterating(q);
-      expect(mockLogger.verbose).toHaveBeenCalledWith(
-        'Start blocks iterating',
-        expect.objectContaining({ args: { initialQueueLength: 0 } }),
+
+      // Actual log: this.logger.debug('Start blocks iterating from height', { args: { initialQueueLength, ... } })
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Start blocks iterating from height',
+        expect.objectContaining({
+          module: 'blocks-queue',
+          args: expect.objectContaining({ initialQueueLength: 0 }),
+        })
       );
-      expect(mockLogger.verbose).toHaveBeenCalledWith(
-        'Queue assigned to iterator',
-        expect.objectContaining({ args: expect.objectContaining({ currentSize: expect.any(Number) }) }),
-      );
+      expect(service.isIterating).toBe(true);
     });
 
-    it('should create exponential timer', async () => {
+    it('should create exponential timer and log it', async () => {
       const q = new BlocksQueue<Block>({
         lastHeight: 0,
         maxBlockHeight: Number.MAX_SAFE_INTEGER,
@@ -238,13 +263,20 @@ describe('BlocksQueueIteratorService', () => {
         maxQueueSize: 10 * 1024 * 1024,
       });
       await service.startQueueIterating(q);
-      expect(mockLogger.verbose).toHaveBeenCalledWith('Iterator exponential timer started');
+
+      // Actual log: this.logger.debug('Iterator exponential timer started', ...)
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Iterator exponential timer started',
+        expect.objectContaining({ module: 'blocks-queue' })
+      );
       expect((service as any)._timer).toBeTruthy();
     });
   });
 
+  // ===== onModuleDestroy =====
+
   describe('onModuleDestroy', () => {
-    it('should clean up resources', async () => {
+    it('should clean up resources and log shutdown', async () => {
       const q = new BlocksQueue<Block>({
         lastHeight: 0,
         maxBlockHeight: Number.MAX_SAFE_INTEGER,
@@ -253,13 +285,19 @@ describe('BlocksQueueIteratorService', () => {
       });
       await service.startQueueIterating(q);
       expect(service.isIterating).toBe(true);
+
       service.onModuleDestroy();
-      expect(mockLogger.verbose).toHaveBeenCalledWith('Shutting down iterator');
+
+      // Actual log: this.logger.verbose('Blocks queue iterator service is shutting down', ...)
+      expect(mockLogger.verbose).toHaveBeenCalledWith(
+        'Blocks queue iterator service is shutting down',
+        expect.objectContaining({ module: 'blocks-queue' })
+      );
       expect((service as any)._timer).toBeNull();
       expect(service.isIterating).toBe(false);
     });
 
-    it('should call resolveNextBatch on destroy', async () => {
+    it('should call resolveNextBatch on destroy — unblocks any waiting promise', async () => {
       (service as any)._queue = { length: 1 };
       let resolved = false;
       (service as any).initBatchProcessedPromise();
@@ -269,6 +307,8 @@ describe('BlocksQueueIteratorService', () => {
       expect(resolved).toBe(true);
     });
   });
+
+  // ===== integration =====
 
   describe('integration tests', () => {
     it('should process blocks end-to-end', async () => {

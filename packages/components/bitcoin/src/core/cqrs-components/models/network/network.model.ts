@@ -215,6 +215,7 @@ export class Network extends AggregateRoot {
     );
 
     logger.log('Network successfully initialized', {
+      module: 'network-model',
       args: {
         lastIndexedHeight: startHeight,
         nextBlockToProcess: startHeight + 1,
@@ -254,9 +255,7 @@ export class Network extends AggregateRoot {
     }
 
     const blockHeight = lightBlocks[lightBlocks.length - 1]?.height ?? -1;
-    // Event payload size estimation:
-    // - blocks: ~100 blocks × 96KB = ~9.6MB per batch (average case)
-    // Total event size: ~9.6MB per blocks batch
+
     this.apply(
       new BitcoinNetworkBlocksAddedEvent(
         {
@@ -269,6 +268,7 @@ export class Network extends AggregateRoot {
     );
 
     logger.log('Blocks successfully added', {
+      module: 'network-model',
       args: { blockHeight },
     });
   }
@@ -324,7 +324,10 @@ export class Network extends AggregateRoot {
           )
         );
 
-        logger.log('Blocks successfully reorganized', { args: { blockHeight: reorgHeight } });
+        logger.log('Blocks successfully reorganized', {
+          module: 'network-model',
+          args: { blockHeight: reorgHeight },
+        });
 
         return;
       }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Block } from '../blockchain-provider';
 import { BlocksQueue } from './blocks-queue';
 import { BlocksQueueIteratorService } from './blocks-iterator';
@@ -6,8 +6,9 @@ import { BlocksQueueLoaderService } from './blocks-loader';
 import { MempoolLoaderService } from './mempool-loader.service';
 
 @Injectable()
-export class BlocksQueueService {
-  logger = new Logger(BlocksQueueService.name);
+export class BlocksQueueService implements OnModuleInit {
+  private readonly logger = new Logger(BlocksQueueService.name);
+  private readonly moduleName = 'blocks-queue';
   private _queue!: BlocksQueue<Block>;
 
   constructor(
@@ -16,6 +17,12 @@ export class BlocksQueueService {
     private readonly mempoolService: MempoolLoaderService,
     private readonly config: any
   ) {}
+
+  onModuleInit() {
+    this.logger.verbose('Blocks queue service initialized', {
+      module: this.moduleName,
+    });
+  }
 
   get queue(): BlocksQueue<Block> {
     return this._queue;
@@ -26,7 +33,9 @@ export class BlocksQueueService {
     this.blocksQueueLoader.startBlocksLoading(this._queue);
     this.blocksQueueIterator.startQueueIterating(this._queue);
 
-    this.logger.verbose('Blocks queue service started');
+    this.logger.verbose('Blocks queue service started', {
+      module: this.moduleName,
+    });
   }
 
   private initQueue(indexedHeight: string | number) {
@@ -35,9 +44,15 @@ export class BlocksQueueService {
       maxQueueSize: this.config.maxQueueSize,
       maxBlockHeight: this.config.maxBlockHeight,
       blockSize: this.config.blockSize,
+      plannerConfig: {
+        // maxAvgBytes must match the network's maximum block size so the EMA upper-clamp
+        // is physically meaningful. Bitcoin mainnet = 4MB, legacy chains = 1MB.
+        maxAvgBytes: this.config.maxBlockSize,
+      },
     });
 
-    this.logger.debug('Queue initialized', {
+    this.logger.verbose('Blocks queue initialized', {
+      module: this.moduleName,
       args: {
         indexedHeight,
         maxQueueSize: this.config.maxQueueSize,
@@ -48,7 +63,10 @@ export class BlocksQueueService {
   }
 
   public async reorganizeBlocks(newStartHeight: string | number): Promise<void> {
-    this.logger.verbose('Reorganizing blocks', { args: { newStartHeight } });
+    this.logger.verbose('Reorganizing blocks', {
+      module: this.moduleName,
+      args: { newStartHeight },
+    });
 
     try {
       // NOTE: We clear the entire queue
@@ -57,7 +75,10 @@ export class BlocksQueueService {
       await this._queue.reorganize(Number(newStartHeight));
       await this.mempoolService.refresh(Number(newStartHeight));
     } catch (error) {
-      this.logger.debug('Queue has NOT been cleared');
+      this.logger.verbose('Queue reorganization cleanup failed', {
+        module: 'blocks-queue',
+        args: { newStartHeight, action: 'reorganize', error },
+      });
     } finally {
       this.blocksQueueIterator.resolveNextBatch();
     }
@@ -65,6 +86,7 @@ export class BlocksQueueService {
 
   async confirmProcessedBatch(blockHashes: string[]): Promise<void> {
     this.logger.verbose('Confirming processed batch', {
+      module: this.moduleName,
       args: { count: blockHashes.length },
     });
 
@@ -72,8 +94,9 @@ export class BlocksQueueService {
       const lastBlockHeight = await this._queue.dequeue(blockHashes);
       await this.mempoolService.refresh(lastBlockHeight);
     } catch (e) {
-      this.logger.debug('Batch has NOT been confirmed', {
-        args: { count: blockHashes.length },
+      this.logger.verbose('Processed batch confirmation failed', {
+        module: this.moduleName,
+        args: { count: blockHashes.length, action: 'confirm', error: e },
       });
     } finally {
       this.blocksQueueIterator.resolveNextBatch();

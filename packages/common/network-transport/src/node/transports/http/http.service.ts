@@ -108,7 +108,7 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     }
 
     this.server.listen(opts.port, opts.host);
-    this.log.log(`HTTP server listening at ${opts.host}:${opts.port}`);
+    this.log.log(`HTTP server listening at ${opts.host}:${opts.port}`, { module: 'network-transport' });
 
     // --- Heartbeat -----------------------------------------------------------
     // Start only when webhook is present; otherwise remain passive.
@@ -165,7 +165,10 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     if (!url) throw new Error('HTTP: webhook.url is required');
 
     const body = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    this.log.debug(`HTTP send action=${typeof msg === 'string' ? '<string>' : (msg as Message).action}`);
+    this.log.verbose('HTTP send', {
+      module: 'network-transport',
+      args: { messageAction: typeof msg === 'string' ? '<string>' : (msg as Message).action },
+    });
 
     const resText = await this.post(url, body, this.opts.webhook?.token, this.opts.webhook?.timeoutMs);
     const parsed = safeParse(resText) as Message | null;
@@ -246,18 +249,25 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
             if (!want || want === got) {
               this.online = true;
               this.lastPongAt = Date.now();
-              this.log.debug('HTTP pong ok');
+              this.log.verbose('HTTP pong accepted, peer online', {
+                module: 'network-transport',
+              });
               return; // success; next backoff step will start from min
             }
           }
 
           // If we fell through — pong is invalid
           this.online = false;
-          this.log.warn('HTTP pong invalid');
+          this.log.debug('HTTP pong invalid or missing', {
+            module: 'network-transport',
+          });
         } catch (e: any) {
           // Network/timeout
           this.online = false;
-          this.log.warn(`HTTP ping failed: ${String(e?.message ?? e)}`);
+          this.log.verbose('HTTP ping failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: String(e?.message ?? e) },
+          });
         }
       },
       { multiplier, interval, maxInterval }

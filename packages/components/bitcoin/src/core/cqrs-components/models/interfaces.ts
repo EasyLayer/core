@@ -41,10 +41,10 @@ export interface LightVout {
  */
 export type LightTransaction = Omit<
   Transaction,
-  'vin' | 'vout' | 'blockhash' | 'time' | 'blocktime' | 'depends' | 'spentby' | 'witnessSize'
+  'vin' | 'vout' | 'blockhash' | 'time' | 'blocktime' | 'depends' | 'spentby' | 'witnessSize' | 'fee'
 > & {
   vin: LightVin[];
   vout: LightVout[];
   /** sat/vB; optional if not computed upstream */
-  feeRate?: number;
+  feeRate: number;
 };

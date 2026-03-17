@@ -210,8 +210,8 @@ describe('BitcoinNormalizer', () => {
       { hash: 'a2', height: 2, strippedsize: 83, size: 83, weight: 332, vsize: 83, version: 1, versionHex: '0x1', merkleroot: 'mr2', time: 1, mediantime: 1, nonce: 1, bits: '0x', difficulty: '1', chainwork: '', nTx: 0, tx: [] },
     ];
     const txs: any[] = [
-      { txid: 't1', hash: 't1', version: 1, size: 10, vsize: 10, weight: 40, strippedsize: 10, locktime: 0, vin: [], vout: [] },
-      { txid: 't2', hash: 't2', version: 1, size: 20, vsize: 20, weight: 80, strippedsize: 20, locktime: 0, vin: [], vout: [] },
+      { txid: 't1', hash: 't1', version: 1, size: 10, vsize: 10, weight: 40, strippedsize: 10, locktime: 0, vin: [], vout: [], fee: 1 },
+      { txid: 't2', hash: 't2', version: 1, size: 20, vsize: 20, weight: 80, strippedsize: 20, locktime: 0, vin: [], vout: [], fee: 1 },
     ];
     const nb = normalizer.normalizeManyBlocks(blocks as any);
     const nt = normalizer.normalizeManyTransactions(txs as any);

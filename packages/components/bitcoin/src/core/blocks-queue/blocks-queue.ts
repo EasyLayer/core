@@ -17,6 +17,15 @@ import type { Block } from '../blockchain-provider';
  * Why thresholds + cooldown:
  * - To avoid frequent O(n) ring re-allocations on minor changes.
  * - Cooldown ensures capacity adjustments happen rarely and predictably.
+ *
+ * alpha = 0.05: slow EMA (half-life ≈ 13 observations).
+ * Blocks vary wildly in size (1KB coinbase vs 4MB full block).
+ * Slow alpha smooths spikes and reflects long-term size trends.
+ *
+ * maxAvgBytes: MUST be passed from network config as maxBlockSize.
+ * Bitcoin mainnet = 4MB (SegWit), legacy chains without SegWit = 1MB.
+ * Clamps the EMA upper bound so desiredSlots does not balloon
+ * during initial sync when blocks are tiny (early blockchain history).
  */
 export interface PlannerConfig {
   maxSlots?: number; // hard cap for ring length
@@ -321,7 +330,15 @@ export class BlocksQueue<T extends Block = Block> {
   }
 
   /**
-   * Dequeues blocks by hash(es).
+   * Dequeues blocks by hash(es). Returns last dequeued block height.
+   *
+   * NOTE: _lastHeight is intentionally NOT updated here.
+   * _lastHeight advances only on enqueue (tracks loader/fetch position)
+   * and resets on reorganize (resets to fork point).
+   * dequeue() is confirmation that blocks were processed by the consumer —
+   * it does not affect where the loader continues fetching from.
+   * Do NOT add _lastHeight update here.
+   *
    * @complexity O(1) per block. Returns last block's height.
    */
   public async dequeue(hashOrHashes: string | string[]): Promise<number> {

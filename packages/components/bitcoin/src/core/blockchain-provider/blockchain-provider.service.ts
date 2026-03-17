@@ -39,8 +39,8 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
  */
 @Injectable()
 export class BlockchainProviderService {
-  logger = new Logger(BlockchainProviderService.name);
   private readonly normalizer: BitcoinNormalizer;
+  private readonly logger = new Logger(BlockchainProviderService.name);
 
   constructor(
     private readonly networkConnectionManager: NetworkConnectionManager,
@@ -118,7 +118,16 @@ export class BlockchainProviderService {
     const validBlocks: UniversalBlock[] = [];
 
     for (const block of blocks) {
-      if (block === null) continue;
+      if (block === null) {
+        // null from RPC = block not found at this height/hash.
+        // Legitimate for single-block queries; suspicious in batch load context
+        // (may cause queue height-sequence errors downstream).
+        this.logger.verbose('Block returned null from provider in batch', {
+          module: 'blockchain-provider',
+          args: { action: 'processAndValidateBlocks' },
+        });
+        continue;
+      }
 
       if (verifyMerkle) {
         const isValid = this.verifyBlockMerkleRoot(block);
@@ -150,6 +159,7 @@ export class BlockchainProviderService {
   // BlockchainProviderService — optional error handler
   public subscribeToNewBlocks(callback: (block: Block) => void, onError?: (err: Error) => void): Subscription {
     this.ensureNetworkProviders();
+
     let resolveSubscription!: () => void;
     let rejectSubscription!: (error: Error) => void;
 
@@ -158,40 +168,43 @@ export class BlockchainProviderService {
       rejectSubscription = reject;
     }) as Subscription;
 
+    // Pre-assign a no-op so unsubscribe() is always callable even if getActiveProvider()
+    // hasn't resolved yet (e.g. during fast shutdown or onModuleDestroy).
+    subscriptionPromise.unsubscribe = () => {};
+
     this.networkConnectionManager
       .getActiveProvider()
       .then((provider) => {
         const networkProvider = provider as NetworkProvider;
+
         if (typeof networkProvider.subscribeToNewBlocks !== 'function') {
-          rejectSubscription(new Error('Active provider does not support block subscriptions'));
+          const err = new Error('Active provider does not support block subscriptions');
+          rejectSubscription(err);
+          onError?.(err);
           return;
         }
 
         const sub = networkProvider.subscribeToNewBlocks(
           (uBlock) => {
             try {
-              // Merkle verify as before
               const isValid =
                 uBlock.height === 0
                   ? BitcoinMerkleVerifier.verifyGenesisMerkleRoot(uBlock)
                   : BitcoinMerkleVerifier.verifyBlockMerkleRoot(uBlock, this.networkConfig.hasSegWit);
+
               if (!isValid) {
-                this.logger.warn('Merkle root verification failed for subscribed block', {
-                  args: { blockHash: uBlock.hash, height: uBlock.height },
-                });
-                return;
+                throw new Error(`Merkle root verification failed for block ${uBlock.hash} at height ${uBlock.height}`);
               }
+
               const normalized = this.normalizer.normalizeBlock(uBlock);
               callback(normalized);
             } catch (err) {
-              this.logger.warn('Failed to process block in subscription', { args: { error: err } });
               onError?.(err as Error);
             }
           },
-          (err) => {
-            // bubble transport errors
-            this.logger.warn('Subscription transport error', { args: { error: err } });
-            onError?.(err);
+          (transportErr) => {
+            rejectSubscription(transportErr);
+            onError?.(transportErr);
           }
         );
 
@@ -201,11 +214,8 @@ export class BlockchainProviderService {
         };
       })
       .catch((error) => {
-        this.logger.warn('Failed to get provider for subscription', {
-          args: { error },
-          methodName: 'subscribeToNewBlocks()',
-        });
         rejectSubscription(error as Error);
+        onError?.(error as Error);
       });
 
     return subscriptionPromise;
@@ -227,29 +237,25 @@ export class BlockchainProviderService {
   ): Promise<T> {
     this.ensureNetworkProviders();
 
+    let provider: NetworkProvider | undefined;
     try {
-      const provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
+      provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
-      const msg = error instanceof Error && error.message ? error.message : String(error ?? 'Unknown error');
-      this.logger.warn('Network provider operation failed, attempting recovery', {
-        args: { methodName, error: msg },
-      });
-
+      // Capture providerName here — before any async recovery that might change activeProvider
+      const providerName = provider?.uniqName ?? 'unknown';
       try {
-        const currentProvider = await this.networkConnectionManager.getActiveProvider();
         const recoveredProvider = (await this.networkConnectionManager.handleProviderFailure(
-          currentProvider.uniqName,
+          providerName,
           error,
           methodName
         )) as NetworkProvider;
-
         return await operation(recoveredProvider);
       } catch (recoveryError) {
-        this.logger.warn('Network provider recovery failed', {
-          args: { methodName, originalError: error, recoveryError },
-        });
-        throw recoveryError;
+        throw new Error(
+          `Network provider "${providerName}" failed for "${methodName}": ${(error as Error).message}. ` +
+            `Recovery also failed: ${(recoveryError as Error).message}`
+        );
       }
     }
   }
@@ -416,6 +422,14 @@ export class BlockchainProviderService {
     return this.executeNetworkProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
       const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
 
+      const nullCount = rawStats.filter((s: any) => s === null).length;
+      if (nullCount > 0) {
+        this.logger.verbose('Some block stats returned null from provider', {
+          module: 'blockchain-provider',
+          args: { action: 'getManyBlocksStatsByHeights', nullCount, total: rawStats.length },
+        });
+      }
+
       const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
       return this.normalizer.normalizeManyBlockStats(validStats);
     });
@@ -530,7 +544,7 @@ export class BlockchainProviderService {
     txids: string[],
     useHex: boolean = false,
     verbosity: 1 | 2 = 1,
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<Transaction[]> {
     if (useHex) {
       const uni = await this.mempoolConnectionManager.executeWithStrategy(
@@ -557,7 +571,7 @@ export class BlockchainProviderService {
    * @param options Mempool request options (strategy, timeout, etc.)
    * @returns Current blockchain height
    */
-  public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions = {}): Promise<number> {
+  public async getCurrentBlockHeightFromMempool(options: MempoolRequestOptions): Promise<number> {
     this.ensureMempoolProviders();
     const height = await this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getCurrentBlockHeight(),
@@ -575,7 +589,7 @@ export class BlockchainProviderService {
    * @param options Mempool request options (strategy, timeout, etc.)
    * @returns Mempool information
    */
-  public async getMempoolInfo(options: MempoolRequestOptions = {}): Promise<MempoolInfo> {
+  public async getMempoolInfo(options: MempoolRequestOptions): Promise<MempoolInfo> {
     const uni = await this.mempoolConnectionManager.executeWithStrategy(
       async (p: MempoolProvider) => await p.getMempoolInfo(),
       options
@@ -594,7 +608,7 @@ export class BlockchainProviderService {
    */
   public async getMempoolEntries(
     txids: string[],
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<(MempoolTxMetadata | null)[]> {
     const entries = await this.mempoolConnectionManager.executeWithStrategy(
       async (provider: MempoolProvider) => await provider.getMempoolEntries(txids),
@@ -663,7 +677,7 @@ export class BlockchainProviderService {
   public async estimateSmartFeeFromMempool(
     confTarget: number,
     estimateMode: 'ECONOMICAL' | 'CONSERVATIVE' = 'CONSERVATIVE',
-    options: MempoolRequestOptions = {}
+    options: MempoolRequestOptions
   ): Promise<any> {
     this.ensureMempoolProviders();
     return this.mempoolConnectionManager.executeWithStrategy(

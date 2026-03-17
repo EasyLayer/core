@@ -4,7 +4,7 @@ import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval
 import { ipcMain, webContents as WC, WebContents } from 'electron';
 import { QueryBus } from '@easylayer/common/cqrs';
 import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
-import { Actions } from '../../../core';
+import { Actions, buildQuery } from '../../../core';
 
 export interface ElectronIpcMainOptions {
   type: 'electron-ipc-main';
@@ -78,7 +78,10 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
     if (!this.wc) throw new Error('Electron main: no active WebContents');
     const payload = typeof msg === 'string' ? msg : msg;
     this.wc.send('transport:message', payload);
-    this.log.debug(`Electron main send action=${typeof msg === 'string' ? '<string>' : (msg as Message).action}`);
+    this.log.verbose('Electron main message sent', {
+      module: 'network-transport',
+      args: { messageAction: typeof msg === 'string' ? '<string>' : (msg as Message).action },
+    });
   }
 
   async waitForAck(deadlineMs = this.opts.timeouts?.ackMs ?? 2_000): Promise<OutboxStreamAckPayload> {
@@ -126,9 +129,12 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
         };
         try {
           this.wc.send('transport:message', ping);
-          this.log.verbose('Electron main ping published');
+          this.log.verbose('Electron main ping sent', { module: 'network-transport' });
         } catch (e: any) {
-          this.log.debug(`Electron main ping error: ${e?.message ?? e}`);
+          this.log.verbose('Electron main ping send failed', {
+            module: 'network-transport',
+            args: { action: 'heartbeat', error: e?.message ?? e },
+          });
         }
       },
       { interval, multiplier, maxInterval }
@@ -152,7 +158,7 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
-          this.log.verbose('Electron main pong accepted');
+          this.log.verbose('Electron main pong accepted, peer online', { module: 'network-transport' });
         }
         return;
       }
@@ -174,11 +180,10 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
 
   private async handleQuery(msg: Message): Promise<void> {
     const name = (msg.payload as any)?.name;
-    const data = (msg.payload as any)?.data;
+    const dto = (msg.payload as any)?.dto;
     if (typeof name !== 'string') return;
     try {
-      const query = { name, data } as any;
-      const result = await this.queryBus.execute(query);
+      const result = await this.queryBus.execute(buildQuery({ name, dto }));
       const reply: Message = {
         action: Actions.QueryResponse,
         payload: { ok: true, data: result },

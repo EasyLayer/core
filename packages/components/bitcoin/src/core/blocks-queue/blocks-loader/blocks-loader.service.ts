@@ -1,23 +1,26 @@
-import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, Logger, OnModuleInit } from '@nestjs/common';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
 import type { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import {
-  PullRpcProviderStrategy,
-  ProcessP2PProviderStrategy,
+  RpcProviderStrategy,
+  RpcZmqProviderStrategy,
+  P2PProviderStrategy,
   BlocksLoadingStrategy,
   StrategyNames,
 } from './load-strategies';
 import { MempoolLoaderService } from '../mempool-loader.service';
 
 @Injectable()
-export class BlocksQueueLoaderService implements OnModuleDestroy {
-  logger = new Logger(BlocksQueueLoaderService.name);
+export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
+  private readonly logger = new Logger(BlocksQueueLoaderService.name);
+  private readonly moduleName = 'blocks-queue';
   private _isLoading: boolean = false;
   private _timer: ExponentialTimer | null = null;
   private _currentStrategy: BlocksLoadingStrategy | null = null;
   private readonly _monitoringInterval: number;
+  private readonly _startInterval: number = 2000;
   private readonly _strategies: Map<StrategyNames, BlocksLoadingStrategy> = new Map();
 
   constructor(
@@ -34,8 +37,16 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
     return this._isLoading;
   }
 
+  onModuleInit() {
+    this.logger.verbose('Blocks queue loader service initialized', {
+      module: this.moduleName,
+    });
+  }
+
   async onModuleDestroy() {
-    this.logger.verbose('Blocks queue loader service is shutting down');
+    this.logger.verbose('Blocks queue loader service is shutting down', {
+      module: this.moduleName,
+    });
     await this._currentStrategy?.stop();
     this._timer?.destroy();
     this._timer = null;
@@ -45,41 +56,44 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
   }
 
   public async startBlocksLoading(queue: BlocksQueue<Block>): Promise<void> {
-    this.logger.verbose('Start blocks loading from height', {
-      args: { initialLastHeight: queue.lastHeight },
-    });
-
     // NOTE: We use this to make sure that
     // method startBlocksLoading() is executed only once in its entire life.
     if (this._isLoading) {
-      this.logger.verbose('Blocks loading skipped: already loading');
       return;
     }
+
+    this.logger.debug('Start blocks loading from height', {
+      module: this.moduleName,
+      args: {
+        initialLastHeight: queue.lastHeight,
+        queueLoaderStrategyName: this.config.queueLoaderStrategyName,
+        startInterval: this._startInterval,
+        maxInterval: this._monitoringInterval,
+      },
+    });
 
     this._isLoading = true;
 
     // Create strategies with queue
     this.createStrategies(queue);
 
-    this.logger.debug('Loading strategy created', {
-      args: { strategy: this.config.queueLoaderStrategyName },
-    });
-
     this._timer = exponentialIntervalAsync(
       async (resetInterval) => {
         try {
           // IMPORTANT: every exponential tick we fetch current blockchain network height
           const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeightFromNetwork();
-          this.logger.debug('Current blockchain network height fetched', {
+          this.logger.verbose('Fetch blockchain network height', {
+            module: this.moduleName,
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
 
           await this.mempoolService.refresh(currentNetworkHeight);
 
           // Get the strategy that should work now
-          this._currentStrategy = this.getCurrentStrategy(queue, currentNetworkHeight);
+          this._currentStrategy = this.getCurrentStrategy();
 
           this.logger.verbose('Loading strategy created', {
+            module: this.moduleName,
             args: { strategy: this._currentStrategy?.name },
           });
 
@@ -89,8 +103,9 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
           // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
           // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
-          this.logger.verbose('Loading blocks on pause.', {
-            args: { error },
+          this.logger.verbose('Loading blocks on pause', {
+            module: this.moduleName,
+            args: { action: 'load', error },
           });
           await this._currentStrategy?.stop();
 
@@ -101,13 +116,15 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
         }
       },
       {
-        interval: 2000, // Start with 1000ms for first attempts
+        interval: this._startInterval, // Start with 1000ms for first attempts
         maxInterval: this._monitoringInterval, // Max interval = monitoring interval (half block time)
         multiplier: 1.6, // Exponential backoff multiplier
       }
     );
 
-    this.logger.verbose('Loader exponential timer started');
+    this.logger.debug('Loader exponential timer started', {
+      module: this.moduleName,
+    });
   }
 
   // Factory method to create strategies
@@ -119,35 +136,25 @@ export class BlocksQueueLoaderService implements OnModuleDestroy {
 
     this._strategies.set(
       StrategyNames.RPC,
-      new PullRpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+      new RpcProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+    );
+
+    this._strategies.set(
+      StrategyNames.RPC_ZMQ,
+      new RpcZmqProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
     );
 
     this._strategies.set(
       StrategyNames.P2P,
-      new ProcessP2PProviderStrategy(this.logger, this.blockchainProviderService, queue, strategyOptions)
+      new P2PProviderStrategy(this.logger, this.blockchainProviderService, queue)
     );
   }
 
-  // Business rule method to determine which strategy should work
-  private getCurrentStrategy(queue: BlocksQueue<Block>, currentNetworkHeight?: number): BlocksLoadingStrategy {
-    const configStrategy = this.config.queueLoaderStrategyName;
-
-    // If config is PULL - always use PULL
-    if (configStrategy === StrategyNames.RPC) {
-      return this._strategies.get(StrategyNames.RPC)!;
-    }
-
-    // If config is SUBSCRIBE but big height difference - use PULL
-    if (currentNetworkHeight !== undefined) {
-      const heightDifference = currentNetworkHeight - queue.lastHeight;
-      const threshold = this.config.strategyThreshold || 10;
-
-      if (heightDifference > threshold) {
-        return this._strategies.get(StrategyNames.RPC)!;
-      }
-    }
-
-    // Default to use configured strategy
-    return this._strategies.get(StrategyNames.P2P)!;
+  // Each strategy is self-contained: handles its own catch-up → real-time transition internally.
+  // The loader is a pure supervisor — picks the configured strategy and runs it.
+  // No threshold switching needed here anymore.
+  private getCurrentStrategy(): BlocksLoadingStrategy {
+    const configStrategy = this.config.queueLoaderStrategyName as StrategyNames;
+    return this._strategies.get(configStrategy) ?? this._strategies.get(StrategyNames.RPC)!;
   }
 }

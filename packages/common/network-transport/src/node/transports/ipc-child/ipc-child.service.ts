@@ -126,12 +126,21 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
       p.send?.(msg as any);
       // unified logging for all messages
       if (typeof msg === 'object') {
-        this.log.verbose(`ipc-child -> ${msg.action} cid=${(msg as any).correlationId}`);
+        this.log.verbose('IPC child message sent', {
+          module: 'network-transport',
+          args: { messageAction: msg.action, correlationId: (msg as any).correlationId },
+        });
       } else {
-        this.log.verbose('ipc-child -> <string>');
+        this.log.verbose('IPC child message sent', {
+          module: 'network-transport',
+          args: { messageAction: '<string>' },
+        });
       }
     } catch (e: any) {
-      this.log.warn(`ipc-child send error: ${e?.message ?? e}`);
+      this.log.verbose('IPC child send error', {
+        module: 'network-transport',
+        args: { action: 'send', error: e?.message ?? e },
+      });
     }
   }
 
@@ -184,9 +193,13 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
-          this.log.verbose('IPC child: pong accepted');
+          this.log.verbose('IPC child pong accepted, peer online', {
+            module: 'network-transport',
+          });
         } else {
-          this.log.warn('IPC child: pong rejected (invalid password)');
+          this.log.verbose('IPC child pong rejected (invalid password)', {
+            module: 'network-transport',
+          });
         }
         return;
       }
