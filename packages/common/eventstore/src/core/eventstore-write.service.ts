@@ -16,7 +16,7 @@ export interface EventStoreConfiguration {
 
 @Injectable()
 export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> implements OnModuleInit, OnModuleDestroy {
-  logger = new Logger(EventStoreWriteService.name);
+  private readonly logger = new Logger(EventStoreWriteService.name);
 
   private retryTimer: ExponentialTimer | null = null;
 

@@ -3,7 +3,9 @@ import { DataSource } from 'typeorm';
 import type { DataSourceOptions } from 'typeorm';
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import { PublisherProvider } from '@easylayer/common/cqrs-transport';
-
+// With package.json browser condition fixed, this now resolves to browser/index.ts
+// which exports getBootstrapLogger from browser/bootstrap.ts (console-based, no bunyan).
+import { getBootstrapLogger } from '@easylayer/common/logger';
 import {
   createSnapshotsEntity,
   createEventDataEntity,
@@ -42,9 +44,6 @@ type EventStoreConfig = Omit<DataSourceOptions, 'type' | 'entities' | 'synchroni
 
 @Module({})
 export class EventStoreModule {
-  private static readonly logger = new Logger(EventStoreModule.name);
-  private static readonly moduleName = 'eventstore';
-
   static async forRootAsync(config: EventStoreConfig): Promise<DynamicModule> {
     if (typeof window === 'undefined') {
       throw new Error(`Browser module cannot be used in Node runtime.`);
@@ -53,8 +52,12 @@ export class EventStoreModule {
       throw new Error(`In browser only 'sqljs' driver is supported. Got: '${config.type}'.`);
     }
 
-    this.logger.verbose('Starting eventstore module registration', {
-      module: this.moduleName,
+    // getBootstrapLogger resolves to the browser-safe implementation (console-backed)
+    // because @easylayer/common/logger browser condition now points to browser/index.ts.
+    const logger = getBootstrapLogger(EventStoreModule.name);
+
+    logger.trace('Starting eventstore module registration', {
+      module: 'bootstrap',
     });
 
     const { isGlobal, name, database, aggregates, sqlJsWasmPath, transportMaxFrameBytes, ...restOptions } = config;
@@ -91,8 +94,8 @@ export class EventStoreModule {
         const logger = new Logger(EventStoreModule.name);
         await ensurePersistentStorage(); // request persistent storage grant
         logger.log('Connecting to sql.js database...', {
-          module: this.moduleName,
-        });
+          module: 'eventstore',
+        } as any);
         const ds = new DataSource(dataSourceOptions as DataSourceOptions);
         await ds.initialize();
 
@@ -100,8 +103,8 @@ export class EventStoreModule {
         await ensureNonNegativeGuards(ds, 'sqlite', outboxTable, aggregateTables, logger);
 
         logger.log('Connected and schema ensured.', {
-          module: this.moduleName,
-        });
+          module: 'eventstore',
+        } as any);
         return ds;
       },
     };

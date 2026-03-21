@@ -34,7 +34,7 @@
       "default": "./cqrs/dist/index.js"
     },
     "./logger": {
-      "browser": "./logger/dist/esm/index.js",
+      "browser": "./logger/dist/esm/browser/index.js",
       "module": "./logger/dist/esm/index.js",
       "default": "./logger/dist/index.js"
     },

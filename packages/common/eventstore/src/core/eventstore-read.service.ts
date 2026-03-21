@@ -57,7 +57,7 @@ class LfuCache<T> {
  */
 @Injectable()
 export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
-  logger = new Logger(EventStoreReadService.name);
+  private readonly logger = new Logger(EventStoreReadService.name);
 
   // Read-path cache for hot aggregates.
   private _cache = new LfuCache<T>(60_000, 1000);

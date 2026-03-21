@@ -47,6 +47,15 @@ export class BitcoinNormalizer {
     return 9;
   }
 
+  /**
+   * Returns true if the transaction is a coinbase transaction.
+   * Coinbase txs have exactly one vin with a `coinbase` field instead of txid/vout.
+   * Bitcoin Core does not return a `fee` field for coinbase transactions.
+   */
+  private isCoinbaseTx(universalTx: UniversalTransaction): boolean {
+    return Array.isArray(universalTx.vin) && universalTx.vin.length > 0 && !!(universalTx.vin[0] as any)?.coinbase;
+  }
+
   // =======================
   // Blocks
   // =======================
@@ -194,6 +203,8 @@ export class BitcoinNormalizer {
    * - Accept both `strippedsize` and `strippedSize` from Universal (Hex path may use camel-case).
    * - `hash` fallback to `txid` if absent in Universal.
    * - feeRate is computed if fee & vsize present.
+   * - Coinbase transactions (vin[0].coinbase present) never have a fee from Bitcoin Core;
+   *   treat their fee as 0 instead of throwing.
    */
   public normalizeTransaction(universalTx: UniversalTransaction): Transaction {
     if (!universalTx || typeof universalTx !== 'object') {
@@ -220,10 +231,14 @@ export class BitcoinNormalizer {
     const vin: Vin[] = universalTx.vin as any;
     const vout: Vout[] = universalTx.vout as any;
 
-    const fee = this.mustNumber(universalTx.fee, 'fee');
+    // Coinbase transactions never carry a fee — Bitcoin Core omits the field entirely.
+    // Treat missing fee as 0 for coinbase; require it for all regular transactions.
+    const fee: number = this.isCoinbaseTx(universalTx)
+      ? this.optNumber(universalTx.fee) ?? 0
+      : this.mustNumber(universalTx.fee, 'fee');
 
-    // Optional fee & feeRate
-    const feeRate = Number.isFinite(fee) && vsize > 0 ? (fee as number) / vsize : undefined;
+    // feeRate is meaningless for coinbase (fee=0), but compute uniformly — callers can ignore it.
+    const feeRate = fee > 0 && vsize > 0 ? fee / vsize : undefined;
 
     const out: Transaction = {
       txid,

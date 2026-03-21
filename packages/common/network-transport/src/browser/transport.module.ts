@@ -1,4 +1,4 @@
-import { Module, DynamicModule, Logger } from '@nestjs/common';
+import { Module, DynamicModule } from '@nestjs/common';
 import { OutboxBatchSender } from '../core';
 import type { TransportKind, TransportPort } from '../core';
 import type { HttpBrowserClientOptions, WsBrowserClientOptions, ElectronIpcRendererOptions } from './transports';
@@ -11,28 +11,21 @@ import {
   ElectronIpcRendererService,
 } from './transports';
 
-export type ServerTransportConfig = HttpBrowserClientOptions | WsBrowserClientOptions | ElectronIpcRendererOptions;
+export type BrowserTransportConfig = HttpBrowserClientOptions | WsBrowserClientOptions | ElectronIpcRendererOptions;
 
 export interface TransportModuleOptions {
   isGlobal?: boolean;
-  transports?: ServerTransportConfig[];
+  transports?: BrowserTransportConfig[];
   outbox?: { enabled: boolean; kind: TransportKind };
 }
 
 @Module({})
 export class NetworkTransportModule {
-  private static readonly logger = new Logger(NetworkTransportModule.name);
-  private static readonly moduleName = 'network-transport';
-
   static forRoot(options: TransportModuleOptions): DynamicModule {
     const { isGlobal, transports = [], outbox } = options ?? {};
 
     const imports: DynamicModule[] = [];
     const map: Array<{ kind: TransportKind; token: any }> = [];
-
-    this.logger.verbose('Starting network-transport module registration', {
-      module: this.moduleName,
-    });
 
     for (const t of transports) {
       const kind = (t as any).type as TransportKind;
@@ -50,30 +43,38 @@ export class NetworkTransportModule {
       }
     }
 
-    const providers: any[] = [];
-    const exportsArr: any[] = [];
+    const injectTokens = map.map((m) => m.token);
 
-    if (outbox?.enabled) {
-      const m = map.find((x) => x.kind === outbox.kind);
-      if (!m) throw new Error(`Outbox enabled but transport "${outbox.kind}" is not provisioned`);
-      providers.push({
+    // Always register OutboxBatchSender — same pattern as node version.
+    // If outbox is disabled or no matching transport — sender stays without transport
+    // and simply skips sending (CqrsTransportModule always needs the token).
+    const providers: any[] = [
+      {
         provide: OutboxBatchSender,
-        useFactory: (port: TransportPort) => {
-          const s = new OutboxBatchSender();
-          s.setTransport(port);
-          return s;
+        useFactory: (...ports: TransportPort[]) => {
+          const sender = new OutboxBatchSender();
+
+          if (outbox?.enabled) {
+            const port = ports.find((p) => p && p.kind === outbox.kind);
+            if (port) {
+              sender.setTransport(port);
+            }
+            // No matching transport provisioned — sender runs without transport.
+            // This is intentional: app can still run, outbox batches are silently skipped.
+          }
+
+          return sender;
         },
-        inject: [m.token],
-      });
-      exportsArr.push(OutboxBatchSender);
-    }
+        inject: injectTokens,
+      },
+    ];
 
     return {
       module: NetworkTransportModule,
       global: isGlobal ?? false,
       imports,
       providers,
-      exports: exportsArr,
+      exports: [OutboxBatchSender],
     };
   }
 }

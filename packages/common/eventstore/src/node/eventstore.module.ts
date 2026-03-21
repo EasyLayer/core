@@ -39,17 +39,10 @@ type EventStoreConfig = TypeOrmModuleOptions & {
 
 @Module({})
 export class EventStoreModule {
-  private static readonly logger = new Logger(EventStoreModule.name);
-  private static readonly moduleName = 'eventstore';
-
   static async forRootAsync(config: EventStoreConfig): Promise<DynamicModule> {
     if (typeof window !== 'undefined') {
       throw new Error(`Node module cannot be used in browser runtime.`);
     }
-
-    this.logger.verbose('Starting eventstore module registration', {
-      module: this.moduleName,
-    });
 
     const { isGlobal, name, database, aggregates, transportMaxFrameBytes, ...restOptions } = config;
 
@@ -94,7 +87,7 @@ export class EventStoreModule {
             }
 
             logger.log('Connecting to database...', {
-              module: this.moduleName,
+              module: 'eventstore',
             });
             const ds = new DataSource(options);
             await ds.initialize();
@@ -103,7 +96,7 @@ export class EventStoreModule {
             await ensureNonNegativeGuards(ds, ddlDriverForEntities, outboxTable, aggregateTables, logger);
 
             logger.log('Connected and schema ensured.', {
-              module: this.moduleName,
+              module: 'eventstore',
             });
             return ds;
           },

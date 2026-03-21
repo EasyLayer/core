@@ -26,7 +26,7 @@ export interface AggregateOptions {
   [k: string]: any;
 }
 
-const INTERNAL_EVENTS = Symbol();
+const INTERNAL_EVENTS: unique symbol = Symbol();
 
 /**
  * Helpers for snapshot transforming specific fields

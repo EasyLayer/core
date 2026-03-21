@@ -9,11 +9,20 @@ import { Actions, buildQuery } from '../../../core';
 export interface ElectronIpcMainOptions {
   type: 'electron-ipc-main';
   timeouts?: { ackMs?: number; onlineMs?: number; pingStaleMs?: number };
-  ping?: { factor?: number; minMs?: number; maxMs?: number; password?: string }; // optional
+  ping?: { factor?: number; minMs?: number; maxMs?: number; password?: string };
 }
 
 /**
  * Electron main side service.
+ *
+ * Handles IPC messages from the renderer:
+ *   - ping       → pong
+ *   - query.request → QueryBus.execute() → query.response
+ *   - outbox.stream.ack → resolves pending ACK
+ *
+ * The renderer client (ElectronIpcRendererClient / ElectronRendererTransport)
+ * stores pending queries keyed by requestId and matches responses via msg.requestId.
+ * Using correlationId in the reply caused every query to time out.
  */
 @Injectable()
 export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
@@ -59,6 +68,7 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
   }
 
   // ----- BATCH/PING SECTION -----
+
   isOnline(): boolean {
     const stale = this.opts.timeouts?.pingStaleMs ?? 15_000;
     return this.online && Date.now() - this.lastPongAt < stale;
@@ -168,7 +178,6 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
         else this.lastAckBuffer = ack;
         return;
       }
-      // ----- QUERY SECTION -----
       case Actions.QueryRequest: {
         void this.handleQuery(msg);
         return;
@@ -182,12 +191,16 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
     const name = (msg.payload as any)?.name;
     const dto = (msg.payload as any)?.dto;
     if (typeof name !== 'string') return;
+
     try {
       const result = await this.queryBus.execute(buildQuery({ name, dto }));
+
+      // IMPORTANT: use requestId (not correlationId) — the renderer client keys
+      // pendingQueries by requestId and matches responses via msg.requestId.
       const reply: Message = {
         action: Actions.QueryResponse,
         payload: { ok: true, data: result },
-        correlationId: msg.correlationId,
+        requestId: msg.requestId,
         timestamp: Date.now(),
       };
       await this.send(reply);
@@ -195,7 +208,7 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
       const reply: Message = {
         action: Actions.QueryResponse,
         payload: { ok: false, err: String(e?.message ?? e) },
-        correlationId: msg.correlationId,
+        requestId: msg.requestId,
         timestamp: Date.now(),
       };
       await this.send(reply);

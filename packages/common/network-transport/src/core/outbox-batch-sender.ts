@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Injectable } from '@nestjs/common';
 import type { TransportPort } from './transport-port';
 import type { Message, OutboxStreamAckPayload } from './messages';
 import { Actions } from './messages';
@@ -25,6 +25,7 @@ interface WireEventRecord {
  * - Sends wire batches and awaits ACK with a short deadline.
  * - If no producer is set or producer is offline — throws fast for Outbox to react.
  */
+@Injectable()
 export class OutboxBatchSender {
   private logger = new Logger(OutboxBatchSender.name);
   private transport: TransportPort | null = null;

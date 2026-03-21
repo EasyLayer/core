@@ -45,14 +45,7 @@ export interface CqrsTransportModuleOptions {
 
 @Module({})
 export class CqrsTransportModule {
-  private static readonly logger = new Logger(CqrsTransportModule.name);
-  private static readonly moduleName = 'cqrs-transport';
-
   static forRoot(options?: CqrsTransportModuleOptions): DynamicModule {
-    this.logger.verbose('Starting cqrs transport module registration', {
-      module: this.moduleName,
-    });
-
     const systemModelNames = options?.systemAggregates || [];
     return {
       module: CqrsTransportModule,

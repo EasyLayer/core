@@ -10,6 +10,7 @@ import type {
   UniversalMempoolInfo,
 } from './providers';
 import type { NetworkConfig } from './transports';
+import { ConnectionError, TimeoutError, RateLimitError } from './transports/errors';
 import { BitcoinNormalizer } from './normalizer';
 import { BitcoinMerkleVerifier } from './merkle-verifier';
 import { Block, Transaction, BlockStats, MempoolInfo, MempoolTxMetadata } from './components';
@@ -36,6 +37,12 @@ export type Subscription = Promise<void> & { unsubscribe: () => void };
  * - Mempool operations: Configurable strategies (parallel, round-robin, fastest)
  * - Memory usage: No caching - immediate processing and forwarding
  * - Error recovery: Automatic provider switching with exponential backoff
+ *
+ * Failover policy:
+ * - Only transport-level errors (ConnectionError, TimeoutError, RateLimitError) trigger
+ *   handleProviderFailure and provider switching.
+ * - Domain/validation errors (bad fee, Merkle mismatch, missing fields, etc.) are thrown
+ *   immediately — reconnecting to the same node cannot fix a data problem.
  */
 @Injectable()
 export class BlockchainProviderService {
@@ -94,6 +101,21 @@ export class BlockchainProviderService {
     if (!this.hasMempoolProviders()) {
       throw new Error('No mempool providers configured. Please configure at least one mempool provider.');
     }
+  }
+
+  /**
+   * Returns true when the error represents a transport-level failure that may be
+   * resolved by switching to a different provider:
+   * - ConnectionError  — node unreachable / refused
+   * - TimeoutError     — node too slow / overloaded
+   * - RateLimitError   — node throttling us
+   *
+   * Domain/validation errors (bad fee field, Merkle mismatch, missing block field…)
+   * are NOT transport failures — the same data will come back from any provider,
+   * so failover would just create an infinite retry loop.
+   */
+  private isTransportFailure(error: unknown): boolean {
+    return error instanceof ConnectionError || error instanceof TimeoutError || error instanceof RateLimitError;
   }
 
   /**
@@ -224,8 +246,11 @@ export class BlockchainProviderService {
   // ===== NETWORK OPERATIONS (using networkConnectionManager) =====
 
   /**
-   * Execute network provider method with automatic error handling and provider switching
-   * Implements automatic failover with exponential backoff
+   * Execute network provider method with automatic error handling and provider switching.
+   *
+   * Failover is triggered ONLY for transport-level failures (ConnectionError, TimeoutError,
+   * RateLimitError). Domain/validation errors are re-thrown immediately — switching providers
+   * cannot fix a data problem and would cause infinite recovery loops.
    *
    * @param methodName Name of the method being executed (for logging)
    * @param operation Function to execute on the network provider
@@ -242,6 +267,13 @@ export class BlockchainProviderService {
       provider = (await this.networkConnectionManager.getActiveProvider()) as NetworkProvider;
       return await operation(provider);
     } catch (error) {
+      // Domain/validation errors (bad fee, Merkle mismatch, missing fields, etc.) must
+      // propagate immediately. Reconnecting to the same — or a different — provider
+      // will return the same data and reproduce the same error, creating an infinite loop.
+      if (!this.isTransportFailure(error)) {
+        throw error;
+      }
+
       // Capture providerName here — before any async recovery that might change activeProvider
       const providerName = provider?.uniqName ?? 'unknown';
       try {

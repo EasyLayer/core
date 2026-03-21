@@ -113,26 +113,12 @@ export interface BlockchainProviderModuleOptions {
  */
 @Module({})
 export class BlockchainProviderModule {
-  private static readonly logger = new Logger(BlockchainProviderModule.name);
-  private static readonly moduleName = 'blockchain-provider';
-
   static async forRootAsync(opts: BlockchainProviderModuleOptions): Promise<DynamicModule> {
     const { networkProviders, mempoolProviders, network, rateLimits, isGlobal } = opts;
-    // Capture for use inside closures where `this` is unavailable
-    const logger = BlockchainProviderModule.logger;
-    const moduleName = BlockchainProviderModule.moduleName;
-
-    logger.verbose('Starting blockchain provider module registration', {
-      module: moduleName,
-    });
-
     const buildTransports = (cfg: ModuleProviderConfig) =>
       (cfg.connections ?? []).map((c, i) => {
         if (cfg.type === 'rpc') {
           if (!c.baseUrl) {
-            logger.error(`RPC connection [${i}]: baseUrl is required but not provided`, {
-              module: moduleName,
-            });
             throw new Error(`RPC connection ${i}: baseUrl required`);
           }
           return new NodeRPC({
@@ -146,9 +132,6 @@ export class BlockchainProviderModule {
         }
         if (cfg.type === 'mempool.space') {
           if (!c.baseUrl) {
-            logger.error(`Mempool.Space connection [${i}]: baseUrl is required but not provided`, {
-              module: moduleName,
-            });
             throw new Error(`Mempool.Space connection ${i}: baseUrl required`);
           }
           return new NodeMempoolSpace({
@@ -161,9 +144,6 @@ export class BlockchainProviderModule {
           });
         }
         if (!c.peers?.length) {
-          logger.error(`P2P connection [${i}]: peers are required but not provided`, {
-            module: moduleName,
-          });
           throw new Error(`P2P connection ${i}: peers required`);
         }
         return new NodeP2P({
@@ -190,10 +170,6 @@ export class BlockchainProviderModule {
             try {
               await cm.initialize();
             } catch (error) {
-              logger.debug('Failed to initialize network connection manager', {
-                module: moduleName,
-                args: { error: (error as Error).message },
-              });
               throw error;
             }
           }
@@ -211,10 +187,6 @@ export class BlockchainProviderModule {
             try {
               await cm.initialize();
             } catch (error) {
-              logger.debug('Failed to initialize mempool connection manager', {
-                module: moduleName,
-                args: { error: (error as Error).message },
-              });
               throw error;
             }
           }
