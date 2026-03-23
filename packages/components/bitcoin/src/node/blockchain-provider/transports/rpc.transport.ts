@@ -1,5 +1,6 @@
 import type { BaseTransportOptions, ByteData } from '../../../core';
 import { BaseTransport, RateLimiter } from '../../../core';
+import { ConnectionError, TimeoutError, RateLimitError } from '../../../core/blockchain-provider/transports/errors';
 
 export interface RPCTransportOptions extends BaseTransportOptions {
   baseUrl: string;
@@ -110,7 +111,12 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     return this.executeWithErrorHandling(async () => {
       // Verify RPC connectivity
       const healthy = await this.healthcheck();
-      if (!healthy) throw new Error(`RPC node is not responding at ${this.displayUrl}`);
+      if (!healthy) {
+        throw new TimeoutError({
+          message: `RPC node is not responding at ${this.displayUrl}`,
+          params: { providerName: this.uniqName, url: this.displayUrl },
+        });
+      }
 
       // Initialize ZMQ if configured
       if (isNodeLike && this.zmqEndpoint) {
@@ -303,7 +309,9 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
    * Execute JSON-RPC 2.0 batch call.
    * Preserves order through ID matching.
    *
-   * Throws on connection-level failures (network error, timeout, non-OK HTTP).
+   * Throws typed transport errors (ConnectionError, TimeoutError, RateLimitError) on
+   * network/HTTP failures so that isTransportFailure() in blockchain-provider.service.ts
+   * can trigger provider failover correctly.
    * Returns null per-item only for item-level RPC errors (unknown txid, etc.).
    */
   private async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
@@ -331,15 +339,33 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     } catch (error) {
       // Network-level failure: connection refused, DNS, abort (timeout), etc.
       const cause = (error as Error).message ?? String(error);
-      throw new Error(`RPC connection failed for provider "${this.uniqName}" at ${this.displayUrl}: ${cause}`);
+      const isTimeout = (error as any)?.name === 'AbortError';
+      if (isTimeout) {
+        throw new TimeoutError({
+          message: `RPC timeout after ${this.responseTimeout}ms for provider "${this.uniqName}" at ${this.displayUrl}`,
+          params: { providerName: this.uniqName, url: this.displayUrl },
+        });
+      }
+      throw new ConnectionError({
+        message: `RPC connection failed for provider "${this.uniqName}" at ${this.displayUrl}: ${cause}`,
+        params: { providerName: this.uniqName, url: this.displayUrl },
+      });
     } finally {
       clearTimeout(timer);
     }
 
     if (!response.ok) {
-      throw new Error(
-        `RPC HTTP error for provider "${this.uniqName}" at ${this.displayUrl}: ${response.status} ${response.statusText}`
-      );
+      const statusCode = response.status;
+      if (statusCode === 429) {
+        throw new RateLimitError({
+          message: `RPC rate limit for provider "${this.uniqName}" at ${this.displayUrl}: HTTP ${statusCode}`,
+          params: { providerName: this.uniqName, url: this.displayUrl, statusCode },
+        });
+      }
+      throw new ConnectionError({
+        message: `RPC HTTP error for provider "${this.uniqName}" at ${this.displayUrl}: ${statusCode} ${response.statusText}`,
+        params: { providerName: this.uniqName, url: this.displayUrl, statusCode },
+      });
     }
 
     const results = await response.json();

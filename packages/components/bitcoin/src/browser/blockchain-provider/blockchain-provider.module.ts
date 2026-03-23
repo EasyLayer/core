@@ -56,7 +56,6 @@ export interface BlockchainProviderModuleOptions {
 export class BlockchainProviderModule {
   static async forRootAsync(opts: BlockchainProviderModuleOptions): Promise<DynamicModule> {
     const { networkProviders, mempoolProviders, network, rateLimits, isGlobal } = opts;
-
     const buildRPCTransports = (cfg: ModuleProviderConfig) =>
       cfg.connections.map((c, i) => {
         if (cfg.type !== 'rpc') throw new Error('P2P is not available in browser');

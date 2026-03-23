@@ -10,12 +10,15 @@ export interface WsBrowserClientOptions {
   password?: string; // optional; if absent, first valid pong binds
   ping?: { staleMs?: number; factor?: number; minMs?: number; maxMs?: number };
   protocols?: string | string[]; // optional subprotocols
+  /** Delay in ms before reconnect attempt after socket close. Default: 2000. */
+  reconnectDelayMs?: number;
 }
 
 /**
  * Browser WebSocket client:
  * - Connects to server, sends batch/ping.
  * - Accepts Pong/Ack messages from server.
+ * - Automatically reconnects after socket close (server restart / network blip).
  */
 @Injectable()
 export class WsBrowserTransportService implements TransportPort, OnModuleDestroy {
@@ -28,6 +31,9 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
 
   private online = false;
   private lastPongAt = 0;
+
+  // Set to true on onModuleDestroy to prevent reconnect after intentional close
+  private destroyed = false;
 
   private lastAckBuffer: OutboxStreamAckPayload | null = null;
   private pendingAck: { resolve: (v: OutboxStreamAckPayload) => void; reject: (e: any) => void; timer: any } | null =
@@ -43,6 +49,7 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.destroyed = true;
     this.stopHeartbeat();
     this.socket?.close();
     this.socket = null;
@@ -71,7 +78,12 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
 
   async send(msg: Message | string): Promise<void> {
     const s = this.socket;
-    if (!s || s.readyState !== s.OPEN) throw new Error('browser-ws: no connection');
+    if (!s || s.readyState !== s.OPEN) {
+      // Socket gone — attempt reconnect and report offline.
+      // waitForOnline() in OutboxBatchSender will retry on next cycle.
+      if (!this.destroyed && !this.socket) this.connect();
+      throw new Error('browser-ws: no connection');
+    }
     const frame = typeof msg === 'string' ? msg : JSON.stringify(msg);
     s.send(frame);
   }
@@ -104,18 +116,46 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
   }
 
   private connect() {
+    if (this.destroyed) return;
+
     this.clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const ws = new WebSocket(this.opts.url, this.opts.protocols);
+
     ws.addEventListener('message', (ev) => this.onRaw(ev.data));
+
     ws.addEventListener('close', () => {
       if (this.socket === ws) {
         this.socket = null;
         this.online = false;
+        this.log.verbose('WS browser socket closed, scheduling reconnect', {
+          module: 'network-transport',
+        });
+        // Schedule reconnect unless module is being destroyed
+        if (!this.destroyed) {
+          const delayMs = this.opts.reconnectDelayMs ?? 2000;
+          setTimeout(() => {
+            if (!this.destroyed && !this.socket) {
+              this.log.verbose('WS browser reconnecting...', { module: 'network-transport' });
+              this.connect();
+            }
+          }, delayMs);
+        }
       }
     });
+
     ws.addEventListener('open', () => {
-      /* connection established; wait for pong */
+      this.log.verbose('WS browser socket opened', { module: 'network-transport' });
+      /* connection established; wait for pong to mark online */
     });
+
+    ws.addEventListener('error', (ev) => {
+      this.log.verbose('WS browser socket error', {
+        module: 'network-transport',
+        args: { url: this.opts.url },
+      });
+      // close event will fire after error — reconnect is handled there
+    });
+
     this.socket = ws;
   }
 
@@ -128,7 +168,17 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
       async (reset) => {
         this.heartbeatReset = reset;
         const s = this.socket;
-        if (!s || s.readyState !== s.OPEN) return;
+
+        // Socket is gone — attempt reconnect if not destroyed
+        if (!s || s.readyState !== s.OPEN) {
+          if (!this.destroyed && !this.socket) {
+            this.log.verbose('WS browser heartbeat: socket gone, reconnecting', {
+              module: 'network-transport',
+            });
+            this.connect();
+          }
+          return;
+        }
 
         // ping carries no password
         const ping: Message = { action: Actions.Ping, clientId: this.clientId, timestamp: Date.now() };

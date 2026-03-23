@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { createSnapshotsEntity } from '../snapshots.model';
+import { createSnapshotsEntity } from '../entities';
 
 describe('createSnapshotsEntity()', () => {
   it('postgres mapping', () => {

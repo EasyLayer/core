@@ -1,0 +1,90 @@
+import { Subject } from 'rxjs';
+import type { Logger, OnModuleDestroy } from '@nestjs/common';
+import type { DomainEvent } from '@easylayer/common/cqrs';
+import type { OutboxBatchSender } from '@easylayer/common/network-transport';
+import type { WireEventRecord } from '../core/event-record.interface';
+
+export class Publisher implements OnModuleDestroy {
+  private readonly moduleName = 'cqrs-transport';
+  private subject$ = new Subject<DomainEvent>();
+  private systemModelNamesSet: Set<string>;
+
+  constructor(
+    private readonly outboxBatchSender: OutboxBatchSender,
+    private readonly logger: Logger,
+    systemModelNames: string[]
+  ) {
+    this.systemModelNamesSet = new Set(systemModelNames ?? []);
+  }
+
+  onModuleDestroy() {
+    this.subject$.complete();
+  }
+
+  get events$() {
+    return this.subject$.asObservable();
+  }
+
+  async publishWire(event: WireEventRecord): Promise<void> {
+    await this.publishWireStreamBatchWithAck([event]);
+  }
+
+  async publishWireStreamBatchWithAck(events: WireEventRecord[]): Promise<void> {
+    if (!events.length) return;
+    // 1) Emit locally no matter what (fire-and-forget, but with stable copy)
+    // const batch = events.length > 1 ? events.slice() : events;
+    queueMicrotask(() => this.emitSystemEventsLocally(events));
+
+    // 2) Try remote send+ACK; if offline, let the error occur,
+    // and outbox retries will deliver later. The local issue has already occurred.
+    await this.outboxBatchSender.streamWireWithAck(events);
+  }
+
+  private emitSystemEventsLocally(events: WireEventRecord[]): void {
+    for (const wireEvent of events) {
+      if (!this.isSystemEvent(wireEvent)) continue;
+      try {
+        const domainEvent: DomainEvent = this.createDomainEventFromWire(wireEvent);
+        this.subject$.next(domainEvent);
+      } catch (error) {
+        this.logger.verbose('System event payload parse failed', {
+          module: this.moduleName,
+          args: {
+            action: 'emitSystemEventsLocally',
+            modelName: wireEvent.modelName,
+            eventType: wireEvent.eventType,
+            error: (error as any)?.message,
+          },
+        });
+      }
+    }
+  }
+
+  /**
+   * Check if wireEvent is from a system model
+   */
+  private isSystemEvent(wireEvent: WireEventRecord): boolean {
+    return this.systemModelNamesSet.has(wireEvent.modelName);
+  }
+
+  private createDomainEventFromWire(wireEvent: WireEventRecord): DomainEvent {
+    const body = JSON.parse(wireEvent.payload);
+
+    const EventCtor: any = function () {};
+    Object.defineProperty(EventCtor, 'name', { value: wireEvent.eventType, configurable: true });
+    // setEventMetadata(EventCtor as any);
+
+    const event: DomainEvent = {
+      aggregateId: wireEvent.modelName,
+      requestId: wireEvent.requestId,
+      blockHeight: wireEvent.blockHeight,
+      timestamp: wireEvent.timestamp,
+      payload: body,
+    };
+
+    const instance = Object.assign(Object.create(EventCtor.prototype), event);
+    Object.defineProperty(instance, 'constructor', { value: EventCtor, writable: false, enumerable: false });
+
+    return instance;
+  }
+}

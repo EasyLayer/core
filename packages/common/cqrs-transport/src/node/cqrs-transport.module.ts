@@ -1,7 +1,8 @@
 import { Module, DynamicModule, Inject, Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { EventBus } from '@easylayer/common/cqrs';
 import { OutboxBatchSender } from '@easylayer/common/network-transport';
-import { Publisher as CorePublisher, Subscriber as CoreSubscriber } from './core';
+import { Publisher as CorePublisher } from './publisher';
+import { Subscriber as CoreSubscriber } from './subscriber';
 
 export const SYSTEM_MODEL_NAMES = 'SYSTEM_MODEL_NAMES';
 
@@ -45,14 +46,7 @@ export interface CqrsTransportModuleOptions {
 
 @Module({})
 export class CqrsTransportModule {
-  private static readonly logger = new Logger(CqrsTransportModule.name);
-  private static readonly moduleName = 'cqrs-transport';
-
   static forRoot(options?: CqrsTransportModuleOptions): DynamicModule {
-    this.logger.verbose('Starting cqrs transport module registration', {
-      module: this.moduleName,
-    });
-
     const systemModelNames = options?.systemAggregates || [];
     return {
       module: CqrsTransportModule,

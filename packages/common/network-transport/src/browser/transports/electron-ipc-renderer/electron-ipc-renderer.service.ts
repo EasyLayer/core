@@ -1,6 +1,20 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
-import { ipcRenderer } from 'electron';
+// Dynamic import is intentional.
+//
+// 'electron' is a Node.js/Electron-only package that uses __dirname and other
+// Node globals at module evaluation time. A static top-level import would cause
+// Vite (and any other browser bundler) to bundle the entire electron package
+// into the output file — crashing immediately in any non-Electron context
+// (browser SharedWorker, web page, etc.) with:
+//   ReferenceError: __dirname is not defined
+//
+// With a dynamic import, bundlers treat 'electron' as an external that is
+// resolved at runtime. In a real Electron renderer the import resolves
+// correctly. In a browser bundle the import statement is left as-is and
+// never executes unless the code path is actually reached (which it isn't,
+// because ElectronIpcRendererModule is only registered in Electron builds).
+import type { IpcRenderer } from 'electron';
 import type { Message, OutboxStreamAckPayload } from '../../../core';
 import { Actions } from '../../../core';
 import type { TransportPort } from '../../../core/transport-port';
@@ -32,16 +46,24 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
 
-  private readonly onIpcMessage = (_ev: Electron.IpcRendererEvent, raw: unknown) => this.onRaw(raw);
+  private ipc: IpcRenderer | null = null;
+
+  private readonly onIpcMessage = (_ev: any, raw: unknown) => this.onRaw(raw);
 
   constructor(private readonly opts: ElectronIpcRendererOptions) {
-    ipcRenderer.on('transport:message', this.onIpcMessage);
+    this.init();
+  }
+
+  private async init() {
+    const { ipcRenderer } = await import('electron');
+    this.ipc = ipcRenderer;
+    this.ipc.on('transport:message', this.onIpcMessage);
     this.startHeartbeat();
   }
 
   async onModuleDestroy(): Promise<void> {
     this.stopHeartbeat();
-    ipcRenderer.off('transport:message', this.onIpcMessage);
+    this.ipc?.off('transport:message', this.onIpcMessage);
   }
 
   // ----- BATCH/PING SECTION -----
@@ -61,8 +83,7 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
   }
 
   async send(msg: Message | string): Promise<void> {
-    const payload = typeof msg === 'string' ? msg : msg; // IPC accepts object
-    ipcRenderer.send('transport:message', payload);
+    this.ipc?.send('transport:message', msg);
   }
 
   async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
@@ -101,14 +122,13 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
       async (reset) => {
         this.heartbeatReset = reset;
 
-        // ping has no password
         const ping: Message = {
           action: Actions.Ping,
           timestamp: Date.now(),
           correlationId: uuid(),
         };
         try {
-          ipcRenderer.send('transport:message', ping);
+          this.ipc?.send('transport:message', ping);
           this.log.verbose('IPC renderer ping sent', { module: 'network-transport' });
         } catch (e: any) {
           this.log.verbose('IPC renderer ping send failed', {
@@ -170,20 +190,14 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
 function uuid(): string {
-  // Browser/Electron renderer safe UUID
-  // Prefer standard API; fallback to RFC4122-ish via getRandomValues
   const c: any = (globalThis as any).crypto || (globalThis as any).msCrypto;
   if (c?.randomUUID) return c.randomUUID();
   const bytes = new Uint8Array(16);
   c?.getRandomValues?.(bytes);
-  // Set version (4) and variant (RFC4122) if we have random bytes
-  if (bytes[6] !== undefined) {
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  }
-  if (bytes[8] !== undefined) {
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  }
+  if (bytes[6] !== undefined) bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  if (bytes[8] !== undefined) bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const toHex = (n: number) => (n + 0x100).toString(16).slice(1);
   return bytes.length
     ? `${toHex(bytes[0]!)}${toHex(bytes[1]!)}${toHex(bytes[2]!)}${toHex(bytes[3]!)}-${toHex(bytes[4]!)}${toHex(bytes[5]!)}-${toHex(bytes[6]!)}${toHex(bytes[7]!)}-${toHex(bytes[8]!)}${toHex(bytes[9]!)}-${toHex(bytes[10]!)}${toHex(bytes[11]!)}${toHex(bytes[12]!)}${toHex(bytes[13]!)}${toHex(bytes[14]!)}${toHex(bytes[15]!)}`

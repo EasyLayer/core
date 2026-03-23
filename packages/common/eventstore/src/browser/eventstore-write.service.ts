@@ -2,7 +2,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/commo
 import { ExponentialTimer, exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import { PublisherProvider, WireEventRecord } from '@easylayer/common/cqrs-transport';
-import type { BaseAdapter } from './base-adapter';
+import type { BaseAdapter } from '../core/base-adapter';
 import { EventStoreReadService } from './eventstore-read.service';
 
 /**
@@ -16,7 +16,7 @@ export interface EventStoreConfiguration {
 
 @Injectable()
 export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> implements OnModuleInit, OnModuleDestroy {
-  logger = new Logger(EventStoreWriteService.name);
+  private readonly logger = new Logger(EventStoreWriteService.name);
 
   private retryTimer: ExponentialTimer | null = null;
 

@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
-import type { SnapshotReadRow } from './snapshots.model';
-import type { EventReadRow } from './event-data.model';
-import type { FindEventsOptions, BaseAdapter } from './base-adapter';
+import type { SnapshotReadRow } from '../core/snapshots.model';
+import type { EventReadRow } from '../core/event-data.model';
+import type { FindEventsOptions, BaseAdapter } from '../core/base-adapter';
 
 /**
  * TTL-based cache with LFU (Least Frequently Used) eviction.
@@ -57,7 +57,7 @@ class LfuCache<T> {
  */
 @Injectable()
 export class EventStoreReadService<T extends AggregateRoot = AggregateRoot> {
-  logger = new Logger(EventStoreReadService.name);
+  private readonly logger = new Logger(EventStoreReadService.name);
 
   // Read-path cache for hot aggregates.
   private _cache = new LfuCache<T>(60_000, 1000);

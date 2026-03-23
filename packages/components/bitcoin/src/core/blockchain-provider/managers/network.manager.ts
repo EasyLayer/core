@@ -147,7 +147,6 @@ export class NetworkConnectionManager extends BaseConnectionManager<NetworkProvi
             }
             this.failedProviders.delete(providerName);
             this.failedAt.delete(providerName);
-            this.reconnectionAttempts.delete(providerName); // reset so next failure starts fresh
             this.logger.log(`Provider recovered: ${providerName}`, {
               module: this.moduleName,
             });

@@ -2,6 +2,8 @@ import { Buffer } from 'buffer';
 import { v4 as uuidv4 } from 'uuid';
 import type { BaseTransportOptions, RateLimits } from '../../../core';
 import { BaseTransport, RateLimiter } from '../../../core';
+// errors.ts is in the shared core — accessible from both node and browser paths.
+import { ConnectionError, TimeoutError, RateLimitError } from '../../../core/blockchain-provider/transports/errors';
 
 export interface RPCTransportOptions extends BaseTransportOptions {
   baseUrl: string;
@@ -68,6 +70,9 @@ function toBufferLike(u8: Uint8Array): Buffer {
  * - Arrays: results keep exact input order; failures are `null` in-place.
  * - Error handling goes through BaseTransport.executeWithErrorHandling/handleError.
  * - Subscriptions are NOT supported in browser RPC transport (use P2P or Node RPC+ZMQ).
+ *
+ * Transport errors (ConnectionError, TimeoutError, RateLimitError) are thrown so that
+ * isTransportFailure() in blockchain-provider.service.ts can trigger provider failover.
  */
 export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   readonly type = 'rpc';
@@ -115,7 +120,12 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
   async connect(): Promise<void> {
     return this.executeWithErrorHandling(async () => {
       const ok = await this.healthcheck();
-      if (!ok) throw new Error('Cannot connect to RPC node');
+      if (!ok) {
+        throw new ConnectionError({
+          message: `Cannot connect to RPC node at ${this.baseUrl}`,
+          params: { baseUrl: this.baseUrl },
+        });
+      }
       this.isConnected = true;
     }, 'connect');
   }
@@ -302,6 +312,7 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
    * - Preserves order using id→result mapping.
    * - Any missing/error responses become null at their original positions.
    * - Times out using AbortController and responseTimeout.
+   * - Throws ConnectionError/TimeoutError/RateLimitError for transport failures.
    * NOTE: This is private; providers never call it directly.
    */
   private async batchCall<TResult = any>(calls: Array<{ method: string; params: any[] }>): Promise<(TResult | null)[]> {
@@ -335,8 +346,18 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
 
         const response = await fetch(this.baseUrl, init);
         if (!response.ok) {
+          const statusCode = response.status;
           const errorText = await response.text().catch(() => '');
-          throw new Error(`HTTP ${response.status}: ${errorText}`);
+          if (statusCode === 429) {
+            throw new RateLimitError({
+              message: `RPC rate limit: HTTP ${statusCode} at ${this.baseUrl}`,
+              params: { baseUrl: this.baseUrl, statusCode },
+            });
+          }
+          throw new ConnectionError({
+            message: `RPC HTTP ${statusCode} at ${this.baseUrl}: ${errorText}`,
+            params: { baseUrl: this.baseUrl, statusCode },
+          });
         }
 
         const raw = await response.json();
@@ -357,9 +378,19 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         });
       } catch (err: any) {
         if (err?.name === 'AbortError') {
-          throw new Error(`RPC timeout after ${this.responseTimeout}ms at ${this.baseUrl}`);
+          throw new TimeoutError({
+            message: `RPC timeout after ${this.responseTimeout}ms at ${this.baseUrl}`,
+            params: { baseUrl: this.baseUrl, timeoutMs: this.responseTimeout },
+          });
         }
-        throw err;
+        // Re-throw typed errors unchanged; wrap plain errors as ConnectionError
+        if (err instanceof ConnectionError || err instanceof TimeoutError || err instanceof RateLimitError) {
+          throw err;
+        }
+        throw new ConnectionError({
+          message: `RPC fetch error at ${this.baseUrl}: ${err?.message ?? String(err)}`,
+          params: { baseUrl: this.baseUrl },
+        });
       } finally {
         clearTimeout(timer);
       }

@@ -6,8 +6,20 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
     "incremental": true,
-    "composite": true
+    "composite": true,
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
   },
+  "references": [
+    { "path": "../logger/tsconfig.cjs.json" }
+  ],
   "include": ["src"],
   "exclude": [
     "src/browser",

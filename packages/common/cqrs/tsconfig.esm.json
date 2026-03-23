@@ -10,7 +10,19 @@
     "module": "ESNext",
     "target": "ES2020",
     "moduleResolution": "Bundler",
+    "plugins": [
+      {
+        "transform": "typescript-transform-paths"
+      },
+      {
+        "transform": "typescript-transform-paths",
+        "afterDeclarations": true
+      }
+    ]
   },
+  "references": [
+    { "path": "../logger/tsconfig.cjs.json" }
+  ],
   "include": ["src"],
   "exclude": [
     "dist",

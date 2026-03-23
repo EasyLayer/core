@@ -9,12 +9,13 @@ import { URL } from 'node:url';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import { QueryBus } from '@easylayer/common/cqrs';
 import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
-import { Actions, buildQuery } from '../../../core';
+import { Actions } from '../../../core';
+import { buildQuery } from '../../build-query';
 
 export interface HttpServiceOptions {
   type: 'http';
-  host: string; // required
-  port: number; // required
+  host?: string;
+  port?: number;
   cors?: { enabled?: boolean; origin?: string | string[] };
   tls?: { key: string; cert: string; ca?: string } | null; // if set -> https
   maxBodySizeMb?: number;
@@ -33,6 +34,11 @@ export interface HttpServiceOptions {
  *      * POST {webhook.pingUrl} with { action: Ping } on a backoff schedule.
  *      * POST {webhook.url} with messages (batches, etc.) via send().
  *
+ * Three modes:
+ *  - host + port only  → server only (passive, serves /query)
+ *  - webhook only      → client only (sends requests, no server)
+ *  - both              → server + client
+ *
  * Contract notes:
  *  - No webhook → OK: we neither ping nor send batches.
  *  - With webhook → BOTH webhook.url (batches) AND webhook.pingUrl (pings) are REQUIRED.
@@ -48,7 +54,7 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
 
   private readonly log = new Logger(HttpTransportService.name);
   private readonly app = express();
-  private readonly server: http.Server | https.Server;
+  private server?: http.Server | https.Server;
 
   private online = false;
   private lastPongAt = 0;
@@ -66,7 +72,12 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
     private readonly opts: HttpServiceOptions,
     private readonly queryBus: QueryBus
   ) {
-    if (!opts.host || !opts.port) throw new Error('HTTP: host/port are required');
+    const hasServer = !!(opts.host && opts.port);
+    const hasWebhook = !!opts.webhook?.url;
+
+    if (!hasServer && !hasWebhook) {
+      throw new Error('HTTP: at least one of (host+port) or webhook must be configured');
+    }
 
     // Validate webhook config early
     if (opts.webhook) {
@@ -74,41 +85,43 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
       if (!opts.webhook.pingUrl) throw new Error('HTTP: webhook.pingUrl is required when webhook is set');
     }
 
-    // --- Middlewares ---------------------------------------------------------
-    if (opts.cors?.enabled) {
-      this.app.use(cors({ origin: opts.cors.origin ?? true }));
-    }
-    this.app.use(bodyParser.json({ limit: `${opts.maxBodySizeMb ?? 5}mb` }));
-
-    // --- /query endpoint (sync bridge to CQRS QueryBus) ----------------------
-    // Input:  { name: string; dto?: any }
-    // Output: { ok: true, data } | { ok: false, err }
-    this.app.post('/query', async (req, res) => {
-      try {
-        const body = (req.body ?? {}) as { name: string; dto?: any };
-        if (!body || typeof body.name !== 'string') {
-          return res.status(400).json({ ok: false, err: 'Invalid query payload' });
-        }
-
-        const result = await this.queryBus.execute(buildQuery(body));
-        return res.status(200).json({ ok: true, data: result });
-      } catch (e: any) {
-        return res.status(500).json({ ok: false, err: String(e?.message ?? e ?? 'internal error') });
+    // --- Server bootstrap (only when host+port provided) ---------------------
+    if (hasServer) {
+      // --- Middlewares -------------------------------------------------------
+      if (opts.cors?.enabled) {
+        this.app.use(cors({ origin: opts.cors.origin ?? true }));
       }
-    });
+      this.app.use(bodyParser.json({ limit: `${opts.maxBodySizeMb ?? 5}mb` }));
 
-    // --- Server bootstrap ----------------------------------------------------
-    if (opts.tls) {
-      const key = fs.readFileSync(opts.tls.key);
-      const cert = fs.readFileSync(opts.tls.cert);
-      const ca = opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined;
-      this.server = https.createServer({ key, cert, ca }, this.app);
-    } else {
-      this.server = http.createServer(this.app);
+      // --- /query endpoint (sync bridge to CQRS QueryBus) -------------------
+      // Input:  { name: string; dto?: any }
+      // Output: { ok: true, data } | { ok: false, err }
+      this.app.post('/query', async (req, res) => {
+        try {
+          const body = (req.body ?? {}) as { name: string; dto?: any };
+          if (!body || typeof body.name !== 'string') {
+            return res.status(400).json({ ok: false, err: 'Invalid query payload' });
+          }
+
+          const result = await this.queryBus.execute(buildQuery(body));
+          return res.status(200).json({ ok: true, data: result });
+        } catch (e: any) {
+          return res.status(500).json({ ok: false, err: String(e?.message ?? e ?? 'internal error') });
+        }
+      });
+
+      if (opts.tls) {
+        const key = fs.readFileSync(opts.tls.key);
+        const cert = fs.readFileSync(opts.tls.cert);
+        const ca = opts.tls.ca ? fs.readFileSync(opts.tls.ca) : undefined;
+        this.server = https.createServer({ key, cert, ca }, this.app);
+      } else {
+        this.server = http.createServer(this.app);
+      }
+
+      this.server.listen(opts.port, opts.host);
+      this.log.log(`HTTP server listening at ${opts.host}:${opts.port}`, { module: 'network-transport' });
     }
-
-    this.server.listen(opts.port, opts.host);
-    this.log.log(`HTTP server listening at ${opts.host}:${opts.port}`, { module: 'network-transport' });
 
     // --- Heartbeat -----------------------------------------------------------
     // Start only when webhook is present; otherwise remain passive.
@@ -117,7 +130,9 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
 
   async onModuleDestroy(): Promise<void> {
     this.stopHeartbeat();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    if (this.server) {
+      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    }
   }
 
   // --- Health/state ------------------------------------------------------

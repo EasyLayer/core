@@ -2,11 +2,12 @@ export const TRANSPORT_OVERHEAD_WIRE = 256;
 
 export type TransportKind =
   | 'http' // only for node version
-  | 'ws' // node + broser same name
+  | 'ws' // node + browser same name
   | 'ipc-parent' // only for node version
   | 'ipc-child' // only for node version
   | 'electron-ipc-main' // only for node version
-  | 'electron-ipc-renderer'; // only for browser version
+  | 'electron-ipc-renderer' // only for browser version
+  | 'shared-worker-server'; // only for browser SharedWorker
 
 export interface Message<T = unknown> {
   action: string;

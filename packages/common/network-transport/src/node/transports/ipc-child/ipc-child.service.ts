@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { QueryBus } from '@easylayer/common/cqrs';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import type { TransportPort, Message, OutboxStreamAckPayload } from '../../../core';
-import { Actions, buildQuery } from '../../../core';
+import { Actions } from '../../../core';
+import { buildQuery } from '../../build-query';
 
 // -- helpers ------------------------------------------------------------------
 function delay(ms: number) {

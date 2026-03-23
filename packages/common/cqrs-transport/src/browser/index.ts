@@ -1,7 +1,6 @@
 import type { Logger } from '@nestjs/common';
 import type { EventBus } from '@easylayer/common/cqrs';
 import type { OutboxBatchSender } from '@easylayer/common/network-transport';
-import { Publisher, Subscriber } from '../core';
 
 export type BrowserCqrsTransportOptions = {
   systemAggregates?: string[];
@@ -10,17 +9,7 @@ export type BrowserCqrsTransportOptions = {
   logger: Logger;
 };
 
-export function createCqrsTransportBrowser(opts: BrowserCqrsTransportOptions) {
-  const publisher = new Publisher(opts.outbox, opts.logger, opts.systemAggregates ?? []);
-  const subscriber = new Subscriber(publisher, opts.eventBus, opts.logger);
-
-  return {
-    publisher,
-    destroy() {
-      subscriber.destroy();
-    },
-  };
-}
-
 export * from '../core/event-record.interface';
-export * from '../cqrs-transport.module';
+// Use browser-specific module that imports OutboxBatchSender via browser ESM path
+// instead of shared module that compiles to relative CJS path
+export * from './cqrs-transport.module';

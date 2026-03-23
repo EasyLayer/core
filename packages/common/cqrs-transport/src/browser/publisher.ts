@@ -2,7 +2,7 @@ import { Subject } from 'rxjs';
 import type { Logger, OnModuleDestroy } from '@nestjs/common';
 import type { DomainEvent } from '@easylayer/common/cqrs';
 import type { OutboxBatchSender } from '@easylayer/common/network-transport';
-import type { WireEventRecord } from './event-record.interface';
+import type { WireEventRecord } from '../core/event-record.interface';
 
 export class Publisher implements OnModuleDestroy {
   private readonly moduleName = 'cqrs-transport';
