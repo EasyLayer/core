@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { ExecutionContext } from './types';
+import type { ExecutionContext } from '../core/types';
 import { makeNamedEventCtor } from './event';
 
 export type AnyModelCtor<T extends Model = Model> = new (...args: any[]) => T;

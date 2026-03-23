@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
-import type { SnapshotReadRow } from './snapshots.model';
-import type { EventReadRow } from './event-data.model';
-import type { FindEventsOptions, BaseAdapter } from './base-adapter';
+import type { SnapshotReadRow } from '../core/snapshots.model';
+import type { EventReadRow } from '../core/event-data.model';
+import type { FindEventsOptions, BaseAdapter } from '../core/base-adapter';
 
 /**
  * TTL-based cache with LFU (Least Frequently Used) eviction.

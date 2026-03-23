@@ -2,7 +2,7 @@ import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/commo
 import { ExponentialTimer, exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
 import { PublisherProvider, WireEventRecord } from '@easylayer/common/cqrs-transport';
-import type { BaseAdapter } from './base-adapter';
+import type { BaseAdapter } from '../core/base-adapter';
 import { EventStoreReadService } from './eventstore-read.service';
 
 /**

@@ -9,7 +9,8 @@ import { URL } from 'node:url';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import { QueryBus } from '@easylayer/common/cqrs';
 import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
-import { Actions, buildQuery } from '../../../core';
+import { Actions } from '../../../core';
+import { buildQuery } from '../../build-query';
 
 export interface HttpServiceOptions {
   type: 'http';

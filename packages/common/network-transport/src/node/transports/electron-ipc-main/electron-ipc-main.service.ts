@@ -4,7 +4,8 @@ import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval
 import { ipcMain, webContents as WC, WebContents } from 'electron';
 import { QueryBus } from '@easylayer/common/cqrs';
 import type { Message, TransportPort, OutboxStreamAckPayload } from '../../../core';
-import { Actions, buildQuery } from '../../../core';
+import { Actions } from '../../../core';
+import { buildQuery } from '../../build-query';
 
 export interface ElectronIpcMainOptions {
   type: 'electron-ipc-main';

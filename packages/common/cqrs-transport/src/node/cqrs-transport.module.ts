@@ -1,7 +1,8 @@
 import { Module, DynamicModule, Inject, Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
 import { EventBus } from '@easylayer/common/cqrs';
 import { OutboxBatchSender } from '@easylayer/common/network-transport';
-import { Publisher as CorePublisher, Subscriber as CoreSubscriber } from './core';
+import { Publisher as CorePublisher } from './publisher';
+import { Subscriber as CoreSubscriber } from './subscriber';
 
 export const SYSTEM_MODEL_NAMES = 'SYSTEM_MODEL_NAMES';
 

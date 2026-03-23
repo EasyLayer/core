@@ -5,8 +5,9 @@ import { createServer as createHttpsServer, Server as HttpsServer } from 'https'
 import * as fs from 'node:fs';
 import type { QueryBus } from '@easylayer/common/cqrs';
 import { exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
-import { Actions, buildQuery } from '../../../core';
+import { Actions } from '../../../core';
 import type { Message, OutboxStreamAckPayload, TransportPort } from '../../../core';
+import { buildQuery } from '../../build-query';
 
 export interface WsServiceOptions {
   type: 'ws';
