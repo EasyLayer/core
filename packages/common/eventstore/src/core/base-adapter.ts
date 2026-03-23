@@ -3,7 +3,7 @@ import type { WireEventRecord } from '@easylayer/common/cqrs-transport';
 import type { SnapshotDataModel, SnapshotReadRow } from './snapshots.model';
 import type { EventReadRow } from './event-data.model';
 
-export type DriverType = 'postgres' | 'sqlite' | 'sqljs';
+export type DriverType = 'postgres' | 'sqlite' | 'sqlite-opfs';
 
 export interface SnapshotOptions {
   minKeep: number;
