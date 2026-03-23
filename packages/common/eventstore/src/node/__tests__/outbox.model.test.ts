@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { createOutboxEntity } from '../outbox.model';
+import { createOutboxEntity } from '../entities';
 
 describe('createOutboxEntity()', () => {
   it('postgres types and flags', () => {

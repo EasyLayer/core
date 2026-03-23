@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { createEventDataEntity } from '../event-data.model';
+import { createEventDataEntity } from '../entities';
 
 describe('createEventDataEntity()', () => {
   it('postgres types and flags', () => {
