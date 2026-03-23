@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/EasyLayer/core/compare/v1.1.1...v1.2.0) (2026-03-23)
+
+
+### Bug Fixes
+
+* fixed bootstrap logging; fixed throwing errors in bitcoin providers; fixed browser setup; ([d380ff7](https://github.com/EasyLayer/core/commit/d380ff735e1f2634625909fda3d037e35e1e564d))
+
 ## [1.1.1](https://github.com/EasyLayer/core/compare/v1.1.0...v1.1.1) (2026-03-17)
 
 
