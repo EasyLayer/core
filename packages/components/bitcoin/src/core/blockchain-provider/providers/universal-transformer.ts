@@ -124,6 +124,7 @@ export class UniversalTransformer {
   /** Raw RPC "verbose" tx → UniversalTransaction (network-aware sizes, no fabrication). */
   static normalizeRpcTransaction(raw: any, net: NetworkConfig): UniversalTransaction {
     const hasSegWit = !!net.hasSegWit;
+    const factor = unitFactor(net.nativeCurrencyDecimals);
 
     const sizeNum = nnum(raw?.size);
     const weightNum = nnum(raw?.weight);
@@ -172,7 +173,9 @@ export class UniversalTransformer {
       blockhash: raw.blockhash,
       blocktime: raw.blocktime,
       confirmations: raw.confirmations,
-      fee: raw.fee,
+      // Bitcoin Core verbose RPC returns tx fee in native coin units (BTC/LTC/etc.).
+      // Universal/domain Transaction stores absolute fees in the smallest unit (sats for BTC).
+      fee: toSmallestUnits(raw.fee, factor),
       wtxid: raw.wtxid,
       depends: raw.depends,
       spentby: raw.spentby,

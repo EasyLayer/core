@@ -150,8 +150,10 @@ export interface UniversalVout {
     hex: string;
     reqSigs?: number;
     type: string;
-    addresses?: string[];
+    /** Modern Bitcoin Core RPC shape. */
     address?: string;
+    /** Legacy/deprecated Bitcoin Core compatibility shape. Prefer address when present. */
+    addresses?: string[];
   };
 }
 

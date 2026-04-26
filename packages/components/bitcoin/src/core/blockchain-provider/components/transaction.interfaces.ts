@@ -18,6 +18,9 @@ export interface Vout {
     hex: string;
     reqSigs?: number;
     type: string;
+    /** Modern Bitcoin Core RPC shape. */
+    address?: string;
+    /** Legacy/deprecated Bitcoin Core compatibility shape. Prefer address when present. */
     addresses?: string[];
   };
 }
@@ -40,8 +43,9 @@ export interface Transaction {
   blockhash?: string;
   time?: number;
   blocktime?: number;
-  fee: number;
-  feeRate?: number; // satoshis per vbyte
+  /** Absolute fee in smallest units, e.g. satoshis for BTC. Optional when source path cannot know prevout values. */
+  fee?: number;
+  feeRate?: number; // smallest units per vbyte, e.g. sat/vB
   wtxid?: string; // SegWit transaction ID
   depends?: string[];
   spentby?: string[];
