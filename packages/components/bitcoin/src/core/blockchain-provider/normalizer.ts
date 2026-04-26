@@ -202,9 +202,9 @@ export class BitcoinNormalizer {
    * Notes:
    * - Accept both `strippedsize` and `strippedSize` from Universal (Hex path may use camel-case).
    * - `hash` fallback to `txid` if absent in Universal.
-   * - feeRate is computed if fee & vsize present.
-   * - Coinbase transactions (vin[0].coinbase present) never have a fee from Bitcoin Core;
-   *   treat their fee as 0 instead of throwing.
+   * - feeRate is computed only if fee & vsize are present.
+   * - Raw/bytes block paths cannot know regular tx fees because prevout values are absent.
+   * - Coinbase transactions do not pay fees; when the fee is missing, represent it as 0.
    */
   public normalizeTransaction(universalTx: UniversalTransaction): Transaction {
     if (!universalTx || typeof universalTx !== 'object') {
@@ -231,14 +231,12 @@ export class BitcoinNormalizer {
     const vin: Vin[] = universalTx.vin as any;
     const vout: Vout[] = universalTx.vout as any;
 
-    // Coinbase transactions never carry a fee — Bitcoin Core omits the field entirely.
-    // Treat missing fee as 0 for coinbase; require it for all regular transactions.
-    const fee: number = this.isCoinbaseTx(universalTx)
-      ? this.optNumber(universalTx.fee) ?? 0
-      : this.mustNumber(universalTx.fee, 'fee');
+    // Coinbase transactions do not pay fees. For regular transactions, fee may be unknown
+    // in raw/bytes paths because the raw block does not include spent prevout values.
+    const fee = this.isCoinbaseTx(universalTx) ? this.optNumber(universalTx.fee) ?? 0 : this.optNumber(universalTx.fee);
 
-    // feeRate is meaningless for coinbase (fee=0), but compute uniformly — callers can ignore it.
-    const feeRate = fee > 0 && vsize > 0 ? fee / vsize : undefined;
+    // feeRate is meaningful only when fee is known and expressed in smallest units per vbyte.
+    const feeRate = fee !== undefined && fee > 0 && vsize > 0 ? fee / vsize : undefined;
 
     const out: Transaction = {
       txid,

@@ -108,6 +108,7 @@ export class Mempool extends AggregateRoot {
         scriptPubKey: o.scriptPubKey
           ? {
               type: o.scriptPubKey.type,
+              address: o.scriptPubKey.address,
               addresses: o.scriptPubKey.addresses,
               hex: o.scriptPubKey.hex,
             }
@@ -115,7 +116,18 @@ export class Mempool extends AggregateRoot {
       })
     );
 
-    return {
+    const feeRate =
+      typeof full.feeRate === 'number' && Number.isFinite(full.feeRate)
+        ? full.feeRate
+        : typeof full.fee === 'number' &&
+            Number.isFinite(full.fee) &&
+            typeof full.vsize === 'number' &&
+            Number.isFinite(full.vsize) &&
+            full.vsize > 0
+          ? full.fee / full.vsize
+          : undefined;
+
+    const lightTransaction: LightTransaction = {
       txid: full.txid,
       hash: full.hash,
       version: full.version,
@@ -127,8 +139,13 @@ export class Mempool extends AggregateRoot {
       locktime: full.locktime,
       vin: lightVin,
       vout: lightVout,
-      feeRate: full.feeRate ? full.feeRate : full.fee / full.vsize,
     };
+
+    if (feeRate !== undefined) {
+      lightTransaction.feeRate = feeRate;
+    }
+
+    return lightTransaction;
   }
 
   /* ---------------------------- Snapshot serialize/restore ---------------------------- */

@@ -14,8 +14,11 @@ export type LightBlock = Pick<Block, 'hash' | 'height' | 'merkleroot'> & {
 /** Lightweight scriptPubKey for vout */
 export interface LightScriptPubKey {
   type?: string;
+  /** Modern Bitcoin Core field. */
+  address?: string;
+  /** Legacy/deprecated Bitcoin Core fallback. */
   addresses?: string[];
-  /** hex kept for address derivation if addresses[] absent */
+  /** hex kept for address derivation if address/addresses absent */
   hex?: string;
 }
 
@@ -45,6 +48,6 @@ export type LightTransaction = Omit<
 > & {
   vin: LightVin[];
   vout: LightVout[];
-  /** sat/vB; optional if not computed upstream */
-  feeRate: number;
+  /** sat/vB; optional when fee is unknown, for example in raw/fast block paths. */
+  feeRate?: number;
 };
