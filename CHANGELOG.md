@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/EasyLayer/core/compare/v1.2.0...v1.2.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* fixed bitcoin fee value for raw/bytes block; ([94ec291](https://github.com/EasyLayer/core/commit/94ec29107487b1ddbfad37abef62bd61c5ba5fbe))
+
 # [1.2.0](https://github.com/EasyLayer/core/compare/v1.1.1...v1.2.0) (2026-03-23)
 
 
