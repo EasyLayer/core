@@ -1,5 +1,6 @@
 import { Block, Transaction } from '../../blockchain-provider';
 import { BlocksQueue, CapacityPlanner } from '../blocks-queue';
+import { setBitcoinNativeBindings } from '../../native';
 
 function createTransaction(baseSize: number, witnessSize: number = 0): Transaction {
   const totalSize = baseSize + witnessSize;
@@ -138,6 +139,10 @@ describe('BlocksQueue', () => {
     });
   });
 
+  afterEach(() => {
+    setBitcoinNativeBindings(undefined);
+  });
+
   it('enqueue then dequeue removes the block and updates state', async () => {
     const block = makeBlock(0, [makeTransaction(100)]);
     await queue.enqueue(block);
@@ -149,7 +154,107 @@ describe('BlocksQueue', () => {
     expect(first).toBeUndefined();
   });
 
-  it('findBlocks returns the same object references as stored', async () => {
+  it('successful enqueue removes block hex fields before storage', async () => {
+    const tx = makeTransaction(100) as any;
+    tx.hex = 'tx-hex';
+    const block = makeBlock(0, [tx]) as any;
+    block.hex = 'block-hex';
+
+    await queue.enqueue(block);
+
+    expect('hex' in block).toBe(false);
+    expect('hex' in block.tx[0]).toBe(false);
+
+    const batch = await queue.getBatchUpToSize(block.size);
+    expect(batch).toHaveLength(1);
+    expect('hex' in (batch[0] as any)).toBe(false);
+    expect('hex' in ((batch[0] as any).tx[0] as any)).toBe(false);
+  });
+
+  it('failed enqueue keeps hex fields untouched', async () => {
+    const tx = makeTransaction(100) as any;
+    tx.hex = 'tx-hex';
+    const block = makeBlock(1, [tx]) as any;
+    block.hex = 'block-hex';
+
+    await expect(queue.enqueue(block)).rejects.toThrow(`Can't enqueue block. Block height: 1, Queue last height: -1`);
+
+    expect(block.hex).toBe('block-hex');
+    expect(block.tx[0].hex).toBe('tx-hex');
+  });
+
+  it('native enqueue validates before cleanup and passes cleaned block to enqueueCleaned', async () => {
+    const calls: string[] = [];
+    let receivedBlock: any;
+
+    class FakeNativeBlocksQueue {
+      validateEnqueue(meta: any) {
+        calls.push(`validate:${meta.hash}:${meta.height}:${meta.size}`);
+      }
+
+      enqueueCleaned(block: any) {
+        calls.push('enqueueCleaned');
+        receivedBlock = block;
+      }
+
+      isQueueFull() { return false; }
+      isQueueOverloaded() { return false; }
+      getBlockSize() { return 1; }
+      setBlockSize() {}
+      isMaxHeightReached() { return false; }
+      getMaxBlockHeight() { return Number.MAX_SAFE_INTEGER; }
+      setMaxBlockHeight() {}
+      getMaxQueueSize() { return 1024 * 1024; }
+      setMaxQueueSize() {}
+      getCurrentSize() { return 0; }
+      getLength() { return 0; }
+      getLastHeight() { return -1; }
+      firstBlock() { return undefined; }
+      enqueue() {}
+      dequeue() { return 0; }
+      fetchBlockFromInStack() { return undefined; }
+      fetchBlockFromOutStack() { return undefined; }
+      findBlocks() { return []; }
+      getBatchUpToSize() { return []; }
+      clear() {}
+      reorganize() {}
+      getMemoryStats() {
+        return {
+          bufferAllocated: 0,
+          blocksUsed: 0,
+          bufferEfficiency: 0,
+          avgBlockSize: 0,
+          indexesSize: 0,
+          memoryUsedBytes: 0,
+        };
+      }
+    }
+
+    setBitcoinNativeBindings({ NativeBlocksQueue: FakeNativeBlocksQueue as any });
+
+    const nativeQueue = new BlocksQueue<Block>({
+      lastHeight: -1,
+      maxBlockHeight: Number.MAX_SAFE_INTEGER,
+      blockSize: 1024,
+      maxQueueSize: 1024 * 1024,
+    });
+
+    const tx = makeTransaction(100) as any;
+    tx.hex = 'tx-hex';
+    const block = makeBlock(0, [tx]) as any;
+    block.hex = 'block-hex';
+
+    await nativeQueue.enqueue(block);
+
+    expect(calls).toEqual([`validate:${block.hash}:0:${block.size}`, 'enqueueCleaned']);
+    expect('hex' in block).toBe(false);
+    expect('hex' in block.tx[0]).toBe(false);
+    expect(receivedBlock).toBe(block);
+    expect('hex' in receivedBlock).toBe(false);
+    expect('hex' in receivedBlock.tx[0]).toBe(false);
+  });
+
+  it('findBlocks returns blocks with the same values as stored', async () => {
     const blockA = makeBlock(0, [makeTransaction(100)]);
     const blockB = makeBlock(1, [makeTransaction(120)]);
     await queue.enqueue(blockA);
@@ -157,8 +262,7 @@ describe('BlocksQueue', () => {
     await queue.firstBlock();
     const found = await queue.findBlocks(new Set([blockA.hash, blockB.hash]));
     expect(found.length).toBe(2);
-    expect(found.includes(blockA)).toBe(true);
-    expect(found.includes(blockB)).toBe(true);
+    expect(found.map(b => b.hash).sort()).toEqual([blockA.hash, blockB.hash].sort());
   });
 
   it('wrap-around FIFO order is preserved', async () => {
@@ -216,9 +320,9 @@ describe('BlocksQueue', () => {
     const subset = new Set([blocks[5]!.hash, blocks[10]!.hash, blocks[20]!.hash]);
     const found = await queue.findBlocks(subset);
     expect(found.map(b => b.height).sort((a, b) => a - b)).toEqual([blocks[5]!.height, blocks[10]!.height, blocks[20]!.height]);
-    expect(found[0]).toBe(blocks[5]);
-    expect(found[1]).toBe(blocks[10]);
-    expect(found[2]).toBe(blocks[20]);
+    expect(found[0]?.hash).toBe(blocks[5]!.hash);
+    expect(found[1]?.hash).toBe(blocks[10]!.hash);
+    expect(found[2]?.hash).toBe(blocks[20]!.hash);
   });
 
   describe('Initialization', () => {

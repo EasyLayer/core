@@ -3,34 +3,279 @@ name: 'Create & Publish Release'
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
-  publish:
+  discover_components:
+    name: Discover component packages
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
-    
+    outputs:
+      components_matrix: ${{ steps.discover.outputs.components_matrix }}
+      native_matrix: ${{ steps.discover.outputs.native_matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Discover packages/components workspaces
+        id: discover
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE' > /tmp/components-matrices.env
+          const fs = require('fs');
+          const path = require('path');
+
+          const componentsRoot = path.join(process.cwd(), 'packages', 'components');
+          const nativeTargets = [
+            { target: 'darwin-arm64', runner: 'macos-14' },
+            { target: 'darwin-x64', runner: 'macos-15-intel' },
+            { target: 'linux-x64-gnu', runner: 'ubuntu-latest' },
+            { target: 'linux-arm64-gnu', runner: 'ubuntu-24.04-arm' },
+            { target: 'win32-x64-msvc', runner: 'windows-latest' },
+          ];
+
+          const components = fs.existsSync(componentsRoot)
+            ? fs.readdirSync(componentsRoot, { withFileTypes: true })
+                .filter((entry) => entry.isDirectory())
+                .map((entry) => {
+                  const packagePath = path.join(componentsRoot, entry.name);
+                  const packageJsonPath = path.join(packagePath, 'package.json');
+
+                  if (!fs.existsSync(packageJsonPath)) {
+                    return undefined;
+                  }
+
+                  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+
+                  if (packageJson.private === true) {
+                    return undefined;
+                  }
+
+                  const scripts = packageJson.scripts || {};
+                  const hasNativeBuild = typeof scripts['build:native'] === 'string';
+
+                  return {
+                    dir: entry.name,
+                    name: packageJson.name,
+                    path: `packages/components/${entry.name}`,
+                    has_native: hasNativeBuild,
+                  };
+                })
+                .filter(Boolean)
+            : [];
+
+          if (components.length === 0) {
+            throw new Error('No public component packages were found under packages/components/*');
+          }
+
+          const nativeMatrix = [];
+          for (const component of components) {
+            if (!component.has_native) {
+              continue;
+            }
+
+            for (const target of nativeTargets) {
+              nativeMatrix.push({ ...component, ...target, skip: false });
+            }
+          }
+
+          const nativeMatrixWithNoop = nativeMatrix.length > 0
+            ? nativeMatrix
+            : [{ dir: 'none', name: 'none', path: 'none', target: 'none', runner: 'ubuntu-latest', has_native: false, skip: true }];
+
+          console.log(`components_matrix=${JSON.stringify({ include: components })}`);
+          console.log(`native_matrix=${JSON.stringify({ include: nativeMatrixWithNoop })}`);
+          NODE
+
+          cat /tmp/components-matrices.env >> "$GITHUB_OUTPUT"
+          cat /tmp/components-matrices.env
+
+  build_common:
+    name: Build @easylayer/common
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies in current repository
+        uses: ./.github/actions/yarn-nm-install
+
+      - name: Build common package
+        shell: bash
+        run: |
+          set -euo pipefail
+          yarn workspace @easylayer/common clear:dist
+          yarn workspace @easylayer/common build
+          tar -czf common-build.tar.gz \
+            packages/common/index.js \
+            packages/common/index.mjs \
+            packages/common/index.d.ts \
+            packages/common/package.json \
+            packages/common/LICENSE \
+            packages/common/*/dist
+
+      - name: Upload common build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-build-common
+          path: common-build.tar.gz
+          if-no-files-found: error
+
+  build_components_js:
+    name: Build component JS (${{ matrix.name }})
+    needs: discover_components
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover_components.outputs.components_matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies in current repository
+        uses: ./.github/actions/yarn-nm-install
+
+      - name: Build component package
+        shell: bash
+        run: |
+          set -euo pipefail
+          yarn workspace '${{ matrix.name }}' clear:dist
+
+          if [ '${{ matrix.has_native }}' = 'true' ]; then
+            if ! node -e "const pkg = require('./${{ matrix.path }}/package.json'); process.exit(pkg.scripts && pkg.scripts['build:js'] ? 0 : 1);"; then
+              echo "❌ ${{ matrix.name }} has build:native but does not define build:js."
+              echo "Native-enabled packages must build JS separately before native artifacts are restored."
+              exit 1
+            fi
+
+            yarn workspace '${{ matrix.name }}' build:js
+          else
+            yarn workspace '${{ matrix.name }}' build
+          fi
+
+          tar -czf component-${{ matrix.dir }}-js-build.tar.gz \
+            '${{ matrix.path }}/package.json' \
+            '${{ matrix.path }}/LICENSE' \
+            '${{ matrix.path }}/dist'
+
+      - name: Upload component JS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-build-component-${{ matrix.dir }}-js
+          path: component-${{ matrix.dir }}-js-build.tar.gz
+          if-no-files-found: error
+
+  build_components_native:
+    name: Build component native (${{ matrix.name }} / ${{ matrix.target }})
+    needs: discover_components
+    runs-on: ${{ matrix.runner }}
+    if: github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover_components.outputs.native_matrix) }}
+    steps:
+      - name: Skip native build when no native components exist
+        if: ${{ matrix.skip == true }}
+        shell: bash
+        run: echo 'No native component packages discovered.'
+
+      - name: Checkout repository
+        if: ${{ matrix.skip != true }}
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: ${{ matrix.skip != true }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        if: ${{ matrix.skip != true }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies in current repository
+        if: ${{ matrix.skip != true }}
+        uses: ./.github/actions/yarn-nm-install
+
+      - name: Build native binding
+        if: ${{ matrix.skip != true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NATIVE_TARGET='${{ matrix.target }}' \
+          NATIVE_BUILD_REQUIRED=1 \
+          yarn workspace '${{ matrix.name }}' build:native
+
+          tar -czf component-${{ matrix.dir }}-native-${{ matrix.target }}.tar.gz \
+            '${{ matrix.path }}/dist/native'
+
+      - name: Upload native artifact
+        if: ${{ matrix.skip != true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-build-component-${{ matrix.dir }}-native-${{ matrix.target }}
+          path: component-${{ matrix.dir }}-native-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release packages
+    needs:
+      - build_common
+      - build_components_js
+      - build_components_native
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          tags: true
-      
+          fetch-tags: true
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-      
+
       - name: Install dependencies in current repository
         uses: ./.github/actions/yarn-nm-install
-      
+
+      - name: Download built package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: package-build-*
+          path: .release-artifacts
+          merge-multiple: true
+
+      - name: Restore built package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find .release-artifacts -name '*.tar.gz' -print -exec tar -xzf {} -C . \;
+
       - name: Get Version from lerna.json
         id: get_version
         run: |
           VERSION=$(node -p "require('./lerna.json').version")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Current version: $VERSION"
-      
+
       - name: Create Git Tag if not exists
         run: |
           TAG="v${{ env.VERSION }}"
@@ -43,7 +288,7 @@ jobs:
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Generate Release Notes from CHANGELOG.md
         id: notes
         run: |
@@ -51,10 +296,10 @@ jobs:
           VERSION="${{ env.VERSION }}"
           echo "Looking for changelog section for version: $VERSION"
 
-          # Escape VERSION for ERE
           escape_regex() {
             printf '%s' "$1" | sed -e 's/[]\/$*.^|[]/\\&/g' -e 's/(/\\(/g' -e 's/)/\\)/g'
           }
+
           VER_ESC="$(escape_regex "$VERSION")"
 
           # Generic semver (incl. prerelease/build)
@@ -136,10 +381,10 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      
       - name: Publish Release Packages
         id: publish_release_packages
         run: |
+          set -euo pipefail
           echo "Publishing packages to NPM..."
           bash ./scripts/publish-release.sh
         env:

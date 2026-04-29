@@ -170,3 +170,10 @@ typedoc
 
 .cursor
 context/
+
+############################
+# Native, Rust
+############################
+
+target/
+**/target/
