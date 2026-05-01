@@ -35,7 +35,6 @@
     "native:target": "node ./scripts/native-platform.mjs",
     "build:native": "node ./scripts/build-native.mjs",
     "build": "yarn build:js && yarn build:native",
-    "prepublishOnly": "yarn clear:dist && yarn build",
     "check:native-artifacts": "node ./scripts/check-native-artifacts.mjs"
   },
   "author": "Yaroslav Pavliuk",
