@@ -22,6 +22,7 @@ jobs:
       - name: Discover packages/components workspaces
         id: discover
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           node <<'NODE' > /tmp/components-matrices.env
@@ -106,11 +107,12 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies in current repository
+      - name: Install dependencies in monorepo root
         uses: ./.github/actions/yarn-nm-install
 
-      - name: Build common package
+      - name: Build common package from monorepo root
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           yarn workspace @easylayer/common clear:dist
@@ -132,7 +134,9 @@ jobs:
 
   build_components_js:
     name: Build component JS (${{ matrix.name }})
-    needs: discover_components
+    needs:
+      - discover_components
+      - build_common
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/master'
     strategy:
@@ -147,11 +151,25 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies in current repository
+      - name: Install dependencies in monorepo root
         uses: ./.github/actions/yarn-nm-install
 
-      - name: Build component package
+      - name: Download common build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-build-common
+          path: .release-artifacts/common
+
+      - name: Restore common build artifact into monorepo
         shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          tar -xzf .release-artifacts/common/common-build.tar.gz -C .
+
+      - name: Build component package from monorepo root
+        shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           yarn workspace '${{ matrix.name }}' clear:dist
@@ -182,7 +200,9 @@ jobs:
 
   build_components_native:
     name: Build component native (${{ matrix.name }} / ${{ matrix.target }})
-    needs: discover_components
+    needs:
+      - discover_components
+      - build_common
     runs-on: ${{ matrix.runner }}
     if: github.ref == 'refs/heads/master'
     strategy:
@@ -208,13 +228,29 @@ jobs:
         if: ${{ matrix.skip != true }}
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dependencies in current repository
+      - name: Install dependencies in monorepo root
         if: ${{ matrix.skip != true }}
         uses: ./.github/actions/yarn-nm-install
 
-      - name: Build native binding
+      - name: Download common build artifact
+        if: ${{ matrix.skip != true }}
+        uses: actions/download-artifact@v4
+        with:
+          name: package-build-common
+          path: .release-artifacts/common
+
+      - name: Restore common build artifact into monorepo
         if: ${{ matrix.skip != true }}
         shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          tar -xzf .release-artifacts/common/common-build.tar.gz -C .
+
+      - name: Build native binding from monorepo root
+        if: ${{ matrix.skip != true }}
+        shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           NATIVE_TARGET='${{ matrix.target }}' \
@@ -253,7 +289,7 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies in current repository
+      - name: Install dependencies in monorepo root
         uses: ./.github/actions/yarn-nm-install
 
       - name: Download built package artifacts
@@ -265,18 +301,23 @@ jobs:
 
       - name: Restore built package artifacts
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           find .release-artifacts -name '*.tar.gz' -print -exec tar -xzf {} -C . \;
 
       - name: Get Version from lerna.json
         id: get_version
+        shell: bash
+        working-directory: .
         run: |
           VERSION=$(node -p "require('./lerna.json').version")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Current version: $VERSION"
 
       - name: Create Git Tag if not exists
+        shell: bash
+        working-directory: .
         run: |
           TAG="v${{ env.VERSION }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -291,6 +332,8 @@ jobs:
 
       - name: Generate Release Notes from CHANGELOG.md
         id: notes
+        shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           VERSION="${{ env.VERSION }}"
@@ -383,6 +426,8 @@ jobs:
 
       - name: Publish Release Packages
         id: publish_release_packages
+        shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           echo "Publishing packages to NPM..."
@@ -391,7 +436,7 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HUSKY: '0'  # Disable HUSKY hooks during CI
-      
+
       - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
