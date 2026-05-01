@@ -177,8 +177,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          yarn workspace '${{ matrix.name }}' clear:dist
-
           if [ '${{ matrix.has_native }}' = 'true' ]; then
             if ! node -e "const pkg = require('./${{ matrix.path }}/package.json'); process.exit(pkg.scripts && pkg.scripts['build:js'] ? 0 : 1);"; then
               echo "❌ ${{ matrix.name }} has build:native but does not define build:js."

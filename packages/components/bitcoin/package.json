@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/bitcoin",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -35,7 +35,6 @@
     "native:target": "node ./scripts/native-platform.mjs",
     "build:native": "node ./scripts/build-native.mjs",
     "build": "yarn build:js && yarn build:native",
-    "prepublishOnly": "yarn clear:dist && yarn build",
     "check:native-artifacts": "node ./scripts/check-native-artifacts.mjs"
   },
   "author": "Yaroslav Pavliuk",
@@ -43,7 +42,7 @@
   "packageManager": "yarn@4.5.0",
   "dependencies": {
     "@bitcoinerlab/secp256k1": "1.2.0",
-    "@easylayer/common": "1.3.0",
+    "@easylayer/common": "1.3.1",
     "@nestjs/common": "10.2.10",
     "@nestjs/swagger": "7.1.17",
     "@noble/secp256k1": "3.0.0",
