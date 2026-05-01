@@ -1,5 +1,7 @@
 import { Mutex } from 'async-mutex';
 import type { Block } from '../blockchain-provider';
+import { getBitcoinNativeBindings } from '../native';
+import type { NativeBlocksQueue } from '../native';
 
 /**
  * CapacityPlanner — dynamic ring capacity planner driven by EMA of block sizes.
@@ -146,6 +148,7 @@ export class BlocksQueue<T extends Block = Block> {
   private _size: number = 0; // current bytes used
   private _maxBlockHeight: number;
   private readonly mutex = new Mutex();
+  private native?: NativeBlocksQueue<T>;
 
   // Capacity planner (EMA + thresholds)
   private planner: CapacityPlanner;
@@ -180,10 +183,19 @@ export class BlocksQueue<T extends Block = Block> {
     this._blockSize = blockSize;
     this._maxBlockHeight = maxBlockHeight;
 
-    // Initialize EMA planner with initial expected block size
     this.planner = new CapacityPlanner(this._blockSize, plannerConfig);
 
-    // Initial capacity from planner (under budget). Ensure at least 2 to reduce startup friction.
+    const NativeBlocksQueue = getBitcoinNativeBindings()?.NativeBlocksQueue;
+    if (NativeBlocksQueue) {
+      try {
+        this.native = new NativeBlocksQueue<T>({ lastHeight, maxQueueSize, blockSize, maxBlockHeight, plannerConfig });
+        this.blocks = [];
+        return;
+      } catch {
+        this.native = undefined;
+      }
+    }
+
     const initialSlots = Math.max(2, this.planner.desiredSlots(this._maxQueueSize));
     this.blocks = new Array(initialSlots).fill(null);
   }
@@ -191,53 +203,74 @@ export class BlocksQueue<T extends Block = Block> {
   // ========== CORE QUEUE PROPERTIES ==========
 
   public get isQueueFull(): boolean {
+    if (this.native) return this.native.isQueueFull();
     return this._size >= this._maxQueueSize;
   }
 
   public isQueueOverloaded(additionalSize: number): boolean {
+    if (this.native) return this.native.isQueueOverloaded(additionalSize);
     const projectedSize = this.currentSize + additionalSize;
     return projectedSize > this.maxQueueSize;
   }
 
   public get blockSize(): number {
+    if (this.native) return this.native.getBlockSize();
     return this._blockSize;
   }
 
   public set blockSize(size: number) {
+    if (this.native) {
+      this.native.setBlockSize(size);
+      return;
+    }
     this._blockSize = size;
     // We keep EMA from observations; no immediate re-seed by default.
   }
 
   get isMaxHeightReached(): boolean {
+    if (this.native) return this.native.isMaxHeightReached();
     return this._lastHeight >= this._maxBlockHeight;
   }
 
   public get maxBlockHeight(): number {
+    if (this.native) return this.native.getMaxBlockHeight();
     return this._maxBlockHeight;
   }
 
   public set maxBlockHeight(height: number) {
+    if (this.native) {
+      this.native.setMaxBlockHeight(height);
+      return;
+    }
     this._maxBlockHeight = height;
   }
 
   public get maxQueueSize(): number {
+    if (this.native) return this.native.getMaxQueueSize();
     return this._maxQueueSize;
   }
 
   public set maxQueueSize(length: number) {
+    if (this.native) {
+      this.native.setMaxQueueSize(length);
+      return;
+    }
     this._maxQueueSize = length;
     // No immediate resize; ring adapts as new blocks arrive (observe + maybeResize).
   }
 
   public get currentSize(): number {
+    if (this.native) return this.native.getCurrentSize();
     return this._size;
   }
 
   public get length(): number {
+    if (this.native) return this.native.getLength();
     return this.currentBlockCount;
   }
 
   public get lastHeight(): number {
+    if (this.native) return this.native.getLastHeight();
     return this._lastHeight;
   }
 
@@ -247,6 +280,7 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async firstBlock(): Promise<T | undefined> {
     return this.mutex.runExclusive(async () => {
+      if (this.native) return this.native.firstBlock();
       if (this.currentBlockCount === 0) return undefined;
       return this.blocks[this.headIndex] || undefined;
     });
@@ -258,6 +292,16 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async enqueue(block: T): Promise<void> {
     await this.mutex.runExclusive(async () => {
+      if (this.native) {
+        this.native.validateEnqueue({
+          hash: block.hash,
+          height: Number(block.height),
+          size: Number(block.size),
+        });
+        this.cleanupBlockHexData(block);
+        this.native.enqueueCleaned(block);
+        return;
+      }
       if (this.hashIndex.has((block as any).hash)) {
         throw new Error('Duplicate block hash');
       }
@@ -345,6 +389,8 @@ export class BlocksQueue<T extends Block = Block> {
     const hashes: string[] = Array.isArray(hashOrHashes) ? hashOrHashes : [hashOrHashes];
 
     return this.mutex.runExclusive(() => {
+      if (this.native) return this.native.dequeue(hashes);
+
       let height = 0;
 
       for (const hash of hashes) {
@@ -385,6 +431,7 @@ export class BlocksQueue<T extends Block = Block> {
    * @complexity O(1)
    */
   public fetchBlockFromInStack(height: number): T | undefined {
+    if (this.native) return this.native.fetchBlockFromInStack(height);
     const bufferIndex = this.heightIndex.get(height);
     if (bufferIndex === undefined) return undefined;
     return this.blocks[bufferIndex] || undefined;
@@ -396,6 +443,7 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public fetchBlockFromOutStack(height: number): Promise<T | undefined> {
     return this.mutex.runExclusive(async () => {
+      if (this.native) return this.native.fetchBlockFromOutStack(height);
       return this.fetchBlockFromInStack(height);
     });
   }
@@ -406,6 +454,8 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public findBlocks(hashSet: Set<string>): Promise<T[]> {
     return this.mutex.runExclusive(async (): Promise<T[]> => {
+      if (this.native) return this.native.findBlocks(Array.from(hashSet));
+
       const blocks: T[] = [];
 
       for (const hash of hashSet) {
@@ -431,6 +481,7 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async getBatchUpToSize(maxSize: number): Promise<T[]> {
     return this.mutex.runExclusive(async () => {
+      if (this.native) return this.native.getBatchUpToSize(maxSize);
       if (this.currentBlockCount === 0) {
         return [];
       }
@@ -479,6 +530,11 @@ export class BlocksQueue<T extends Block = Block> {
    * @complexity O(n) - needs to clear indexes
    */
   public clear(): void {
+    if (this.native) {
+      this.native.clear();
+      return;
+    }
+
     // Reset all pointers and counters
     this.headIndex = 0;
     this.tailIndex = 0;
@@ -499,9 +555,36 @@ export class BlocksQueue<T extends Block = Block> {
    */
   public async reorganize(reorganizeHeight: number): Promise<void> {
     await this.mutex.runExclusive(() => {
+      if (this.native) {
+        this.native.reorganize(reorganizeHeight);
+        return;
+      }
       this.clear();
       this._lastHeight = reorganizeHeight;
     });
+  }
+
+  /**
+   * Explicitly releases memory owned by this queue instance.
+   *
+   * This is intended for application/service shutdown. It is not required for
+   * normal queue processing and it does not unload the native addon from Node.js.
+   * Native mode clears and shrinks Rust containers. JS fallback clears the queue
+   * and drops the backing array so V8 can reclaim it.
+   */
+  public dispose(): void {
+    if (this.native) {
+      this.native.dispose();
+      return;
+    }
+
+    this.headIndex = 0;
+    this.tailIndex = 0;
+    this.currentBlockCount = 0;
+    this._size = 0;
+    this.blocks = [];
+    this.heightIndex.clear();
+    this.hashIndex.clear();
   }
 
   // ========== HELPER METHODS ==========
@@ -512,12 +595,12 @@ export class BlocksQueue<T extends Block = Block> {
    */
   private cleanupBlockHexData(block: T): void {
     const anyBlock = block as any;
-    anyBlock.hex = undefined;
+    delete anyBlock.hex;
     const transactions = anyBlock.tx;
     if (Array.isArray(transactions)) {
       for (let i = 0, n = transactions.length; i < n; i++) {
-        const transaction = transactions[i];
-        if (transaction) transaction.hex = undefined;
+        const transaction = transactions[i] as any;
+        if (transaction) delete transaction.hex;
       }
     }
   }
@@ -568,6 +651,8 @@ export class BlocksQueue<T extends Block = Block> {
     indexesSize: number;
     memoryUsedBytes: number;
   } {
+    if (this.native) return this.native.getMemoryStats();
+
     const indexesSize = this.heightIndex.size + this.hashIndex.size;
 
     return {

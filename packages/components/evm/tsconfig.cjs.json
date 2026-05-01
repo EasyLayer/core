@@ -13,6 +13,7 @@
   ],
   "include": ["src"],
   "exclude": [
+    "src/browser",
     "dist",
     "**/*.test.ts",
     "**/__tests__",

@@ -1,3 +1,6 @@
-export * from './blockchain-provider';
-export * from './blocks-queue';
-export * from './cqrs-components';
+import './node/native/register';
+export * from './node';
+export * from './core/blockchain-provider';
+export * from './core/blocks-queue';
+export * from './core/cqrs-components';
+export * from './core/native';
