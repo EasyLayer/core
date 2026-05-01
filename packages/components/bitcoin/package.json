@@ -27,7 +27,7 @@
     "test": "yarn run test:unit",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
     "lint:fix": "eslint -c eslint.config.mjs \"src/**/*.ts\" --fix",
-    "format": "prettier -с prettier.config.mjs --write \"src/**/*.ts\"",
+    "format": "prettier -c prettier.config.mjs --write \"src/**/*.ts\"",
     "build:cjs": "tsc -b tsconfig.cjs.json",
     "build:esm": "tsc -b tsconfig.esm.json",
     "build:browser": "rollup -c rollup.config.mjs",
