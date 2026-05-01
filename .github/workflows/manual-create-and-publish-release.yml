@@ -110,13 +110,17 @@ jobs:
       - name: Install dependencies in monorepo root
         uses: ./.github/actions/yarn-nm-install
 
-      - name: Build common package from monorepo root
+      - name: Build packages from monorepo root
         shell: bash
         working-directory: .
+        env:
+          HUSKY: '0'
         run: |
           set -euo pipefail
-          yarn workspace @easylayer/common clear:dist
-          yarn workspace @easylayer/common build
+
+          yarn clear:dist
+          yarn build
+
           tar -czf common-build.tar.gz \
             packages/common/index.js \
             packages/common/index.mjs \
@@ -172,6 +176,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
+
           yarn workspace '${{ matrix.name }}' clear:dist
 
           if [ '${{ matrix.has_native }}' = 'true' ]; then
@@ -253,6 +258,7 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
+
           NATIVE_TARGET='${{ matrix.target }}' \
           NATIVE_BUILD_REQUIRED=1 \
           yarn workspace '${{ matrix.name }}' build:native
@@ -311,6 +317,7 @@ jobs:
         shell: bash
         working-directory: .
         run: |
+          set -euo pipefail
           VERSION=$(node -p "require('./lerna.json').version")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Current version: $VERSION"
@@ -319,6 +326,8 @@ jobs:
         shell: bash
         working-directory: .
         run: |
+          set -euo pipefail
+
           TAG="v${{ env.VERSION }}"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists. Skipping tag creation."
