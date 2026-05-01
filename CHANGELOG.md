@@ -1,3 +1,16 @@
+## [1.3.1](https://github.com/EasyLayer/core/compare/v1.2.1...v1.3.1) (2026-05-01)
+
+
+### Bug Fixes
+
+* removed publish only npm script from all packages; ([67bc01e](https://github.com/EasyLayer/core/commit/67bc01edc6fd0d1ea8a6307645a21ae61048f6d5))
+
+
+### Features
+
+* added native modules to the bitcoin pkg; updated cicd to support multi artifacts building; ([ef7e8c9](https://github.com/EasyLayer/core/commit/ef7e8c991be84b85253477f55083304d0c033114))
+* braking refactoring evm component pkg; ([3c97031](https://github.com/EasyLayer/core/commit/3c97031b6a89a0ee0dd06d1933e62bf325dffe22))
+
 # [1.3.0](https://github.com/EasyLayer/core/compare/v1.2.1...v1.3.0) (2026-05-01)
 
 
