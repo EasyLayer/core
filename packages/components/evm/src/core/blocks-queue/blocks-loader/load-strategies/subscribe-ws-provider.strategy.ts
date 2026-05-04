@@ -5,20 +5,11 @@ import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
 
-/**
- * WS subscription strategy for real-time block ingestion.
- *
- * On start:
- *   1. Catch-up: fetch missed blocks (batched like pull-rpc for large gaps)
- *   2. Subscribe to newBlocks via WebSocket
- *
- * Catch-up threshold: if gap > CATCH_UP_BATCH_THRESHOLD, use batched loading
- * instead of single getManyBlocksWithReceipts call to avoid OOM.
- */
 export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
   readonly name = StrategyNames.WS_SUBSCRIBE;
   private _subscription?: Promise<void> & { unsubscribe: () => void };
   private readonly tracesEnabled: boolean;
+  private readonly verifyTrie: boolean;
   private readonly catchUpBatchSize: number;
 
   constructor(
@@ -29,10 +20,12 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
       maxRequestBlocksBatchSize?: number;
       basePreloadCount?: number;
       tracesEnabled?: boolean;
+      verifyTrie?: boolean;
       catchUpBatchSize?: number;
     }
   ) {
     this.tracesEnabled = config.tracesEnabled ?? false;
+    this.verifyTrie = config.verifyTrie ?? false;
     this.catchUpBatchSize = config.catchUpBatchSize ?? 50;
   }
 
@@ -56,7 +49,6 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
                   reject(new Error('Queue full'));
                   return;
                 }
-                // Add traces if enabled
                 if (this.tracesEnabled && block) {
                   block.traces = await this.blockchainProvider.getTracesByBlockHeight(block.blockNumber);
                 }
@@ -67,7 +59,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
               }
             },
             true,
-            true
+            this.verifyTrie
           );
 
           this.log.debug('WS subscription started, waiting for blocks');
@@ -101,54 +93,41 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
     this._subscription = undefined;
   }
 
-  /**
-   * Fetch missed blocks from queue.lastHeight+1 to targetHeight.
-   * For small gaps (≤ catchUpBatchSize): single request.
-   * For large gaps: batched loading to avoid memory issues.
-   */
-  private async performCatchUp(targetHeight: number): Promise<void> {
-    const from = this.queue.lastHeight + 1;
-    const gap = targetHeight - this.queue.lastHeight;
+  private async performCatchUp(currentNetworkHeight: number): Promise<void> {
+    const start = this.queue.lastHeight + 1;
+    if (start > currentNetworkHeight) return;
 
-    if (gap <= 0) return;
-
-    this.log.debug('WS catch-up', { args: { from, to: targetHeight, gap } });
-
+    const gap = currentNetworkHeight - this.queue.lastHeight;
     if (gap <= this.catchUpBatchSize) {
-      // Small gap: single request
-      const heights = Array.from({ length: gap }, (_, i) => from + i);
-      const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, true);
-      if (this.tracesEnabled) await this.attachTraces(blocks);
-      await this.enqueueBlocks(blocks);
-    } else {
-      // Large gap: batched like pull-rpc to avoid OOM
-      let current = from;
-      while (current <= targetHeight) {
-        const batchEnd = Math.min(current + this.catchUpBatchSize - 1, targetHeight);
-        const heights = Array.from({ length: batchEnd - current + 1 }, (_, i) => current + i);
-        const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, true);
-        if (this.tracesEnabled) await this.attachTraces(blocks);
-        await this.enqueueBlocks(blocks);
-        current = batchEnd + 1;
+      const heights = Array.from({ length: gap }, (_, i) => start + i);
+      const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, this.verifyTrie);
+      await this.attachTracesIfNeeded(blocks);
+      for (const block of blocks) {
+        await this.enqueueBlock(block);
       }
+      return;
     }
 
-    this.log.debug('WS catch-up completed', { args: { processed: gap } });
+    for (let batchStart = start; batchStart <= currentNetworkHeight; batchStart += this.catchUpBatchSize) {
+      const batchEnd = Math.min(batchStart + this.catchUpBatchSize - 1, currentNetworkHeight);
+      const heights = Array.from({ length: batchEnd - batchStart + 1 }, (_, i) => batchStart + i);
+      const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, this.verifyTrie);
+      await this.attachTracesIfNeeded(blocks);
+      for (const block of blocks) {
+        await this.enqueueBlock(block);
+      }
+    }
   }
 
-  private async attachTraces(blocks: Block[]): Promise<void> {
+  private async attachTracesIfNeeded(blocks: Block[]): Promise<void> {
+    if (!this.tracesEnabled) return;
     for (const block of blocks) {
       block.traces = await this.blockchainProvider.getTracesByBlockHeight(block.blockNumber);
     }
   }
 
   private async enqueueBlock(block: Block): Promise<void> {
-    if (!block || block.blockNumber <= this.queue.lastHeight) return;
+    if (block.blockNumber <= this.queue.lastHeight) return;
     await this.queue.enqueue(block);
-  }
-
-  private async enqueueBlocks(blocks: Block[]): Promise<void> {
-    const sorted = [...blocks].sort((a, b) => a.blockNumber - b.blockNumber);
-    for (const block of sorted) await this.enqueueBlock(block);
   }
 }

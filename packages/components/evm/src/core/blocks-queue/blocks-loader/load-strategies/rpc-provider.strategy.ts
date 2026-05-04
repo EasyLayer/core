@@ -5,14 +5,15 @@ import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
 
-export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
-  readonly name = StrategyNames.RPC_PULL;
+export class RpcProviderStrategy implements BlocksLoadingStrategy {
+  readonly name = StrategyNames.RPC;
   private _maxRequestBlocksBatchSize: number;
   private _preloadedItemsQueue: Block[] = [];
   private _maxPreloadCount: number;
   private _lastLoadReceiptsDuration = 0;
   private _previousLoadReceiptsDuration = 0;
   private readonly tracesEnabled: boolean;
+  private readonly verifyTrie: boolean;
 
   constructor(
     private readonly log: Logger,
@@ -22,11 +23,13 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
       maxRequestBlocksBatchSize: number;
       basePreloadCount: number;
       tracesEnabled?: boolean;
+      verifyTrie?: boolean;
     }
   ) {
     this._maxRequestBlocksBatchSize = config.maxRequestBlocksBatchSize;
     this._maxPreloadCount = config.basePreloadCount;
     this.tracesEnabled = config.tracesEnabled ?? false;
+    this.verifyTrie = config.verifyTrie ?? false;
   }
 
   public async load(currentNetworkHeight: number): Promise<void> {
@@ -56,7 +59,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   }
 
   private async preloadBlocksWithTransactions(currentNetworkHeight: number): Promise<void> {
-    // Adaptive preload count adjustment based on timing
     if (this._previousLoadReceiptsDuration > 0 && this._lastLoadReceiptsDuration > 0) {
       const ratio = this._lastLoadReceiptsDuration / this._previousLoadReceiptsDuration;
       if (ratio > 1.2) this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
@@ -69,7 +71,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     if (count <= 0) return;
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
-    this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true, true);
+    this._preloadedItemsQueue = await this.blockchainProvider.getManyBlocksByHeights(heights, true, this.verifyTrie);
   }
 
   private async loadReceiptsAndEnqueueBlocks(): Promise<void> {
@@ -77,27 +79,19 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     const receiptsBatches = this.createOptimalBatchesForReceipts();
     const completeBlocks: Block[] = [];
 
-    // Process one batch (single concurrency)
     const batch = receiptsBatches[0];
     if (batch) {
       const loaded = await this.loadBlocksWithReceipts(batch.blocks, 3);
       completeBlocks.push(...loaded);
     }
 
-    // Clear preloaded queue
     this._preloadedItemsQueue = [];
 
-    // Load traces if enabled (separate RPC calls per block)
     if (this.tracesEnabled && completeBlocks.length > 0) {
       await this.attachTraces(completeBlocks);
     }
 
-    // Enqueue in order
     await this.enqueueBlocks(completeBlocks);
-
-    // Do not clear traces here: the queue owns block objects until
-    // BlocksIteratorService passes them to user models. Clearing traces after
-    // enqueue breaks the TypeScript fallback queue because it stores references.
 
     this._previousLoadReceiptsDuration = this._lastLoadReceiptsDuration;
     this._lastLoadReceiptsDuration = Date.now() - startTime;
@@ -105,7 +99,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
 
   private createOptimalBatchesForReceipts(): { blocks: Block[]; maxPossibleSize: number }[] {
     const batches: { blocks: Block[]; maxPossibleSize: number }[] = [];
-    // Sort ascending by blockNumber
     this._preloadedItemsQueue.sort((a, b) => a.blockNumber - b.blockNumber);
 
     let currentBatch: Block[] = [];
@@ -144,7 +137,7 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
     while (attempt < maxRetries) {
       try {
         const heights = blocks.map((b) => b.blockNumber);
-        return await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, true);
+        return await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, this.verifyTrie);
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
@@ -164,7 +157,6 @@ export class PullRpcProviderStrategy implements BlocksLoadingStrategy {
   }
 
   private async enqueueBlocks(blocks: Block[]): Promise<void> {
-    // Enqueue in ascending order
     const sorted = [...blocks].sort((a, b) => a.blockNumber - b.blockNumber);
     for (const block of sorted) {
       if (block.blockNumber <= this.queue.lastHeight) {

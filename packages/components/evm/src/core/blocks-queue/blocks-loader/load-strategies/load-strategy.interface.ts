@@ -1,5 +1,5 @@
 export const enum StrategyNames {
-  RPC_PULL = 'pull-rpc',
+  RPC = 'rpc',
   WS_SUBSCRIBE = 'subscribe-ws',
 }
 

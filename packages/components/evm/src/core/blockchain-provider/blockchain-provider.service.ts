@@ -10,7 +10,7 @@ import { quantityToDecimalString, quantityToNumber, normalizeAddress, normalizeH
  * A Subscription is a Promise that resolves once unsubscribed,
  * and also provides an `unsubscribe()` method.
  */
-export type Subscription = Promise<void> & { unsubscribe: () => void };
+type Subscription = Promise<void> & { unsubscribe: () => void };
 
 /**
  * BlockchainProviderService — main EVM blockchain operations interface.
@@ -71,6 +71,10 @@ export class BlockchainProviderService {
   }
 
   /** Alias used by crawler for consistency with bitcoin package */
+  public async getCurrentBlockHeightFromMempool(): Promise<number> {
+    return this.getCurrentBlockHeight();
+  }
+
   public async getCurrentBlockHeightFromNetwork(): Promise<number> {
     return this.getCurrentBlockHeight();
   }
@@ -231,71 +235,6 @@ export class BlockchainProviderService {
       throw new Error(`Trace API is disabled by network config for chainId ${this.networkConfig.chainId}`);
     }
     await this.execNetwork('assertTraceSupport', (provider) => provider.assertTraceSupport());
-  }
-
-  /**
-   * Fail-fast compatibility check for runtime-declared capabilities.
-   * This keeps @easylayer/evm generic: callers describe required behaviour in
-   * NetworkConfig instead of hardcoding Ethereum/BSC/Polygon logic here.
-   */
-  public async assertRuntimeCompatibility(
-    options: {
-      tracesEnabled?: boolean;
-      mempoolStrategy?: MempoolStrategy;
-    } = {}
-  ): Promise<void> {
-    const height = await this.getCurrentBlockHeightFromNetwork();
-    const probeBlock = await this.getOneBlockByHeight(height, false, false);
-
-    if (!probeBlock) {
-      throw new Error(`Compatibility check failed: provider returned no block for height ${height}`);
-    }
-
-    if (this.networkConfig.hasEIP1559 && probeBlock.baseFeePerGas === undefined) {
-      throw new Error('Compatibility check failed: hasEIP1559=true but baseFeePerGas is missing on the probe block');
-    }
-
-    if (
-      this.networkConfig.hasWithdrawals &&
-      probeBlock.withdrawals === undefined &&
-      probeBlock.withdrawalsRoot === undefined
-    ) {
-      throw new Error(
-        'Compatibility check failed: hasWithdrawals=true but withdrawals fields are missing on the probe block'
-      );
-    }
-
-    if (
-      this.networkConfig.hasBlobTransactions &&
-      probeBlock.blobGasUsed === undefined &&
-      probeBlock.excessBlobGas === undefined &&
-      probeBlock.parentBeaconBlockRoot === undefined
-    ) {
-      throw new Error(
-        'Compatibility check failed: hasBlobTransactions=true but blob-related fields are missing on the probe block'
-      );
-    }
-
-    if (options.tracesEnabled) {
-      await this.assertTraceSupport();
-    }
-
-    if (options.mempoolStrategy && options.mempoolStrategy !== 'disabled') {
-      if (!this.isMempoolAvailable) {
-        throw new Error(
-          `Compatibility check failed: mempool strategy ${options.mempoolStrategy} is enabled but no mempool provider is available`
-        );
-      }
-
-      if (options.mempoolStrategy === 'subscribe-ws') {
-        const provider = this.mempoolManager.getActiveProvider() as any;
-        if (!provider?.hasWebSocketSupport) {
-          throw new Error(
-            'Compatibility check failed: subscribe-ws mempool strategy requires a websocket-capable provider'
-          );
-        }
-      }
-    }
   }
 
   /**

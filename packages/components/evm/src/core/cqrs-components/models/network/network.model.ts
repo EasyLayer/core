@@ -16,6 +16,10 @@ import { BlockchainValidationError } from '../errors';
  *
  * Memory Strategy: circular buffer with O(1) height lookups.
  * Stores LightBlock (hashes only) — no transaction bodies, no receipts.
+ *
+ * lastBlockHeight is intentionally NOT overridden here.
+ * It is managed exclusively by AggregateRoot (via events blockHeight field),
+ * which is the same pattern as the Bitcoin Network aggregate.
  */
 export class Network extends AggregateRoot {
   private __maxSize: number;
@@ -38,10 +42,6 @@ export class Network extends AggregateRoot {
   }
 
   // ===== GETTERS =====
-
-  get lastBlockHeight(): number {
-    return this.chain.lastBlockHeight ?? super.lastBlockHeight;
-  }
 
   public getLastBlock(): LightBlock | undefined {
     return this.chain.lastBlock;
@@ -82,11 +82,18 @@ export class Network extends AggregateRoot {
     currentNetworkHeight: number;
     logger?: Logger;
   }): Promise<void> {
-    logger?.debug('Network init', { args: { startHeight, currentNetworkHeight } });
-
     this.apply(
       new EvmNetworkInitializedEvent({ aggregateId: this.aggregateId, requestId, blockHeight: startHeight }, {})
     );
+
+    logger?.log('Network successfully initialized', {
+      module: 'network-model',
+      args: {
+        lastIndexedHeight: startHeight,
+        nextBlockToProcess: startHeight + 1,
+        currentNetworkHeight,
+      },
+    });
   }
 
   public async clearChain({ requestId }: { requestId: string }): Promise<void> {
@@ -106,16 +113,23 @@ export class Network extends AggregateRoot {
       throw new BlockchainValidationError();
     }
 
+    const blockHeight = blocks[blocks.length - 1]?.blockNumber ?? -1;
+
     this.apply(
       new EvmNetworkBlocksAddedEvent(
         {
           aggregateId: this.aggregateId,
           requestId,
-          blockHeight: blocks[blocks.length - 1]?.blockNumber ?? -1,
+          blockHeight,
         },
         { blocks }
       )
     );
+
+    logger?.log('Blocks successfully added', {
+      module: 'network-model',
+      args: { blockHeight },
+    });
   }
 
   public async reorganisation({
@@ -144,12 +158,19 @@ export class Network extends AggregateRoot {
     if (hasLocal && hasRemote) {
       const isFork = remoteBlock.hash === localBlock.hash && remoteBlock.parentHash === localBlock.parentHash;
       if (isFork) {
-        return this.apply(
+        this.apply(
           new EvmNetworkReorganizedEvent(
             { aggregateId: this.aggregateId, blockHeight: reorgHeight, requestId },
             { blocks }
           )
         );
+
+        logger?.log('Blocks successfully reorganized', {
+          module: 'network-model',
+          args: { blockHeight: reorgHeight },
+        });
+
+        return;
       }
     }
 

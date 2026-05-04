@@ -37,6 +37,17 @@ export class BlockchainProviderModule {
   static async forRootAsync(options: BlockchainProviderModuleOptions): Promise<DynamicModule> {
     const { networkProviders, mempoolProviders, isGlobal, rateLimits, network } = options;
 
+    // Validate: WS URL requires a paired RPC URL.
+    // WS handles real-time block subscriptions; RPC handles block/receipt fetching.
+    for (const conn of networkProviders.connections) {
+      if (conn.wsUrl && !conn.httpUrl) {
+        throw new Error(
+          `BlockchainProviderModule: wsUrl "${conn.wsUrl}" is configured without a paired httpUrl. ` +
+            'Each WS connection must have a corresponding RPC HTTP URL for block fetching.'
+        );
+      }
+    }
+
     const buildNetworkProviders = () =>
       networkProviders.connections.map((conn, i) =>
         createProvider({

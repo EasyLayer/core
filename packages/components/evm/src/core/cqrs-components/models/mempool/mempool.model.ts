@@ -105,8 +105,14 @@ export class Mempool extends AggregateRoot {
     height: number;
     logger?: Logger;
   }): Promise<void> {
-    logger?.log('Mempool init', { args: { height } });
     this.apply(new EvmMempoolInitializedEvent({ aggregateId: this.aggregateId, requestId, blockHeight: height }, {}));
+
+    logger?.log('Mempool successfully initialized', {
+      module: 'mempool-model',
+      args: {
+        lastHeight: height,
+      },
+    });
   }
 
   public async refresh({
@@ -181,7 +187,10 @@ export class Mempool extends AggregateRoot {
       )
     );
 
-    logger?.log('Mempool refreshed', { args: { mode, providers: Object.keys(filtered).length } });
+    logger?.log('Mempool refreshed', {
+      module: 'mempool-model',
+      args: { mode, providers: Object.keys(filtered).length },
+    });
   }
 
   public async sync({
@@ -206,7 +215,10 @@ export class Mempool extends AggregateRoot {
           {}
         )
       );
-      logger?.log('Mempool synced', { args: this.store.getStats() });
+      logger?.log('Mempool synced', {
+        module: 'mempool-model',
+        args: { mempool: this.store.getStats() },
+      });
       return;
     }
 

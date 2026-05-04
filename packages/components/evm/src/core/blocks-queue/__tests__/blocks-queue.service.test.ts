@@ -20,7 +20,7 @@ describe('BlocksQueueService', () => {
     blockTimeMs: 12_000,
     queueIteratorBlocksBatchSize: 8_000_000,
     queueLoaderRequestBlocksBatchSize: 8_000_000,
-    queueLoaderStrategyName: 'pull-rpc',
+    queueLoaderStrategyName: 'rpc',
     basePreloadCount: 10,
     tracesEnabled: false,
   };

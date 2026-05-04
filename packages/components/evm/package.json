@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/evm",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "",
   "type": "commonjs",
   "main": "./dist/index.js",
@@ -31,7 +31,8 @@
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
-    "clear:dist": "rimraf dist",
+    "clear:dist": "yarn run clear:native:target && rimraf dist",
+    "clear:native:target": "rimraf native/evm-native/target",
     "test:unit": "jest --maxWorkers=1 -c ./jest.config.unit.mjs",
     "test": "yarn run test:unit",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
@@ -50,7 +51,7 @@
   "license": "",
   "packageManager": "yarn@4.5.0",
   "dependencies": {
-    "@easylayer/common": "1.3.1",
+    "@easylayer/common": "1.3.2",
     "@ethereumjs/rlp": "10.0.0",
     "@ethereumjs/trie": "6.2.1",
     "@nestjs/common": "10.2.10",

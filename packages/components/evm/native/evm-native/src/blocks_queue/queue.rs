@@ -8,23 +8,23 @@ use crate::utils::{number_field, string_field};
 #[derive(Clone)]
 struct BlockEntry {
   value: Value,
-  block_number: u32,
+  block_number: i64,
   hash: String,
   size: u64,
 }
 
 #[napi]
 pub struct NativeBlocksQueue {
-  last_height: u32,
+  last_height: i64,
   max_queue_size: u64,
   block_size: u64,
-  max_block_height: u32,
+  max_block_height: i64,
   size: u64,
   blocks: Vec<Option<BlockEntry>>,
   head_index: usize,
   tail_index: usize,
   current_block_count: usize,
-  block_number_index: HashMap<u32, usize>,
+  block_number_index: HashMap<i64, usize>,
   hash_index: HashMap<String, usize>,
 }
 
@@ -41,9 +41,9 @@ fn cleanup_hex(value: &mut Value) {
   }
 }
 
-fn block_number_of(block: &Value) -> Result<u32> {
+fn block_number_of(block: &Value) -> Result<i64> {
   number_field(block, "blockNumber")
-    .map(|v| v as u32)
+    .map(|v| v as i64)
     .ok_or_else(|| Error::from_reason("Block is missing numeric blockNumber"))
 }
 
@@ -63,10 +63,10 @@ fn block_size_of(block: &Value) -> Result<u64> {
 impl NativeBlocksQueue {
   #[napi(constructor)]
   pub fn new(options: Value) -> Result<Self> {
-    let last_height = number_field(&options, "lastHeight").unwrap_or(0.0) as u32;
+    let last_height = number_field(&options, "lastHeight").unwrap_or(-1.0) as i64;
     let max_queue_size = number_field(&options, "maxQueueSize").unwrap_or(128.0 * 1024.0 * 1024.0) as u64;
     let block_size = number_field(&options, "blockSize").unwrap_or(256.0 * 1024.0) as u64;
-    let max_block_height = number_field(&options, "maxBlockHeight").unwrap_or(u32::MAX as f64) as u32;
+    let max_block_height = number_field(&options, "maxBlockHeight").unwrap_or(i64::MAX as f64) as i64;
     let min_block_size = 1024u64;
     let slots = std::cmp::max(2, (max_queue_size / std::cmp::max(min_block_size, 1)) as usize);
 
@@ -91,18 +91,18 @@ impl NativeBlocksQueue {
   }
 
   #[napi(js_name = "isQueueOverloaded")]
-  pub fn is_queue_overloaded(&self, additional_size: u32) -> bool {
-    self.size + additional_size as u64 > self.max_queue_size
+  pub fn is_queue_overloaded(&self, additional_size: f64) -> bool {
+    self.size.saturating_add(additional_size.max(0.0) as u64) > self.max_queue_size
   }
 
   #[napi(js_name = "getBlockSize")]
-  pub fn get_block_size(&self) -> u32 {
-    self.block_size as u32
+  pub fn get_block_size(&self) -> f64 {
+    self.block_size as f64
   }
 
   #[napi(js_name = "setBlockSize")]
-  pub fn set_block_size(&mut self, size: u32) {
-    self.block_size = size as u64;
+  pub fn set_block_size(&mut self, size: f64) {
+    self.block_size = size.max(0.0) as u64;
   }
 
   #[napi(js_name = "isMaxHeightReached")]
@@ -111,38 +111,38 @@ impl NativeBlocksQueue {
   }
 
   #[napi(js_name = "getMaxBlockHeight")]
-  pub fn get_max_block_height(&self) -> u32 {
-    self.max_block_height
+  pub fn get_max_block_height(&self) -> f64 {
+    self.max_block_height as f64
   }
 
   #[napi(js_name = "setMaxBlockHeight")]
-  pub fn set_max_block_height(&mut self, height: u32) {
-    self.max_block_height = height;
+  pub fn set_max_block_height(&mut self, height: f64) {
+    self.max_block_height = height as i64;
   }
 
   #[napi(js_name = "getMaxQueueSize")]
-  pub fn get_max_queue_size(&self) -> u32 {
-    self.max_queue_size as u32
+  pub fn get_max_queue_size(&self) -> f64 {
+    self.max_queue_size as f64
   }
 
   #[napi(js_name = "setMaxQueueSize")]
-  pub fn set_max_queue_size(&mut self, size: u32) {
-    self.max_queue_size = size as u64;
+  pub fn set_max_queue_size(&mut self, size: f64) {
+    self.max_queue_size = size.max(0.0) as u64;
   }
 
   #[napi(js_name = "getCurrentSize")]
-  pub fn get_current_size(&self) -> u32 {
-    self.size as u32
+  pub fn get_current_size(&self) -> f64 {
+    self.size as f64
   }
 
   #[napi(js_name = "getLength")]
-  pub fn get_length(&self) -> u32 {
-    self.current_block_count as u32
+  pub fn get_length(&self) -> f64 {
+    self.current_block_count as f64
   }
 
   #[napi(js_name = "getLastHeight")]
-  pub fn get_last_height(&self) -> u32 {
-    self.last_height
+  pub fn get_last_height(&self) -> f64 {
+    self.last_height as f64
   }
 
   #[napi(js_name = "firstBlock")]
@@ -155,7 +155,7 @@ impl NativeBlocksQueue {
 
   #[napi(js_name = "validateEnqueue")]
   pub fn validate_enqueue(&self, meta: Value) -> Result<()> {
-    let block_number = number_field(&meta, "blockNumber").ok_or_else(|| Error::from_reason("Missing blockNumber"))? as u32;
+    let block_number = number_field(&meta, "blockNumber").ok_or_else(|| Error::from_reason("Missing blockNumber"))? as i64;
     let size = number_field(&meta, "size").ok_or_else(|| Error::from_reason("Missing size"))? as u64;
     let hash = string_field(&meta, "hash").ok_or_else(|| Error::from_reason("Missing hash"))?;
 
@@ -193,14 +193,14 @@ impl NativeBlocksQueue {
   }
 
   #[napi]
-  pub fn dequeue(&mut self, hash_or_hashes: Value) -> Result<u32> {
+  pub fn dequeue(&mut self, hash_or_hashes: Value) -> Result<f64> {
     let hashes: Vec<String> = match hash_or_hashes {
       Value::String(hash) => vec![hash],
       Value::Array(items) => items.into_iter().filter_map(|item| item.as_str().map(ToOwned::to_owned)).collect(),
       _ => vec![],
     };
 
-    let mut last = 0u32;
+    let mut last = self.last_height;
     for hash in hashes {
       let index = self.hash_index.get(&hash).copied().ok_or_else(|| Error::from_reason(format!("Block not found: {}", hash)))?;
       if index != self.head_index {
@@ -216,17 +216,17 @@ impl NativeBlocksQueue {
       last = entry.block_number;
     }
 
-    Ok(last)
+    Ok(last as f64)
   }
 
   #[napi(js_name = "fetchBlockFromInStack")]
-  pub fn fetch_block_from_in_stack(&self, height: u32) -> Option<Value> {
-    let index = self.block_number_index.get(&height).copied()?;
+  pub fn fetch_block_from_in_stack(&self, height: f64) -> Option<Value> {
+    let index = self.block_number_index.get(&(height as i64)).copied()?;
     self.blocks.get(index).and_then(|b| b.as_ref().map(|entry| entry.value.clone()))
   }
 
   #[napi(js_name = "fetchBlockFromOutStack")]
-  pub fn fetch_block_from_out_stack(&self, height: u32) -> Option<Value> {
+  pub fn fetch_block_from_out_stack(&self, height: f64) -> Option<Value> {
     self.fetch_block_from_in_stack(height)
   }
 
@@ -244,7 +244,7 @@ impl NativeBlocksQueue {
   }
 
   #[napi(js_name = "getBatchUpToSize")]
-  pub fn get_batch_up_to_size(&self, max_size: u32) -> Vec<Value> {
+  pub fn get_batch_up_to_size(&self, max_size: f64) -> Vec<Value> {
     if self.current_block_count == 0 {
       return Vec::new();
     }
@@ -256,7 +256,7 @@ impl NativeBlocksQueue {
 
     while processed < self.current_block_count {
       if let Some(Some(entry)) = self.blocks.get(index) {
-        if accumulated + entry.size > max_size as u64 {
+        if accumulated + entry.size > max_size.max(0.0) as u64 {
           if out.is_empty() {
             out.push(entry.value.clone());
           }
@@ -286,9 +286,9 @@ impl NativeBlocksQueue {
   }
 
   #[napi]
-  pub fn reorganize(&mut self, height: u32) {
+  pub fn reorganize(&mut self, height: f64) {
     self.clear();
-    self.last_height = height;
+    self.last_height = height as i64;
   }
 
   #[napi(js_name = "getMemoryStats")]

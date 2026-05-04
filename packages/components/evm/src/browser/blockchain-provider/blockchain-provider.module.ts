@@ -8,7 +8,7 @@ import {
 import { createProvider } from '../../core/blockchain-provider/providers';
 import type { RateLimits, NetworkConfig } from '../../core/blockchain-provider/providers';
 
-export interface BrowserBlockchainProviderModuleOptions {
+export interface BlockchainProviderModuleOptions {
   isGlobal?: boolean;
   network: NetworkConfig;
   rateLimits: RateLimits;
@@ -19,8 +19,8 @@ export interface BrowserBlockchainProviderModuleOptions {
 }
 
 @Module({})
-export class BrowserBlockchainProviderModule {
-  static async forRootAsync(options: BrowserBlockchainProviderModuleOptions): Promise<DynamicModule> {
+export class BlockchainProviderModule {
+  static async forRootAsync(options: BlockchainProviderModuleOptions): Promise<DynamicModule> {
     const { providers, isGlobal, rateLimits, network } = options;
     const instances = providers.connections.map((conn, i) =>
       createProvider({
@@ -33,7 +33,7 @@ export class BrowserBlockchainProviderModule {
     );
 
     return {
-      module: BrowserBlockchainProviderModule,
+      module: BlockchainProviderModule,
       global: isGlobal || false,
       providers: [
         {

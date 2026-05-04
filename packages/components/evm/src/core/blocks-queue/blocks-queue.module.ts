@@ -20,6 +20,7 @@ export interface BlocksQueueModuleOptions {
   blockTimeMs: number;
   maxBlockWeight?: number;
   tracesEnabled?: boolean;
+  verifyTrie?: boolean;
 }
 
 @Module({})
@@ -30,6 +31,7 @@ export class BlocksQueueModule {
       mempoolCommandExecutor,
       mempoolLoaderStrategyName = 'subscribe-ws',
       tracesEnabled = false,
+      verifyTrie = false,
       ...restConfig
     } = config;
 
@@ -58,9 +60,9 @@ export class BlocksQueueModule {
         },
         {
           provide: BlocksQueueLoaderService,
-          useFactory: (provider: BlockchainProviderService) =>
-            new BlocksQueueLoaderService(provider, { ...restConfig, tracesEnabled }),
-          inject: [BlockchainProviderService],
+          useFactory: (provider: BlockchainProviderService, mempoolService: MempoolLoaderService) =>
+            new BlocksQueueLoaderService(provider, mempoolService, { ...restConfig, tracesEnabled, verifyTrie }),
+          inject: [BlockchainProviderService, MempoolLoaderService],
         },
         {
           provide: BlocksQueueService,
@@ -68,7 +70,7 @@ export class BlocksQueueModule {
             iterator: BlocksQueueIteratorService,
             loader: BlocksQueueLoaderService,
             mempoolService: MempoolLoaderService
-          ) => new BlocksQueueService(iterator, loader, mempoolService, { ...restConfig, tracesEnabled }),
+          ) => new BlocksQueueService(iterator, loader, mempoolService, { ...restConfig, tracesEnabled, verifyTrie }),
           inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService],
         },
       ],

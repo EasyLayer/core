@@ -17,14 +17,4 @@ export interface MempoolCommandExecutor {
     perProvider: MempoolSnapshot;
     mode: 'snapshot' | 'additive';
   }): Promise<void>;
-
-  removeConfirmedTxs({
-    requestId,
-    hashes,
-    height,
-  }: {
-    requestId: string;
-    hashes: string[];
-    height: number;
-  }): Promise<void>;
 }
