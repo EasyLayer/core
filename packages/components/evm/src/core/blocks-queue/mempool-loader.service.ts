@@ -68,7 +68,6 @@ export class MempoolLoaderService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    await this.provider.assertRuntimeCompatibility({ mempoolStrategy: this.strategyName });
     this.enabled = true;
 
     if (this.strategyName === 'subscribe-ws') {

@@ -22,7 +22,8 @@
   "scripts": {
     "clear": "yarn run clear:dist && yarn run clear:node_modules",
     "clear:node_modules": "rimraf node_modules",
-    "clear:dist": "rimraf dist",
+    "clear:dist": "yarn run clear:native:target && rimraf dist",
+    "clear:native:target": "rimraf native/bitcoin-native/target",
     "test:unit": "jest --maxWorkers=1 -c ./jest.config.unit.mjs",
     "test": "yarn run test:unit",
     "lint": "eslint -c eslint.config.mjs \"src/**/*.ts\"",
