@@ -1,4 +1,9 @@
 #!/bin/sh
 . "$(dirname "$0")/_/husky.sh"
 
+# Context submodule check
+if [ -f .context/scripts/submodule-hooks/pre-commit-yarn.sh ]; then
+    bash .context/scripts/submodule-hooks/pre-commit-yarn.sh
+fi
+
 yarn pre-commit
