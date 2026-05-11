@@ -63,6 +63,10 @@ export class OutboxBatchSender {
     };
 
     await this.transport.send(message);
+
+    // No deadline passed here — the transport is responsible for its own ACK timeout.
+    // See TransportPort.waitForAck() contract: every implementation must reject within
+    // a bounded time. If this call hangs, the bug is in the transport's waitForAck() implementation.
     return await this.transport.waitForAck();
   }
 }

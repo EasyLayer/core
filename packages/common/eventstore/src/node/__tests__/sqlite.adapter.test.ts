@@ -38,14 +38,14 @@ class TestAgg {
 
 function mkDS() {
   const qr = {
-    connect: jest.fn(),
-    query: jest.fn(),
-    manager: { query: jest.fn() },
-    release: jest.fn(),
+    connect: jest.fn().mockResolvedValue(undefined),
+    query: jest.fn().mockResolvedValue(undefined),   // ← было jest.fn()
+    manager: { query: jest.fn().mockResolvedValue(undefined) },
+    release: jest.fn().mockResolvedValue(undefined),
   };
   const ds = {
     createQueryRunner: jest.fn(() => qr),
-    query: jest.fn(),
+    query: jest.fn().mockResolvedValue([]),
   };
   return { ds, qr };
 }
@@ -76,6 +76,31 @@ describe('SqliteAdapter', () => {
     expect(res.rawEvents.length).toBe(2);
     expect(qr.query).toHaveBeenCalledWith('BEGIN IMMEDIATE');
     expect(qr.query).toHaveBeenCalledWith('COMMIT');
+  });
+
+  // B2: aggregateId validation tests
+  it('persistAggregatesAndOutbox throws on aggregateId with double-quote', async () => {
+    const { ds } = mkDS();
+    const adapter = new SqliteAdapter(ds as any);
+    const a = new TestAgg('table"injection', 1, 0);
+    a.addUnsaved(mkEvent('table"injection', 'r1', 1, {}, 1000, 1));
+    await expect(adapter.persistAggregatesAndOutbox([a as any])).rejects.toThrow(/invalid characters/);
+  });
+
+  it('persistAggregatesAndOutbox throws on aggregateId starting with digit', async () => {
+    const { ds } = mkDS();
+    const adapter = new SqliteAdapter(ds as any);
+    const a = new TestAgg('123model', 1, 0);
+    a.addUnsaved(mkEvent('123model', 'r1', 1, {}, 1000, 1));
+    await expect(adapter.persistAggregatesAndOutbox([a as any])).rejects.toThrow(/invalid characters/);
+  });
+
+  it('persistAggregatesAndOutbox throws on empty aggregateId', async () => {
+    const { ds } = mkDS();
+    const adapter = new SqliteAdapter(ds as any);
+    const a = new TestAgg('', 1, 0);
+    a.addUnsaved(mkEvent('', 'r1', 1, {}, 1000, 1));
+    await expect(adapter.persistAggregatesAndOutbox([a as any])).rejects.toThrow();
   });
 
   it('deleteOutboxByIds chunks via IN lists inside tx', async () => {
@@ -122,6 +147,41 @@ describe('SqliteAdapter', () => {
     expect(deliver).toHaveBeenCalledTimes(1);
     const mCalls = callsOf(qr.manager.query as any);
     expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "outbox" WHERE id IN (`))).toBe(true);
+  });
+
+  // B1: lastSeenId is updated atomically inside writeLock after successful COMMIT
+  it('fetchDeliverAckChunk advances lastSeenId only after successful COMMIT', async () => {
+    const { ds, qr } = mkDS();
+    const adapter = new SqliteAdapter(ds as any);
+
+    (ds.query as jest.Mock).mockResolvedValueOnce([
+      { id: '42', aggregateId: 'A', eventType: 'Ev', eventVersion: 1, requestId: 'r1', blockHeight: 1, payload: Buffer.from('{"a":1}'), isCompressed: 0, timestamp: 11, ulen: 12 },
+    ]);
+    // Make DELETE succeed but verify lastSeenId state
+    (qr.manager.query as jest.Mock).mockResolvedValue(undefined);
+
+    const deliver = jest.fn().mockResolvedValue(undefined);
+    await adapter.fetchDeliverAckChunk(1024 * 1024, deliver);
+
+    // lastSeenId should be updated to 42n after successful delivery+delete
+    expect((adapter as any).lastSeenId).toBe(42n);
+  });
+
+  // B1: rollbackAggregates resets lastSeenId to 0n atomically within writeLock
+  it('rollbackAggregates resets lastSeenId to 0n after clearing outbox', async () => {
+    const { ds, qr } = mkDS();
+    const adapter = new SqliteAdapter(ds as any);
+
+    // Set lastSeenId to simulate previously delivered events
+    (adapter as any).lastSeenId = 999n;
+
+    await adapter.rollbackAggregates(['valid-agg'], 5);
+
+    expect((adapter as any).lastSeenId).toBe(0n);
+
+    // Verify outbox was cleared
+    const mCalls = callsOf(qr.manager.query as any);
+    expect(mCalls.some(([sql]) => String(sql).includes(`DELETE FROM "outbox"`))).toBe(true);
   });
 
   it('fetchEventsForOneAggregateRead applies filters and pagination', async () => {

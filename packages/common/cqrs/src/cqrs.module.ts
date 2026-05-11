@@ -20,7 +20,11 @@ export interface CQRSModuleParameters {
   events?: Type<IEventHandler>[];
   commands?: Type<ICommandHandler>[];
   queries?: Type<IQueryHandler>[];
-  // sagas?: Array<Type | ((events$: any) => any)>;
+  // Maximum time in milliseconds a single event handler is allowed to run.
+  // If a handler exceeds this deadline, an error is logged, routed to
+  // UnhandledExceptionBus, and the event stream continues with the next event.
+  // Defaults to 30 000 ms (30 seconds). Set to 0 to disable.
+  handlerTimeoutMs?: number;
 }
 
 @Module({})
@@ -88,6 +92,11 @@ export class CqrsModule {
       ) => {
         eb.bindCommandBus(cb);
         eb.bindUnhandledBus(unhandled);
+        // Configure handler timeout before registering instances.
+        // If not provided, EventBus uses its built-in default (30 000 ms).
+        if (params.handlerTimeoutMs !== undefined) {
+          eb.setHandlerTimeout(params.handlerTimeoutMs);
+        }
         eb.registerInstances(eventHandlers);
         // eb.registerSagaFunctions(sagaFns);
         cb.registerInstances(commandHandlers);

@@ -14,6 +14,7 @@ import { BaseAdapter } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
+import { validateAggregateId } from './entities';
 
 /**
  * SQLite adapter (Node sqlite).
@@ -115,6 +116,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         for (const agg of aggregates) {
           const table = agg.aggregateId;
           if (!table) throw new Error('Aggregate has no aggregateId');
+          validateAggregateId(table); // Validate before using as SQL table name
 
           const unsaved: DomainEvent[] = agg.getUnsavedEvents();
           if (unsaved.length === 0) continue;
@@ -259,6 +261,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       try {
         // 1) Per-aggregate event tables: delete above the rollback height
         for (const id of aggregateIds) {
+          validateAggregateId(id); // Validate before using as SQL table name
           await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > ?`, [blockHeight]);
         }
 
@@ -273,6 +276,10 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         await qr.manager.query(`DELETE FROM "outbox"`);
 
         await qr.query('COMMIT');
+
+        // Reset watermark inside the lock that owns outbox state.
+        // Must happen after COMMIT so it only takes effect on success.
+        this.lastSeenId = 0n;
       } catch (e) {
         await qr.query('ROLLBACK').catch(() => undefined);
         throw e;
@@ -280,9 +287,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         await qr.release();
       }
     });
-
-    // Reset streaming watermark (monotonic id)
-    this.lastSeenId = 0n;
   }
 
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
@@ -401,6 +405,9 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
             await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
           }
           await qr.query('COMMIT');
+          // Advance watermark inside the lock that owns outbox state.
+          // Only reached on successful COMMIT — ensures lastSeenId never advances past a failed delete.
+          this.lastSeenId = nextId;
         } catch (e) {
           await qr.query('ROLLBACK').catch(() => undefined);
           throw e;
@@ -408,8 +415,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
           await qr.release();
         }
       });
-
-      this.lastSeenId = nextId;
 
       return events.length;
     });

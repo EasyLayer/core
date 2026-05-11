@@ -14,6 +14,7 @@ import { BaseAdapter } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
+import { validateAggregateId } from './entities';
 
 /**
  * Postgres adapter.
@@ -79,6 +80,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         if (!table) {
           throw new Error('Aggregate has no aggregateId');
         }
+        validateAggregateId(table); // Validate before using as SQL table name
 
         const unsaved: DomainEvent[] = agg.getUnsavedEvents();
         if (unsaved.length === 0) {
@@ -222,6 +224,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     try {
       // 1) Per-aggregate event tables: drop everything above the given block height
       for (const id of aggregateIds) {
+        validateAggregateId(id); // Validate before using as SQL table name
         await qr.manager.query(`DELETE FROM "${id}" WHERE "blockHeight" > $1`, [blockHeight]);
       }
 
@@ -236,15 +239,16 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       await qr.manager.query(`TRUNCATE TABLE "outbox"`);
 
       await qr.query('COMMIT');
+
+      // Reset watermark inside the transaction scope that owns outbox state.
+      // Must happen after COMMIT so it only takes effect on success.
+      this.lastSeenId = 0n;
     } catch (e) {
       await qr.query('ROLLBACK').catch(() => undefined);
       throw e;
     } finally {
       await qr.release();
     }
-
-    // Reset streaming watermark so the next drain starts fresh
-    this.lastSeenId = 0n;
   }
 
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
@@ -365,14 +369,15 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           await qr.manager.query(`DELETE FROM "outbox" WHERE id IN (${placeholders})`, chunk);
         }
         await qr.query('COMMIT');
+        // Advance watermark inside the transaction scope that owns outbox state.
+        // Only reached on successful COMMIT — ensures lastSeenId never advances past a failed delete.
+        this.lastSeenId = nextId;
       } catch (e) {
         await qr.query('ROLLBACK').catch(() => undefined);
         throw e;
       } finally {
         await qr.release().catch(() => undefined);
       }
-
-      this.lastSeenId = nextId;
 
       return events.length;
     });

@@ -26,6 +26,11 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   private draining: Promise<void> | null = null;
 
+  // True while the drain is in exponential retry after a transport failure.
+  // When set, publishWithCorrectFlow skips the fast-path and delegates to
+  // runDrainOnce() instead of attempting a direct publish that is likely to fail.
+  private drainFailing = false;
+
   constructor(
     private readonly adapter: BaseAdapter<T>,
     private readonly publisherProvider: PublisherProvider,
@@ -107,6 +112,17 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
       this.logger.verbose('Outbox backlog detected, falling back to strict drain', {
         module: 'eventstore',
         args: { firstId: persisted.firstId },
+      });
+      await this.runDrainOnce();
+      return;
+    }
+
+    // If the drain is currently in retry (transport was recently unavailable),
+    // skip the fast-path to avoid repeated failing publish attempts on every save().
+    // The retry timer will clear drainFailing once a drain succeeds.
+    if (this.drainFailing) {
+      this.logger.verbose('Drain is in retry state, skipping fast-path publish', {
+        module: 'eventstore',
       });
       await this.runDrainOnce();
       return;
@@ -206,6 +222,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   private startRetryTimerIfNeeded(): void {
     if (this.retryTimer) return;
+    this.drainFailing = true; // Mark drain as failing so fast-path is bypassed
     this.logger.verbose('Outbox retry timer started', {
       module: 'eventstore',
       args: { action: 'startRetryTimerIfNeeded' },
@@ -215,6 +232,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         try {
           await this.runDrainOnce();
           reset();
+          this.drainFailing = false; // Clear flag once drain succeeds
           this.retryTimer?.destroy();
           this.retryTimer = null;
           this.logger.verbose('Outbox retry timer cleared, drain succeeded', {

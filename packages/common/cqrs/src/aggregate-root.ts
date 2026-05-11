@@ -167,6 +167,15 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
 
   constructor(aggregateId: string, lastBlockHeight: number, options?: AggregateOptions) {
     if (!aggregateId) throw new Error('aggregateId is required');
+    // Early validation: aggregateId is used directly as a SQL table name in all storage adapters.
+    // Rejecting invalid values here surfaces the error at model creation time,
+    // not at the first DB write which is harder to trace.
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(aggregateId) || aggregateId.length > 60) {
+      throw new Error(
+        `aggregateId "${aggregateId}" contains invalid characters or exceeds 60 chars. ` +
+          `Only [a-zA-Z][a-zA-Z0-9_-]* is allowed (must start with a letter).`
+      );
+    }
     this._aggregateId = aggregateId;
     this._lastBlockHeight = lastBlockHeight;
     this._version = 0;
@@ -337,6 +346,18 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
         this._version++;
         this._versionsFromSnapshot++;
         this._lastBlockHeight = event.blockHeight ?? this._lastBlockHeight;
+      } else {
+        // Programming error: every event applied to an aggregate must have a matching
+        // `on<EventName>` method. Without it the aggregate version does not advance
+        // and state reconstruction from history will produce an inconsistent aggregate.
+        // If you intentionally want to queue an event without applying state, use
+        // apply(event, { skipHandler: true }) — this bypasses handler lookup entirely.
+        const eventName = this.getEventName(event);
+        throw new Error(
+          `AggregateRoot "${this._aggregateId}" has no handler for event "${eventName}". ` +
+            `Add an "on${eventName}(event: ${eventName}): void" method to the aggregate class, ` +
+            `or pass { skipHandler: true } if applying without state update is intentional.`
+        );
       }
     }
   }

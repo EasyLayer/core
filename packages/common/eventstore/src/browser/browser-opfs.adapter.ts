@@ -15,6 +15,7 @@ import { BaseAdapter } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
+import { validateAggregateId } from '../node/entities';
 
 function toBuffer(x: any): Buffer {
   if (Buffer.isBuffer(x)) return x;
@@ -151,6 +152,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
         for (const agg of aggregates) {
           const table = agg.aggregateId;
           if (!table) throw new Error('Aggregate has no aggregateId');
+          validateAggregateId(table); // Validate before using as SQL table name
           const unsaved = agg.getUnsavedEvents();
           if (unsaved.length === 0) continue;
 
@@ -262,6 +264,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
       this.run('BEGIN');
       try {
         for (const id of aggregateIds) {
+          validateAggregateId(id); // Validate before using as SQL table name
           this.run(`DELETE FROM "${id}" WHERE blockHeight > ?`, [blockHeight]);
         }
         const ph = aggregateIds.map(() => '?').join(',');
@@ -271,11 +274,13 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
         ]);
         this.run(`DELETE FROM "outbox"`);
         this.run('COMMIT');
+        // Reset watermark inside the lock that owns outbox state.
+        // Must happen after COMMIT so it only takes effect on success.
+        this.lastSeenId = 0n;
       } catch (e) {
         this.run('ROLLBACK');
         throw e;
       }
-      this.lastSeenId = 0n;
     });
   }
 
@@ -379,13 +384,15 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
             this.run(`DELETE FROM "outbox" WHERE id IN (${ph})`, chunk);
           }
           this.run('COMMIT');
+          // Advance watermark inside the lock that owns outbox state.
+          // Only reached on successful COMMIT — ensures lastSeenId never advances past a failed delete.
+          this.lastSeenId = nextId;
         } catch (e) {
           this.run('ROLLBACK');
           throw e;
         }
       });
 
-      this.lastSeenId = nextId;
       return events.length;
     });
   }
