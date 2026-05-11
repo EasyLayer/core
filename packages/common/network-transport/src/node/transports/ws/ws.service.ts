@@ -347,11 +347,12 @@ function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 function parseAuth(req: any, expectedToken?: string): { token?: string; clientId?: string } {
-  // Prefer Sec-WebSocket-Protocol: "token,clientId". Accept query fallback.
+  // Auth only via Sec-WebSocket-Protocol header: "token,clientId"
+  // URL query param fallback has been removed: tokens in URLs are logged by
+  // proxies and nginx access logs, which is a security leak.
   const proto = (req.headers?.['sec-websocket-protocol'] as string | undefined)?.trim();
-  const qp = new URL(req.url, `http://${req.headers.host}`).searchParams;
-  const token = proto?.split(',')[0]?.trim() || qp.get('token') || undefined;
-  const clientId = proto?.split(',')[1]?.trim() || qp.get('clientId') || undefined;
+  const token = proto?.split(',')[0]?.trim() || undefined;
+  const clientId = proto?.split(',')[1]?.trim() || undefined;
   if (expectedToken && token !== expectedToken) throw new Error('unauthorized');
   return { token, clientId: clientId || undefined };
 }

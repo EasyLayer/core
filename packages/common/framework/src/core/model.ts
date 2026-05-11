@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { AggregateRoot } from '@easylayer/common/cqrs';
-import type { ExecutionContext } from '../core/types';
+import type { ExecutionContext } from './types';
 import { makeNamedEventCtor } from './event';
 
 export type AnyModelCtor<T extends Model = Model> = new (...args: any[]) => T;
@@ -10,6 +10,7 @@ export abstract class Model extends AggregateRoot {
   // Internal flag: true only while rehydrating from event history.
   // Used to allow AggregateRoot.loadFromHistory() to call `apply()`
   // without hitting our runtime guard.
+  // See ADR: adr-rehydrating-guard-instead-of-subclass-override
   private _rehydrating = false;
 
   /**
@@ -52,19 +53,23 @@ export abstract class Model extends AggregateRoot {
   /**
    * The *only* intended entry point for emitting new domain events.
    *
-   * Users call `applyEvent(eventName, payload)`:
-   * - A proper Event constructor is resolved by name.
-   * - Metadata (aggregateId, requestId, blockHeight) is automatically added.
-   * - The constructed event is sent directly to the AggregateRoot via `super.apply`.
+   * @param eventName  - Event constructor name (must match a registered handler).
+   * @param blockHeight - Blockchain height at which the event occurred.
+   * @param payload    - Optional domain-specific event payload.
+   * @param requestId  - Optional correlation ID for distributed tracing.
+   *                     If not provided, a new UUID is generated automatically.
+   *                     Pass explicitly when you want to correlate the event with
+   *                     a specific command or request (e.g., from a command handler).
    *
-   * This enforces a consistent way of creating events and hides low-level details.
+   * Backward compatible: existing calls `applyEvent(name, height, payload)` continue
+   * to work — `requestId` will be auto-generated.
    */
-  protected applyEvent(eventName: string, blockHeight: number, payload?: any): void {
+  protected applyEvent(eventName: string, blockHeight: number, payload?: any, requestId?: string): void {
     const EventCtor = makeNamedEventCtor(eventName);
     const ev = new EventCtor(
       {
         aggregateId: this.aggregateId,
-        requestId: uuidv4(),
+        requestId: requestId ?? uuidv4(),
         blockHeight,
       },
       payload
@@ -77,6 +82,10 @@ export abstract class Model extends AggregateRoot {
   /**
    * Each derived model must implement this method to process a blockchain block.
    * This is where business logic for parsing, normalizing and emitting events lives.
+   *
+   * @param ctx - Execution context provided by the crawler runtime. The exact shape
+   *              depends on the chain (Bitcoin, EVM, etc.) and is defined downstream.
+   *              See the `ExecutionContext` type documentation for details.
    */
   public abstract processBlock(ctx: ExecutionContext): Promise<void>;
 }

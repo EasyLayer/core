@@ -5,6 +5,8 @@ export { BasicEvent };
 
 export type EventCtor<P = any> = new (system: SystemFields, payload: P) => BasicEvent<P>;
 
+// Module-level cache: one constructor object per event name, shared across all Model instances.
+// See ADR: adr-ctorcache-as-module-level-map-not-instance-level
 const ctorCache = new Map<string, EventCtor>();
 
 /**
@@ -38,7 +40,16 @@ export function makeNamedEvent<P = any>(eventName: string, system: SystemFields,
 }
 
 /**
- * Clears the internal constructor cache (useful for tests or hot-reload).
+ * Clears the internal constructor cache.
+ *
+ * @internal — FOR TEST USE ONLY. Do not call in production code.
+ * Importing this function from the public package entrypoint is intentionally
+ * not supported. Use a relative internal import in tests:
+ *   import { clearEventFactoryCache } from '../core/event';
+ *
+ * Warning: calling this at runtime invalidates all previously cached constructors.
+ * Any existing instances remain valid, but new instances created after the clear
+ * will have different constructor objects (breaking instanceof checks across the boundary).
  */
 export function clearEventFactoryCache(): void {
   ctorCache.clear();

@@ -103,7 +103,11 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
     const start = Date.now();
     while (Date.now() - start < deadlineMs) {
       if (this.isOnline()) return;
-      // Nudge heartbeat to emit next Ping earlier
+      // Nudge heartbeat: reset() resets the internal currentInterval counter,
+      // but does NOT cancel the currently-pending setTimeout. The next ping will
+      // still fire at its originally scheduled time. This call is kept for
+      // semantic intent (signal that we want faster pings) but provides no
+      // actual timing speedup for the current pending timeout.
       this.heartbeatReset?.();
       await delay(1000);
     }

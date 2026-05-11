@@ -35,6 +35,11 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
   // Set to true on onModuleDestroy to prevent reconnect after intentional close
   private destroyed = false;
 
+  // Guards against concurrent connect() calls from both the close-event handler
+  // and the heartbeat — both check !this.socket and can race if the socket is null
+  // but a connection attempt is already in progress.
+  private connecting = false;
+
   private lastAckBuffer: OutboxStreamAckPayload | null = null;
   private pendingAck: { resolve: (v: OutboxStreamAckPayload) => void; reject: (e: any) => void; timer: any } | null =
     null;
@@ -117,13 +122,19 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
 
   private connect() {
     if (this.destroyed) return;
+    // Prevent double-connect: close-event setTimeout and heartbeat can both see
+    // !this.socket and race to call connect(). The connecting flag ensures only
+    // one WebSocket is created at a time.
+    if (this.connecting) return;
 
+    this.connecting = true;
     this.clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const ws = new WebSocket(this.opts.url, this.opts.protocols);
 
     ws.addEventListener('message', (ev) => this.onRaw(ev.data));
 
     ws.addEventListener('close', () => {
+      this.connecting = false;
       if (this.socket === ws) {
         this.socket = null;
         this.online = false;
@@ -144,16 +155,17 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
     });
 
     ws.addEventListener('open', () => {
+      this.connecting = false;
       this.log.verbose('WS browser socket opened', { module: 'network-transport' });
       /* connection established; wait for pong to mark online */
     });
 
-    ws.addEventListener('error', (ev) => {
+    ws.addEventListener('error', () => {
+      // close event will fire after error — connecting flag reset there
       this.log.verbose('WS browser socket error', {
         module: 'network-transport',
         args: { url: this.opts.url },
       });
-      // close event will fire after error — reconnect is handled there
     });
 
     this.socket = ws;

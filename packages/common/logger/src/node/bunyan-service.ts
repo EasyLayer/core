@@ -101,9 +101,19 @@ class BunyanStream {
         replacer
       ) + '\n';
 
-    const file = process?.env?.LOGS_FILE;
-    if (file) fs.promises.appendFile(file, line);
-    else process.stdout.write(line);
+    // Prefer filePath set via configureRootBunyan (stored in state).
+    // Fall back to LOGS_FILE env var for Docker/production config without code changes.
+    // Never mutate process.env — state.filePath is the authoritative in-code setting.
+    const file = state.filePath ?? process?.env?.LOGS_FILE;
+    if (file) {
+      fs.promises.appendFile(file, line).catch(() => {
+        // Silent catch: if the file is not writable, logs go to stdout only.
+        // Recursive logging is not possible here — logger cannot log its own errors.
+        process.stdout.write(line);
+      });
+    } else {
+      process.stdout.write(line);
+    }
   }
 }
 
@@ -116,7 +126,8 @@ const lvlMap: Record<LogLevel, bunyan.LogLevel> = {
   fatal: bunyan.FATAL,
 };
 
-type State = { root?: bunyan; enabled: boolean };
+// filePath is stored in state, not in process.env, to avoid global side effects.
+type State = { root?: bunyan; enabled: boolean; filePath?: string };
 const state: State = { root: undefined, enabled: true };
 
 export function configureRootBunyan(opts: RootLoggerOptions) {
@@ -125,7 +136,10 @@ export function configureRootBunyan(opts: RootLoggerOptions) {
     state.root = bunyan.createLogger({ name: opts.name || 'app', level: bunyan.FATAL + 1 });
     return state.root!;
   }
-  if (opts.filePath) process.env.LOGS_FILE = opts.filePath;
+
+  // Store filePath in state instead of mutating process.env.
+  // process.env.LOGS_FILE is still supported as an env-var fallback (read in BunyanStream.write).
+  if (opts.filePath) state.filePath = opts.filePath;
 
   const options: LoggerOptions = {
     name: opts.name || 'app',

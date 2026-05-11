@@ -54,7 +54,9 @@ export class OutboxBatchSender {
       return { ok: true, okIndices: [] };
     }
 
-    await this.transport.waitForOnline(5000);
+    // Each transport implements its own waitForOnline timeout via TransportPort contract.
+    // No override here — let the transport use its configured default deadline.
+    await this.transport.waitForOnline();
 
     const message: Message<{ events: WireEventRecord[] }> = {
       action: Actions.OutboxStreamBatch,
