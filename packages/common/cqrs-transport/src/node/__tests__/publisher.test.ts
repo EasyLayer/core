@@ -9,20 +9,30 @@ jest.mock("@easylayer/common/cqrs", () => ({
 jest.mock("@easylayer/common/network-transport", () => ({
   OutboxBatchSender: class {
     calls: any[] = [];
+    hasTransport() { return true; }
     async streamWireWithAck(events: any[]) {
       this.calls.push(events);
+      return { ok: true, okIndices: events.map((_, index) => index) };
     }
   },
 }));
 
 describe("Publisher", () => {
-  it("streams to transport then emits only system events locally with correct constructor name", async () => {
+  it('hasRemoteTransport reflects OutboxBatchSender configuration', () => {
+    const { OutboxBatchSender } = require('@easylayer/common/network-transport');
+    const pm = new OutboxBatchSender();
+    const logger = new Logger();
+    const pub = new Publisher(pm as any, logger as any, []);
+
+    expect(pub.hasRemoteTransport()).toBe(true);
+  });
+
+  it("streams to external transport without local system event emission", async () => {
     const { OutboxBatchSender } = require("@easylayer/common/network-transport");
 
     const pm = new OutboxBatchSender();
     const logger = new Logger();
-    const system = ["sys-model"];
-    const pub = new Publisher(pm as any, logger as any, system);
+    const pub = new Publisher(pm as any, logger as any, ["sys-model"]);
 
     const got: any[] = [];
     const sub = pub.events$.subscribe((e) => got.push(e));
@@ -38,23 +48,21 @@ describe("Publisher", () => {
     };
     const nonSysWire = { ...sysWire, modelName: "external" };
 
-    await pub.publishWireStreamBatchWithAck([sysWire, nonSysWire]);
+    const ack = await pub.publishWireStreamBatchWithAck([sysWire, nonSysWire]);
+
+    expect(ack).toEqual({ ok: true, okIndices: [0, 1] });
 
     await Promise.resolve();
     await Promise.resolve();
 
     expect(pm.calls.length).toBe(1);
     expect(pm.calls[0][0]).toMatchObject(sysWire);
-
-    expect(got.length).toBe(1);
-    expect(got[0].aggregateId).toBe("sys-model");
-    expect(got[0].constructor?.name).toBe("UserCreated");
-    expect(got[0].payload).toEqual({ a: 1 });
+    expect(got.length).toBe(0);
 
     sub.unsubscribe();
   });
 
-  it('publishWireStreamBatchWithAck: schedules local emit before calling remote stream', async () => {
+  it('publishSystemEventsLocally: schedules local emit for system events only', async () => {
     const { OutboxBatchSender } = require('@easylayer/common/network-transport');
 
     const order: string[] = [];
@@ -72,11 +80,8 @@ describe("Publisher", () => {
     const logger = new (require('@nestjs/common').Logger)();
     const pub = new (require('../publisher').Publisher)(pm as any, logger as any, ['sys-model']);
 
-    const origStream = pm.streamWireWithAck.bind(pm);
-    pm.streamWireWithAck = jest.fn(async (events: any[]) => {
-      order.push('called-remote');
-      return origStream(events);
-    });
+    const got: any[] = [];
+    const sub = pub.events$.subscribe((e: any) => got.push(e));
 
     const sysWire = {
       modelName: 'sys-model',
@@ -87,16 +92,21 @@ describe("Publisher", () => {
       payload: JSON.stringify({ a: 1 }),
       timestamp: Date.now(),
     };
+    const nonSysWire = { ...sysWire, modelName: 'external' };
 
-    await pub.publishWireStreamBatchWithAck([sysWire]);
+    pub.publishSystemEventsLocally([sysWire, nonSysWire]);
 
     expect(order[0]).toBe('scheduled-local');
-    expect(order[1]).toBe('called-remote');
+    expect(pm.calls.length).toBe(0);
 
     await Promise.resolve();
     expect(order).toContain('executed-local');
+    expect(got.length).toBe(1);
+    expect(got[0].aggregateId).toBe('sys-model');
+    expect(got[0].constructor?.name).toBe('UserCreated');
+    expect(got[0].payload).toEqual({ a: 1 });
 
-    // возвращаем queueMicrotask
+    sub.unsubscribe();
     global.queueMicrotask = origQM;
   });
 });

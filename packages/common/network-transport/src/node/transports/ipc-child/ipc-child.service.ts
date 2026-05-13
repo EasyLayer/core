@@ -7,9 +7,6 @@ import { Actions } from '../../../core';
 import { buildQuery } from '../../build-query';
 
 // -- helpers ------------------------------------------------------------------
-function delay(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 function normalize(raw: unknown): Message | null {
   if (!raw) return null;
   if (typeof raw === 'string') {
@@ -22,11 +19,18 @@ function normalize(raw: unknown): Message | null {
   if (typeof raw === 'object') return raw as Message;
   return null;
 }
+
 function assertIpcChildRuntime() {
   const p: any = process;
   if (!p || !p.channel || typeof p.send !== 'function' || p.connected !== true) {
     throw new Error('IPC child: no IPC channel. Fork the process with stdio including "ipc".');
   }
+}
+
+interface OnlineWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 export interface IpcChildOptions {
@@ -68,6 +72,8 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
   private ackBuffer: { id: string; payload: OutboxStreamAckPayload } | null = null;
   private currentBatchCorrelationId: string | null = null;
 
+  private readonly onlineWaiters = new Set<OnlineWaiter>();
+
   // Heartbeat
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
@@ -84,6 +90,9 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
   async onModuleDestroy(): Promise<void> {
     (process as any).off?.('message', this.onMessageBound);
     this.stopHeartbeat();
+
+    this.rejectOnlineWaiters(new Error('IPC child: transport destroyed'));
+
     if (this.pendingAck) {
       clearTimeout(this.pendingAck.timer);
       this.pendingAck.reject(new Error('IPC child: transport destroyed'));
@@ -100,18 +109,38 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
   }
 
   async waitForOnline(deadlineMs = this.opts.timeouts?.onlineMs ?? 2_000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < deadlineMs) {
-      if (this.isOnline()) return;
-      // Nudge heartbeat: reset() resets the internal currentInterval counter,
-      // but does NOT cancel the currently-pending setTimeout. The next ping will
-      // still fire at its originally scheduled time. This call is kept for
-      // semantic intent (signal that we want faster pings) but provides no
-      // actual timing speedup for the current pending timeout.
-      this.heartbeatReset?.();
-      await delay(1000);
-    }
-    throw new Error(`${this.kind.toUpperCase()}: peer is offline (no valid Pong)`);
+    if (this.isOnline()) return;
+
+    // Nudge heartbeat: reset() resets the internal interval counter, but may
+    // not cancel an already pending timer in the interval implementation.
+    this.heartbeatReset?.();
+
+    return new Promise<void>((resolve, reject) => {
+      const waiter: OnlineWaiter = {
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          this.onlineWaiters.delete(waiter);
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(waiter.timer);
+          this.onlineWaiters.delete(waiter);
+          reject(error);
+        },
+        timer: setTimeout(
+          () => {
+            waiter.reject(new Error(`${this.kind.toUpperCase()}: peer is offline (no valid Pong)`));
+          },
+          Math.max(1, deadlineMs)
+        ),
+      };
+
+      this.onlineWaiters.add(waiter);
+
+      // Avoid a race where Pong arrives between the first isOnline() check and
+      // registering the waiter.
+      if (this.isOnline()) waiter.resolve();
+    });
   }
 
   async send(msg: Message | string): Promise<void> {
@@ -129,7 +158,6 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
 
     try {
       p.send?.(msg as any);
-      // unified logging for all messages
       if (typeof msg === 'object') {
         this.log.verbose('IPC child message sent', {
           module: 'network-transport',
@@ -149,8 +177,11 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
     }
   }
 
-  async waitForAck(deadlineMs = this.opts.timeouts?.ackMs ?? 2_000): Promise<OutboxStreamAckPayload> {
-    const id = this.currentBatchCorrelationId;
+  async waitForAck(
+    deadlineMs = this.opts.timeouts?.ackMs ?? 2_000,
+    correlationId?: string
+  ): Promise<OutboxStreamAckPayload> {
+    const id = correlationId ?? this.currentBatchCorrelationId;
     if (!id) throw new Error('IPC child: waitForAck called without a preceding batch send');
 
     if (this.ackBuffer && this.ackBuffer.id === id) {
@@ -183,7 +214,7 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
 
     switch (msg.action) {
       case Actions.Ping: {
-        // Echo correlationId + password in Pong
+        // Echo correlationId + password in Pong.
         await this.send({
           action: Actions.Pong,
           correlationId: msg.correlationId || randomUUID(),
@@ -198,6 +229,7 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
+          this.notifyOnlineWaiters();
           this.log.verbose('IPC child pong accepted, peer online', {
             module: 'network-transport',
           });
@@ -218,9 +250,9 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
           const { resolve } = this.pendingAck;
           this.pendingAck = null;
           this.currentBatchCorrelationId = null;
-          resolve(ack);
+          resolve({ ...ack, correlationId: ack.correlationId ?? id });
         } else if (!this.pendingAck && this.currentBatchCorrelationId === id) {
-          this.ackBuffer = { id, payload: ack };
+          this.ackBuffer = { id, payload: { ...ack, correlationId: ack.correlationId ?? id } };
         }
         return;
       }
@@ -251,6 +283,21 @@ export class IpcChildTransportService implements TransportPort, OnModuleDestroy 
     } catch (e: any) {
       const resp: Message = { ...base, payload: { ok: false, err: String(e?.message ?? e) } } as any;
       await this.send(resp);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Online waiters
+  // --------------------------------------------------------------------------
+  private notifyOnlineWaiters(): void {
+    for (const waiter of Array.from(this.onlineWaiters)) {
+      waiter.resolve();
+    }
+  }
+
+  private rejectOnlineWaiters(error: Error): void {
+    for (const waiter of Array.from(this.onlineWaiters)) {
+      waiter.reject(error);
     }
   }
 

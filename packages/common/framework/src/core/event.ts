@@ -5,16 +5,43 @@ export { BasicEvent };
 
 export type EventCtor<P = any> = new (system: SystemFields, payload: P) => BasicEvent<P>;
 
+const EVENT_NAME_PATTERN = /^[A-Z][A-Za-z0-9_]*$/;
+const MAX_EVENT_NAME_LENGTH = 120;
+const MAX_CACHED_EVENT_CONSTRUCTORS = 5_000;
+
 // Module-level cache: one constructor object per event name, shared across all Model instances.
 // See ADR: adr-ctorcache-as-module-level-map-not-instance-level
 const ctorCache = new Map<string, EventCtor>();
 
+export function assertValidEventName(eventName: string): void {
+  if (typeof eventName !== 'string' || eventName.length === 0) {
+    throw new Error('eventName is required');
+  }
+
+  if (eventName.length > MAX_EVENT_NAME_LENGTH || !EVENT_NAME_PATTERN.test(eventName)) {
+    throw new Error(
+      `Invalid eventName "${eventName}". ` +
+        `Use a PascalCase/identifier-like class name matching ${EVENT_NAME_PATTERN} and max ${MAX_EVENT_NAME_LENGTH} chars.`
+    );
+  }
+}
+
+function rememberConstructor(eventName: string, ctor: EventCtor): void {
+  if (ctorCache.size >= MAX_CACHED_EVENT_CONSTRUCTORS) {
+    const oldestKey = ctorCache.keys().next().value as string | undefined;
+    if (oldestKey) ctorCache.delete(oldestKey);
+  }
+  ctorCache.set(eventName, ctor);
+}
+
 /**
  * Creates a class with the exact requested name at runtime.
  * Useful for NestJS CQRS so handlers can resolve by class name.
- * The returned constructor is cached per event name for performance.
+ * The returned constructor is cached per validated event name for performance.
  */
 export function makeNamedEventCtor<P = any>(eventName: string): EventCtor<P> {
+  assertValidEventName(eventName);
+
   const cached = ctorCache.get(eventName);
   if (cached) return cached as EventCtor<P>;
 
@@ -24,10 +51,10 @@ export function makeNamedEventCtor<P = any>(eventName: string): EventCtor<P> {
     }
   }
 
-  // Ensure the constructor has the desired name for handler resolution and debugging
+  // Ensure the constructor has the desired name for handler resolution and debugging.
   Object.defineProperty(NamedEvent, 'name', { value: eventName });
 
-  ctorCache.set(eventName, NamedEvent as EventCtor<P>);
+  rememberConstructor(eventName, NamedEvent as EventCtor<P>);
   return NamedEvent as EventCtor<P>;
 }
 
@@ -53,4 +80,8 @@ export function makeNamedEvent<P = any>(eventName: string, system: SystemFields,
  */
 export function clearEventFactoryCache(): void {
   ctorCache.clear();
+}
+
+export function getEventFactoryCacheSize(): number {
+  return ctorCache.size;
 }

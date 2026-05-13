@@ -9,8 +9,9 @@ import type {
   EventDataModel,
   SnapshotReadRow,
   SnapshotOptions,
+  PersistAggregatesOptions,
 } from '../core';
-import { BaseAdapter } from '../core';
+import { assertFullOutboxAck, BaseAdapter, type OutboxDeliveryAck } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
@@ -89,7 +90,10 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
    * Returns the inserted outbox ids, and a raw (wire) array suitable for fast-path publish.
    * NOTE: firstTs/lastTs are returned for compatibility; adapter uses id-based checks internally.
    */
-  public async persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+  public async persistAggregatesAndOutbox(
+    aggregates: T[],
+    options: PersistAggregatesOptions
+  ): Promise<{
     insertedOutboxIds: string[];
     firstTs: number;
     firstId: string;
@@ -98,6 +102,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     rawEvents: WireEventRecord[];
   }> {
     return this.writeLock.runExclusive(async () => {
+      const writeOutbox = options.writeOutbox;
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
       await qr.query('BEGIN IMMEDIATE'); // short IMMEDIATE tx to avoid writer contention
@@ -118,7 +123,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
           if (!table) throw new Error('Aggregate has no aggregateId');
           validateAggregateId(table); // Validate before using as SQL table name
 
-          const unsaved: DomainEvent[] = agg.getUnsavedEvents();
+          const unsaved: DomainEvent[] = [...agg.getUnsavedEvents()];
           if (unsaved.length === 0) continue;
 
           // First version for these unsaved events = agg.version - unsaved.length + 1
@@ -130,8 +135,9 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
             const row = await toEventDataModel(ev, version, 'sqlite');
 
-            // Generate monotonic outbox id (uses event.timestamp in microseconds).
-            const newId = this.idGen.next(ev.timestamp!);
+            // Generate an outbox id only when remote delivery is configured.
+            // Local-only mode persists aggregate event tables without creating outbox rows.
+            const newId = writeOutbox ? this.idGen.next(ev.timestamp!) : null;
 
             // (1) Insert into per-aggregate table (payload is BLOB).
             await qr.manager.query(
@@ -149,28 +155,31 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
               ]
             );
 
-            // (2) Insert into outbox with our monotonic id.
-            await qr.manager.query(
-              `INSERT OR IGNORE INTO "outbox"
-                ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
-              VALUES (?,?,?,?,?,?,?,?,?,?)`,
-              [
-                newId.toString(), // bind as string; SQLite will store as INTEGER
-                table,
-                row.type,
-                row.version,
-                row.requestId,
-                row.blockHeight,
-                row.payload,
-                row.isCompressed ? 1 : 0,
-                row.timestamp,
-                row.uncompressedBytes,
-              ]
-            );
+            if (writeOutbox && newId !== null) {
+              // (2) Insert into outbox with our monotonic id.
+              await qr.manager.query(
+                `INSERT OR IGNORE INTO "outbox"
+                  ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
+                VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                [
+                  newId.toString(), // bind as string; SQLite will store as INTEGER
+                  table,
+                  row.type,
+                  row.version,
+                  row.requestId,
+                  row.blockHeight,
+                  row.payload,
+                  row.isCompressed ? 1 : 0,
+                  row.timestamp,
+                  row.uncompressedBytes,
+                ]
+              );
 
-            // Track id bounds (for compatibility return & diagnostics).
-            if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
-            if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+              // Track id bounds (for compatibility return & diagnostics).
+              if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+              if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+              outboxIds.push(newId.toString());
+            }
 
             // Track min/max timestamp only for compatibility (service no longer relies on it).
             if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
@@ -189,8 +198,6 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
                 timestamp: ev.timestamp!,
               })
             );
-
-            outboxIds.push(newId.toString());
           }
           // Do NOT call markEventsAsSaved() here — wait for COMMIT first.
         }
@@ -292,15 +299,17 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
 
   public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(id))) throw new Error(`Invalid outbox id "${id}"`);
     const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < CAST(? AS INTEGER) LIMIT 1`, [
       String(id),
     ]);
     return rows.length > 0;
   }
 
-  public async hasAnyPendingAfterWatermark(): Promise<boolean> {
+  public async hasPendingAfterId(lastId: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(lastId))) throw new Error(`Invalid outbox id "${lastId}"`);
     const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > CAST(? AS INTEGER) LIMIT 1`, [
-      String(this.lastSeenId),
+      String(lastId),
     ]);
     return rows.length > 0;
   }
@@ -318,7 +327,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
    */
   public async fetchDeliverAckChunk(
     transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<void>
+    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
   ): Promise<number> {
     return this.deliverLock.runExclusive(async () => {
       const wantRows = Math.max(1, Math.floor(transportCapBytes / SqliteAdapter.AVG_EVENT_BYTES_GUESS));
@@ -360,7 +369,11 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       let running = 0;
 
       for (const r of rows) {
-        const add = SqliteAdapter.FIXED_OVERHEAD + Number(r.ulen);
+        const eventBytes =
+          Number.isFinite(Number(r.ulen)) && Number(r.ulen) > 0
+            ? Number(r.ulen)
+            : Buffer.byteLength(r.payload ?? Buffer.alloc(0));
+        const add = SqliteAdapter.FIXED_OVERHEAD + eventBytes;
         if (accepted.length === 0) {
           accepted.push(r);
           running += add;
@@ -389,7 +402,8 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       const last = accepted[accepted.length - 1]!;
       const nextId = BigInt(last.id);
 
-      await deliver(events);
+      const ack = await deliver(events);
+      assertFullOutboxAck(ack, events.length);
 
       // ACK delete accepted ids.
       await this.writeLock.runExclusive(async () => {
@@ -430,6 +444,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   /** Persist the CURRENT aggregate state as a new snapshot. (kept from original) */
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+    validateAggregateId(aggregate.aggregateId);
     const row = await toSnapshotDataModel(aggregate, 'sqlite');
     await this.writeLock.runExclusive(async () => {
       await this.dataSource.query(
@@ -448,6 +463,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   /** Return latest snapshot (full DB row) for aggregateId. */
   public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = await this.dataSource.query(
       `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
@@ -471,6 +487,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   /** Return latest snapshot (full DB row) ≤ given height. */
   public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = await this.dataSource.query(
       `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
@@ -510,6 +527,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     batchSize?: number;
   }): Promise<void> {
     const table = model.aggregateId!;
+    validateAggregateId(table);
     let cursor = lastVersion;
 
     for (;;) {
@@ -559,6 +577,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
     if (aggregateIds.length === 0) return;
+    for (const id of aggregateIds) validateAggregateId(id);
     await this.writeLock.runExclusive(async () => {
       const qr = this.dataSource.createQueryRunner();
       await qr.connect();
@@ -585,6 +604,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     currentBlockHeight: number,
     opts: SnapshotOptions
   ): Promise<void> {
+    validateAggregateId(aggregateId);
     const { minKeep, keepWindow } = opts;
     const protectFrom = keepWindow > 0 ? Math.max(0, currentBlockHeight - keepWindow) : 0;
 
@@ -631,6 +651,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   }
 
   public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
+    validateAggregateId(aggregateId);
     await this.writeLock.runExclusive(async () => {
       await this.dataSource.query(
         `DELETE FROM "${aggregateId}" WHERE "blockHeight" IS NOT NULL AND "blockHeight" <= ?`,
@@ -640,6 +661,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   }
 
   public async restoreExactStateAtHeight(model: T, blockHeight: number): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
 
     if (snap) {
@@ -652,6 +674,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   }
 
   public async restoreExactStateLatest(model: T): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshot(model.aggregateId);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap, 'sqlite');
@@ -670,6 +693,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     aggregateIds: string[],
     options: FindEventsOptions = {}
   ): Promise<EventReadRow[]> {
+    for (const id of aggregateIds) validateAggregateId(id);
     const out: EventReadRow[] = [];
 
     const {
@@ -685,8 +709,8 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
     const orderCol = orderBy === 'createdAt' ? '"timestamp"' : '"version"';
     const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-    const effLimit = limit == null ? 100 : Number(limit);
-    const effOffset = offset == null ? 0 : Number(offset);
+    const effLimit = normalizeLimit(limit);
+    const effOffset = normalizeOffset(offset);
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
@@ -758,11 +782,13 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
   public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
     const id = model.aggregateId;
     if (!id) return null;
+    validateAggregateId(id);
     await this.restoreExactStateAtHeight(model, blockHeight);
     return toSnapshotReadRow(model);
   }
 
   public async getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]> {
+    for (const model of models) validateAggregateId(model.aggregateId);
     if (models.length === 0) return [];
     const out: SnapshotReadRow[] = [];
     for (const m of models) {
@@ -771,4 +797,22 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
     }
     return out;
   }
+}
+
+function normalizeLimit(value: number | undefined): number {
+  if (value == null) return 100;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 100_000) {
+    throw new Error(`Invalid limit "${value}"`);
+  }
+  return n;
+}
+
+function normalizeOffset(value: number | undefined): number {
+  if (value == null) return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Invalid offset "${value}"`);
+  }
+  return n;
 }

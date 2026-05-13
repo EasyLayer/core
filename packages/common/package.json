@@ -63,7 +63,7 @@
     "LICENSE",
     "index.js",
     "index.mjs",
-    "index.d.td",
+    "index.d.ts",
     "arithmetic/dist",
     "exponential-interval-async/dist",
     "shared-interfaces/dist",

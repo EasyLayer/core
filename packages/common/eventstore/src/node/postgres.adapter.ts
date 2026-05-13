@@ -9,8 +9,9 @@ import type {
   EventDataModel,
   SnapshotReadRow,
   SnapshotOptions,
+  PersistAggregatesOptions,
 } from '../core';
-import { BaseAdapter } from '../core';
+import { assertFullOutboxAck, BaseAdapter, type OutboxDeliveryAck } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
@@ -54,7 +55,10 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
    * Returns the inserted outbox ids, first/last (id & timestamp) for compatibility,
    * and a raw array suitable for fast-path publish (same bytes as in DB).
    */
-  public async persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+  public async persistAggregatesAndOutbox(
+    aggregates: T[],
+    options: PersistAggregatesOptions
+  ): Promise<{
     insertedOutboxIds: string[]; // numeric view (safe while ids < 2^53); keep as string if you prefer
     firstTs: number;
     firstId: string;
@@ -62,6 +66,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     lastId: string;
     rawEvents: WireEventRecord[];
   }> {
+    const writeOutbox = options.writeOutbox;
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN');
@@ -82,7 +87,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
         }
         validateAggregateId(table); // Validate before using as SQL table name
 
-        const unsaved: DomainEvent[] = agg.getUnsavedEvents();
+        const unsaved: DomainEvent[] = [...agg.getUnsavedEvents()];
         if (unsaved.length === 0) {
           continue;
         }
@@ -97,8 +102,9 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
           // Serialize once; driver tag 'postgres' enables compression heuristics in serializers.
           const row = await toEventDataModel(ev, version, 'postgres');
 
-          // Generate monotonic outbox id from event.timestamp.
-          const newId = this.idGen.next(ev.timestamp!);
+          // Generate an outbox id only when remote delivery is configured.
+          // Local-only mode persists aggregate event tables without creating outbox rows.
+          const newId = writeOutbox ? this.idGen.next(ev.timestamp!) : null;
 
           // (1) Insert into per-aggregate table (bytea payload).
           await qr.manager.query(
@@ -117,29 +123,34 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
             ]
           );
 
-          // (2) Insert into outbox with our precomputed BIGINT id.
-          await qr.manager.query(
-            `INSERT INTO "outbox"
-               ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-             ON CONFLICT ON CONSTRAINT "UQ_outbox_aggregate_version" DO NOTHING`,
-            [
-              newId.toString(), // bind as string; PG BIGINT friendly
-              table,
-              row.type,
-              row.version,
-              row.requestId,
-              row.blockHeight,
-              row.payload, // same bytea
-              row.isCompressed, // boolean
-              row.timestamp,
-              row.uncompressedBytes,
-            ]
-          );
+          if (writeOutbox && newId !== null) {
+            // (2) Insert into outbox with our precomputed BIGINT id.
+            await qr.manager.query(
+              `INSERT INTO "outbox"
+                 ("id","aggregateId","eventType","eventVersion","requestId","blockHeight","payload","isCompressed","timestamp","uncompressedBytes")
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+               ON CONFLICT ON CONSTRAINT "UQ_outbox_aggregate_version" DO NOTHING`,
+              [
+                newId.toString(), // bind as string; PG BIGINT friendly
+                table,
+                row.type,
+                row.version,
+                row.requestId,
+                row.blockHeight,
+                row.payload, // same bytea
+                row.isCompressed, // boolean
+                row.timestamp,
+                row.uncompressedBytes,
+              ]
+            );
 
-          // Track id bounds & timestamps for compatibility.
-          if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
-          if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+            // Track id bounds for outbox diagnostics.
+            if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+            if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+            outboxIds.push(newId.toString());
+          }
+
+          // Track timestamps for compatibility.
           if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
           if (ev.timestamp! > lastTs) lastTs = ev.timestamp!;
 
@@ -156,8 +167,6 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
               timestamp: ev.timestamp!,
             })
           );
-
-          outboxIds.push(newId.toString());
         }
         // Do NOT call markEventsAsSaved() here — wait for COMMIT first.
       }
@@ -195,6 +204,9 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   public async deleteOutboxByIds(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
+    for (const id of ids) {
+      if (!/^\d+$/.test(String(id))) throw new Error(`Invalid outbox id "${id}"`);
+    }
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -217,6 +229,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
     if (aggregateIds.length === 0) return;
+    for (const id of aggregateIds) validateAggregateId(id);
 
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
@@ -254,14 +267,14 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   // ─────────────────────────────── BACKLOG TESTS ───────────────────────────────
 
   public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(id))) throw new Error(`Invalid outbox id "${id}"`);
     const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id < $1::bigint LIMIT 1`, [String(id)]);
     return rows.length > 0;
   }
 
-  public async hasAnyPendingAfterWatermark(): Promise<boolean> {
-    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > $1::bigint LIMIT 1`, [
-      String(this.lastSeenId),
-    ]);
+  public async hasPendingAfterId(lastId: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(lastId))) throw new Error(`Invalid outbox id "${lastId}"`);
+    const rows = await this.dataSource.query(`SELECT 1 FROM "outbox" WHERE id > $1::bigint LIMIT 1`, [String(lastId)]);
     return rows.length > 0;
   }
 
@@ -278,7 +291,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
    */
   public async fetchDeliverAckChunk(
     transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<void>
+    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
   ): Promise<number> {
     return this.deliverLock.runExclusive(async () => {
       const wantRows = Math.max(1, Math.floor(transportCapBytes / PostgresAdapter.AVG_EVENT_BYTES_GUESS));
@@ -323,7 +336,11 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       let running = 0;
 
       for (const r of rows) {
-        const add = PostgresAdapter.FIXED_OVERHEAD + Number(r.ulen);
+        const eventBytes =
+          Number.isFinite(Number(r.ulen)) && Number(r.ulen) > 0
+            ? Number(r.ulen)
+            : Buffer.byteLength(r.payload ?? Buffer.alloc(0));
+        const add = PostgresAdapter.FIXED_OVERHEAD + eventBytes;
         if (accepted.length === 0) {
           accepted.push(r);
           running += add;
@@ -352,7 +369,8 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
       const last = accepted[accepted.length - 1]!;
       const nextId = BigInt(last.id);
 
-      await deliver(events);
+      const ack = await deliver(events);
+      assertFullOutboxAck(ack, events.length);
 
       // ACK delete accepted ids.
       // NOTE (at-least-once): if deliver() succeeds but this delete throws, lastSeenId is NOT
@@ -392,6 +410,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+    validateAggregateId(aggregate.aggregateId);
     const row = await toSnapshotDataModel(aggregate, 'postgres');
     await this.dataSource.query(
       `INSERT INTO "snapshots" ("aggregateId","blockHeight","version","payload","isCompressed")
@@ -409,6 +428,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   /** Return latest snapshot row (full DB row) for aggregateId. */
   public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = await this.dataSource.query(
       `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
@@ -432,6 +452,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   /** Return latest snapshot row (full DB row) ≤ given height. */
   public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = await this.dataSource.query(
       `SELECT "id","aggregateId","blockHeight","version","payload","isCompressed","createdAt"
        FROM "snapshots"
@@ -475,6 +496,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     lastVersion?: number;
   }): Promise<void> {
     const table = model.aggregateId!;
+    validateAggregateId(table);
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     try {
@@ -515,6 +537,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   public async deleteSnapshotsByBlockHeight(aggregateIds: string[], blockHeight: number): Promise<void> {
     if (aggregateIds.length === 0) return;
+    for (const id of aggregateIds) validateAggregateId(id);
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
     await qr.query('BEGIN');
@@ -539,6 +562,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     currentBlockHeight: number,
     opts: SnapshotOptions
   ): Promise<void> {
+    validateAggregateId(aggregateId);
     const { minKeep, keepWindow } = opts;
     const protectFrom = keepWindow > 0 ? Math.max(0, currentBlockHeight - keepWindow) : 0;
 
@@ -583,6 +607,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   }
 
   public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
+    validateAggregateId(aggregateId);
     await this.dataSource.query(
       `DELETE FROM "${aggregateId}" WHERE "blockHeight" IS NOT NULL AND "blockHeight" <= $1`,
       [pruneToBlockHeight]
@@ -591,6 +616,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   /** Mutate model into state at given blockHeight (snapshot ≤ H + events to H). */
   public async restoreExactStateAtHeight(model: T, blockHeight: number): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap, 'postgres');
@@ -603,6 +629,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   /** Latest state: snapshot (if any) + tail events (no height cap). */
   public async restoreExactStateLatest(model: T): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshot(model.aggregateId);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap, 'postgres');
@@ -619,6 +646,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     aggregateIds: string[],
     options: FindEventsOptions = {}
   ): Promise<EventReadRow[]> {
+    for (const id of aggregateIds) validateAggregateId(id);
     const out: EventReadRow[] = [];
 
     const {
@@ -634,8 +662,10 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
     const orderCol = orderBy === 'createdAt' ? `"timestamp"` : `"version"`;
     const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-    const limSql = limit != null ? `LIMIT ${Number(limit)}` : 'LIMIT 100';
-    const offSql = offset != null ? `OFFSET ${Number(offset)}` : '';
+    const effLimit = normalizeLimit(limit);
+    const effOffset = normalizeOffset(offset);
+    const limSql = `LIMIT ${effLimit}`;
+    const offSql = effOffset > 0 ? `OFFSET ${effOffset}` : '';
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
@@ -694,6 +724,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     aggregateId: string,
     options: FindEventsOptions = {}
   ): AsyncGenerator<EventReadRow, void, unknown> {
+    validateAggregateId(aggregateId);
     const { versionGte, versionLte, heightGte, heightLte, orderBy = 'version', orderDir = 'asc' } = options;
 
     const orderCol = orderBy === 'createdAt' ? `"timestamp"` : `"version"`;
@@ -749,6 +780,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     aggregateIds: string[],
     options: FindEventsOptions = {}
   ): AsyncGenerator<EventReadRow, void, unknown> {
+    for (const id of aggregateIds) validateAggregateId(id);
     for (const id of aggregateIds) {
       for await (const row of this.streamEventsForOneAggregateRead(id, options)) {
         yield row;
@@ -761,11 +793,13 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
   public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
     const id = model.aggregateId;
     if (!id) return null;
+    validateAggregateId(id);
     await this.restoreExactStateAtHeight(model, blockHeight);
     return toSnapshotReadRow(model);
   }
 
   public async getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]> {
+    for (const model of models) validateAggregateId(model.aggregateId);
     if (!models.length) return [];
     const out: SnapshotReadRow[] = [];
     for (const m of models) {
@@ -774,4 +808,22 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     }
     return out;
   }
+}
+
+function normalizeLimit(value: number | undefined): number {
+  if (value == null) return 100;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 100_000) {
+    throw new Error(`Invalid limit "${value}"`);
+  }
+  return n;
+}
+
+function normalizeOffset(value: number | undefined): number {
+  if (value == null) return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Invalid offset "${value}"`);
+  }
+  return n;
 }

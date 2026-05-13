@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import type { LoggerOptions } from 'bunyan';
 import { nameFromLevel } from 'bunyan';
 import type { LogLevel, RootLoggerOptions } from '../core/types';
+import { sanitizeLogValue } from '../core/sanitize';
 
 export type BunyanInstance = bunyan;
 
@@ -34,14 +35,7 @@ function toStr(x: any): string {
 }
 
 export function deerrorize(value: any): any {
-  if (value instanceof Error) return { message: value.message, stack: value.stack };
-  if (Array.isArray(value)) return value.map(deerrorize);
-  if (value && typeof value === 'object') {
-    const out: any = {};
-    for (const k of Object.keys(value)) out[k] = deerrorize(value[k]);
-    return out;
-  }
-  return value;
+  return sanitizeLogValue(value);
 }
 
 function colorFor(level: number) {

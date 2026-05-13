@@ -8,6 +8,10 @@ describe('IpcChildTransportService', () => {
   const origOn = process.on.bind(process);
   const origOff = (process as any).off?.bind(process) || ((ev: any, fn: any) => {});
   const origSend = (process as any).send;
+  const hadOrigChannel = Object.prototype.hasOwnProperty.call(process as any, 'channel');
+  const origChannel = (process as any).channel;
+  const hadOrigConnected = Object.prototype.hasOwnProperty.call(process as any, 'connected');
+  const origConnected = (process as any).connected;
   let modRef: TestingModule | undefined;
 
   beforeEach(() => {
@@ -17,6 +21,8 @@ describe('IpcChildTransportService', () => {
     }) as any;
     (process as any).off = ((ev: string, fn: any) => {}) as any;
     (process as any).send = jest.fn();
+    Object.defineProperty(process, 'channel', { value: {}, configurable: true });
+    Object.defineProperty(process, 'connected', { value: true, configurable: true });
     listeners.length = 0;
   });
 
@@ -24,6 +30,16 @@ describe('IpcChildTransportService', () => {
     (process as any).on = origOn as any;
     (process as any).off = origOff as any;
     (process as any).send = origSend;
+    if (hadOrigChannel) {
+      Object.defineProperty(process, 'channel', { value: origChannel, configurable: true });
+    } else {
+      delete (process as any).channel;
+    }
+    if (hadOrigConnected) {
+      Object.defineProperty(process, 'connected', { value: origConnected, configurable: true });
+    } else {
+      delete (process as any).connected;
+    }
 
     try { await modRef?.close(); } catch {}
     jest.clearAllTimers();
@@ -62,9 +78,10 @@ describe('IpcChildTransportService', () => {
       providers: [{ provide: IpcChildTransportService, useFactory: (qb: QueryBus) => new IpcChildTransportService({ type: 'ipc-child' } as any, qb), inject: [QueryBus] }],
     }).compile();
     const svc = modRef.get(IpcChildTransportService) as any;
-    const p = svc.waitForAck(200);
-    listeners.forEach((fn) => fn({ action: Actions.OutboxStreamAck, payload: { ok: true, okIndices: [0] } }));
-    await expect(p).resolves.toEqual({ ok: true, okIndices: [0] });
+    await svc.send({ action: Actions.OutboxStreamBatch, correlationId: 'ack-1', payload: { events: [] } } as any);
+    const p = svc.waitForAck(200, 'ack-1');
+    listeners.forEach((fn) => fn({ action: Actions.OutboxStreamAck, correlationId: 'ack-1', payload: { ok: true, okIndices: [0] } }));
+    await expect(p).resolves.toEqual({ ok: true, okIndices: [0], correlationId: 'ack-1' });
   });
 
   it('unsubscribes on destroy', async () => {

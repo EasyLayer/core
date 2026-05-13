@@ -104,38 +104,39 @@ describe('EventBus', () => {
     expect(callCount).toBe(1); // exactly once, not twice
   });
 
-  // B7: handler timeout — stuck handler is aborted, stream continues
-  it('routes timeout error to UnhandledExceptionBus and continues processing next event', async () => {
+  // B7: timeout is diagnostic only — ordering is preserved and the handler is not aborted.
+  it('reports timeout, waits for the handler to finish, then continues processing next event', async () => {
     const errors: any[] = [];
     const completed: string[] = [];
 
-    bus.setHandlerTimeout(60); // 60 ms for test speed
+    bus.setHandlerTimeout(30);
     bus.bindUnhandledBus({ publish: (e: any) => errors.push(e) });
 
-    class StuckHandler implements IEventHandler<SlowEvent> {
+    class SlowHandler implements IEventHandler<SlowEvent> {
       async handle(_event: SlowEvent) {
-        // Never resolves — simulates a hung handler
-        await new Promise(() => {});
+        await new Promise((r) => setTimeout(r, 80));
+        completed.push('slow');
       }
     }
     class QuickHandler implements IEventHandler<FastEvent> {
       async handle(_event: FastEvent) { completed.push('fast'); }
     }
 
-    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [SlowEvent], StuckHandler);
+    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [SlowEvent], SlowHandler);
     Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [FastEvent], QuickHandler);
 
-    bus.registerInstances([new StuckHandler() as any, new QuickHandler() as any]);
+    bus.registerInstances([new SlowHandler() as any, new QuickHandler() as any]);
 
     await bus.publish(new SlowEvent({ aggregateId: 'x', requestId: 's1', blockHeight: 1 }, {}));
     await bus.publish(new FastEvent({ aggregateId: 'x', requestId: 'f1', blockHeight: 2 }, {}));
 
-    // Wait for timeout (60 ms) plus processing margin
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(errors[0].exception.message).toMatch(/timed out after 30ms/);
+    expect(completed).toEqual([]);
 
-    expect(errors.length).toBe(1);
-    expect(errors[0].exception.message).toMatch(/timed out after 60ms/);
-    expect(completed).toContain('fast'); // stream continued after timeout
+    await waitFor(() => completed.length === 2, 500);
+    expect(completed).toEqual(['slow', 'fast']);
+    expect(errors.some((e) => String(e.exception.message).includes('completed after timeout'))).toBe(true);
   });
 
   // B7: timeout disabled when handlerTimeoutMs = 0

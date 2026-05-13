@@ -57,8 +57,9 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
   private pendingAck: {
+    correlationId?: string;
     resolve: (v: OutboxStreamAckPayload) => void;
     reject: (e: any) => void;
     timer: NodeJS.Timeout;
@@ -139,11 +140,11 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     await new Promise<void>((resolve, reject) => ws.send(body, (err) => (err ? reject(err) : resolve())));
   }
 
-  async waitForAck(deadlineMs?: number): Promise<OutboxStreamAckPayload> {
+  async waitForAck(deadlineMs?: number, correlationId?: string): Promise<OutboxStreamAckPayload> {
     const finalDeadline = Math.max(1, deadlineMs ?? this.ackTimeoutMs);
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
@@ -152,6 +153,7 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
         reject(new Error('WS: ACK timeout'));
       }, finalDeadline);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(t);
           this.pendingAck = null;
@@ -167,16 +169,42 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
     });
   }
 
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (!correlationId) {
+      this.log.warn('WS outbox ACK ignored because correlationId is missing', {
+        module: 'network-transport',
+      });
+      return;
+    }
+
+    const correlatedAck = { ...ack, correlationId: ack.correlationId ?? correlationId };
+
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(correlatedAck);
+        return;
+      }
+    }
+
+    if (this.ackBuffer.size >= 128) {
+      const oldest = this.ackBuffer.keys().next().value as string | undefined;
+      if (oldest) this.ackBuffer.delete(oldest);
+    }
+    this.ackBuffer.set(correlationId, correlatedAck);
+  }
+
   /* eslint-disable no-empty */
   // ---- WS lifecycle ---------------------------------------------------------
   private onConnection(ws: WebSocket, req: any) {
     try {
       const { token, clientId } = parseAuth(req, this.token);
       if (this.expectedClientId && clientId !== this.expectedClientId) {
-        this.log.debug('WS unexpected clientId', {
+        this.log.warn('WS clientId rejected', {
           module: 'network-transport',
-          args: { got: clientId, want: this.expectedClientId },
+          args: { got: clientId ?? null, want: this.expectedClientId },
         });
+        ws.close(1008, 'unexpected clientId');
+        return;
       }
 
       // Enforce single active client: close previous if any
@@ -241,8 +269,8 @@ export class WsTransportService implements TransportPort, OnModuleDestroy {
       }
       case Actions.OutboxStreamAck: {
         const ack = (msg.payload ?? {}) as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
+        const correlationId = msg.correlationId ?? ack.correlationId;
+        this.acceptAck(ack, correlationId);
         break;
       }
       case Actions.QueryRequest: {

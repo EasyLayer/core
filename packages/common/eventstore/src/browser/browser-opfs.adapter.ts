@@ -10,12 +10,12 @@ import type {
   EventDataModel,
   SnapshotReadRow,
   SnapshotOptions,
+  PersistAggregatesOptions,
 } from '../core';
-import { BaseAdapter } from '../core';
+import { assertFullOutboxAck, BaseAdapter, validateAggregateId, type OutboxDeliveryAck } from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
-import { validateAggregateId } from '../node/entities';
 
 function toBuffer(x: any): Buffer {
   if (Buffer.isBuffer(x)) return x;
@@ -109,11 +109,13 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     db.exec(DDL_OUTBOX);
     db.exec(DDL_SNAPSHOTS);
     for (const id of aggregateIds) {
+      validateAggregateId(id);
       db.exec(ddlAggregateTable(id));
     }
   }
 
   private ensureAggTable(aggregateId: string): void {
+    validateAggregateId(aggregateId);
     this.db.exec(ddlAggregateTable(aggregateId));
   }
 
@@ -131,7 +133,10 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   // ── WRITE PATH ─────────────────────────────────────────────────────────────
 
-  public async persistAggregatesAndOutbox(aggregates: T[]): Promise<{
+  public async persistAggregatesAndOutbox(
+    aggregates: T[],
+    options: PersistAggregatesOptions
+  ): Promise<{
     insertedOutboxIds: string[];
     firstTs: number;
     firstId: string;
@@ -140,6 +145,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     rawEvents: WireEventRecord[];
   }> {
     return this.writeLock.runExclusive(async () => {
+      const writeOutbox = options.writeOutbox;
       const outboxIds: string[] = [];
       const rawEvents: WireEventRecord[] = [];
       let firstIdBn: bigint | null = null;
@@ -153,7 +159,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
           const table = agg.aggregateId;
           if (!table) throw new Error('Aggregate has no aggregateId');
           validateAggregateId(table); // Validate before using as SQL table name
-          const unsaved = agg.getUnsavedEvents();
+          const unsaved: DomainEvent[] = [...agg.getUnsavedEvents()];
           if (unsaved.length === 0) continue;
 
           this.ensureAggTable(table);
@@ -163,7 +169,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
             const ev = unsaved[i] as DomainEvent;
             const version = startVersion + i;
             const row = await toEventDataModel(ev, version);
-            const newId = this.idGen.next(ev.timestamp!);
+            const newId = writeOutbox ? this.idGen.next(ev.timestamp!) : null;
 
             this.run(
               `INSERT OR IGNORE INTO "${table}"
@@ -180,27 +186,31 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
               ]
             );
 
-            this.run(
-              `INSERT OR IGNORE INTO "outbox"
-                 (id, aggregateId, eventType, eventVersion, requestId, blockHeight,
-                  payload, isCompressed, timestamp, uncompressedBytes)
-               VALUES (?,?,?,?,?,?,?,?,?,?)`,
-              [
-                newId.toString(),
-                table,
-                row.type,
-                row.version,
-                row.requestId,
-                row.blockHeight,
-                row.payload,
-                row.isCompressed ? 1 : 0,
-                row.timestamp,
-                row.uncompressedBytes,
-              ]
-            );
+            if (writeOutbox && newId !== null) {
+              this.run(
+                `INSERT OR IGNORE INTO "outbox"
+                   (id, aggregateId, eventType, eventVersion, requestId, blockHeight,
+                    payload, isCompressed, timestamp, uncompressedBytes)
+                 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+                [
+                  newId.toString(),
+                  table,
+                  row.type,
+                  row.version,
+                  row.requestId,
+                  row.blockHeight,
+                  row.payload,
+                  row.isCompressed ? 1 : 0,
+                  row.timestamp,
+                  row.uncompressedBytes,
+                ]
+              );
 
-            if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
-            if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+              if (firstIdBn === null || newId < firstIdBn) firstIdBn = newId;
+              if (lastIdBn === null || newId > lastIdBn) lastIdBn = newId;
+              outboxIds.push(newId.toString());
+            }
+
             if (ev.timestamp! < firstTs) firstTs = ev.timestamp!;
             if (ev.timestamp! > lastTs) lastTs = ev.timestamp!;
 
@@ -216,8 +226,6 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
                 timestamp: ev.timestamp!,
               })
             );
-
-            outboxIds.push(newId.toString());
           }
         }
 
@@ -241,6 +249,9 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   public async deleteOutboxByIds(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
+    for (const id of ids) {
+      if (!/^\d+$/.test(String(id))) throw new Error(`Invalid outbox id "${id}"`);
+    }
     return this.writeLock.runExclusive(async () => {
       this.run('BEGIN');
       try {
@@ -260,6 +271,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   public async rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void> {
     if (aggregateIds.length === 0) return;
+    for (const id of aggregateIds) validateAggregateId(id);
     return this.writeLock.runExclusive(async () => {
       this.run('BEGIN');
       try {
@@ -287,6 +299,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
   // ── BACKLOG ────────────────────────────────────────────────────────────────
 
   public async hasBacklogBefore(_ts: number, id: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(id))) throw new Error(`Invalid outbox id "${id}"`);
     const rows = this.query<{ x: number }>(
       `SELECT 1 AS x FROM "outbox" WHERE CAST(id AS INTEGER) < CAST(? AS INTEGER) LIMIT 1`,
       [String(id)]
@@ -294,10 +307,11 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     return rows.length > 0;
   }
 
-  public async hasAnyPendingAfterWatermark(): Promise<boolean> {
+  public async hasPendingAfterId(lastId: string): Promise<boolean> {
+    if (!/^\d+$/.test(String(lastId))) throw new Error(`Invalid outbox id "${lastId}"`);
     const rows = this.query<{ x: number }>(
       `SELECT 1 AS x FROM "outbox" WHERE CAST(id AS INTEGER) > CAST(? AS INTEGER) LIMIT 1`,
-      [String(this.lastSeenId)]
+      [String(lastId)]
     );
     return rows.length > 0;
   }
@@ -306,7 +320,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   public async fetchDeliverAckChunk(
     transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<void>
+    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
   ): Promise<number> {
     return this.deliverLock.runExclusive(async () => {
       const want = Math.max(1, Math.floor(transportCapBytes / BrowserOpfsAdapter.AVG_EVENT_BYTES_GUESS));
@@ -344,7 +358,9 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
       const accepted: OutboxRow[] = [];
       let running = 0;
       for (const r of rows) {
-        const add = BrowserOpfsAdapter.FIXED_OVERHEAD + Number(r.ulen ?? 0);
+        const eventBytes =
+          Number.isFinite(Number(r.ulen)) && Number(r.ulen) > 0 ? Number(r.ulen) : toBuffer(r.payload).byteLength;
+        const add = BrowserOpfsAdapter.FIXED_OVERHEAD + eventBytes;
         if (accepted.length === 0) {
           accepted.push(r);
           running += add;
@@ -371,7 +387,8 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
       }
 
       const nextId = BigInt(accepted[accepted.length - 1]!.id);
-      await deliver(events);
+      const ack = await deliver(events);
+      assertFullOutboxAck(ack, events.length);
 
       await this.writeLock.runExclusive(async () => {
         const ids = accepted.map((r) => r.id);
@@ -405,20 +422,24 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
   // ── SNAPSHOTS ──────────────────────────────────────────────────────────────
 
   public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
-    return this.writeLock.runExclusive(async () => {
-      const row = await toSnapshotDataModel(aggregate);
+    validateAggregateId(aggregate.aggregateId);
+    const row = await toSnapshotDataModel(aggregate);
+    const allowPruning = (aggregate as any).allowPruning === true;
+
+    await this.writeLock.runExclusive(async () => {
       this.run(
         `INSERT OR IGNORE INTO "snapshots" (aggregateId, blockHeight, version, payload, isCompressed)
          VALUES (?,?,?,?,?)`,
         [row.aggregateId, row.blockHeight, row.version, row.payload, row.isCompressed ? 1 : 0]
       );
-      if ((aggregate as any).allowPruning === true) {
-        await this.pruneOldSnapshots(row.aggregateId, row.blockHeight, opts);
+      if (allowPruning) {
+        this.pruneOldSnapshotsUnlocked(row.aggregateId, row.blockHeight, opts);
       }
     });
   }
 
   public async findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = this.query<any>(
       `SELECT id, aggregateId, blockHeight, version, payload, isCompressed, createdAt
          FROM "snapshots" WHERE aggregateId = ? ORDER BY blockHeight DESC LIMIT 1`,
@@ -428,6 +449,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
   }
 
   public async findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null> {
+    validateAggregateId(aggregateId);
     const rows = this.query<any>(
       `SELECT id, aggregateId, blockHeight, version, payload, isCompressed, createdAt
          FROM "snapshots" WHERE aggregateId = ? AND blockHeight <= ? ORDER BY blockHeight DESC LIMIT 1`,
@@ -462,6 +484,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     batchSize?: number;
   }): Promise<void> {
     const table = model.aggregateId!;
+    validateAggregateId(table);
     let cursor = lastVersion;
 
     for (;;) {
@@ -499,6 +522,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
   }
 
   public async restoreExactStateAtHeight(model: T, blockHeight: number): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshotBeforeHeight(model.aggregateId, blockHeight);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap);
@@ -510,6 +534,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
   }
 
   public async restoreExactStateLatest(model: T): Promise<void> {
+    validateAggregateId(model.aggregateId);
     const snap = await this.findLatestSnapshot(model.aggregateId);
     if (snap) {
       const parsed = await toSnapshotParsedPayload(snap);
@@ -525,6 +550,14 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     currentBlockHeight: number,
     opts: SnapshotOptions
   ): Promise<void> {
+    validateAggregateId(aggregateId);
+    return this.writeLock.runExclusive(async () => {
+      this.pruneOldSnapshotsUnlocked(aggregateId, currentBlockHeight, opts);
+    });
+  }
+
+  private pruneOldSnapshotsUnlocked(aggregateId: string, currentBlockHeight: number, opts: SnapshotOptions): void {
+    validateAggregateId(aggregateId);
     const { minKeep, keepWindow } = opts;
     const protectFrom = keepWindow > 0 ? Math.max(0, currentBlockHeight - keepWindow) : 0;
 
@@ -543,24 +576,23 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     const toDelete = rows.filter((r) => !toKeep.has(r.id)).map((r) => r.id);
     if (toDelete.length === 0) return;
 
-    return this.writeLock.runExclusive(async () => {
-      this.run('BEGIN');
-      try {
-        const step = BrowserOpfsAdapter.DELETE_ID_CHUNK;
-        for (let i = 0; i < toDelete.length; i += step) {
-          const chunk = toDelete.slice(i, i + step);
-          const ph = chunk.map(() => '?').join(',');
-          this.run(`DELETE FROM "snapshots" WHERE id IN (${ph})`, chunk);
-        }
-        this.run('COMMIT');
-      } catch (e) {
-        this.run('ROLLBACK');
-        throw e;
+    this.run('BEGIN');
+    try {
+      const step = BrowserOpfsAdapter.DELETE_ID_CHUNK;
+      for (let i = 0; i < toDelete.length; i += step) {
+        const chunk = toDelete.slice(i, i + step);
+        const ph = chunk.map(() => '?').join(',');
+        this.run(`DELETE FROM "snapshots" WHERE id IN (${ph})`, chunk);
       }
-    });
+      this.run('COMMIT');
+    } catch (e) {
+      this.run('ROLLBACK');
+      throw e;
+    }
   }
 
   public async pruneEvents(aggregateId: string, pruneToBlockHeight: number): Promise<void> {
+    validateAggregateId(aggregateId);
     return this.writeLock.runExclusive(async () => {
       this.run(`DELETE FROM "${aggregateId}" WHERE blockHeight IS NOT NULL AND blockHeight <= ?`, [pruneToBlockHeight]);
     });
@@ -572,6 +604,7 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     aggregateIds: string[],
     options: FindEventsOptions = {}
   ): Promise<EventReadRow[]> {
+    for (const id of aggregateIds) validateAggregateId(id);
     const out: EventReadRow[] = [];
     const {
       versionGte,
@@ -585,8 +618,8 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     } = options;
     const orderCol = orderBy === 'createdAt' ? 'timestamp' : 'version';
     const orderDirSql = orderDir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-    const effLimit = limit == null ? 100 : Number(limit);
-    const effOffset = offset == null ? 0 : Number(offset);
+    const effLimit = normalizeLimit(limit);
+    const effOffset = normalizeOffset(offset);
 
     for (const id of aggregateIds) {
       const conds: string[] = [];
@@ -645,11 +678,13 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   public async getOneModelByHeightRead(model: T, blockHeight: number): Promise<SnapshotReadRow | null> {
     if (!model.aggregateId) return null;
+    validateAggregateId(model.aggregateId);
     await this.restoreExactStateAtHeight(model, blockHeight);
     return toSnapshotReadRow(model);
   }
 
   public async getManyModelsByHeightRead(models: T[], blockHeight: number): Promise<SnapshotReadRow[]> {
+    for (const model of models) validateAggregateId(model.aggregateId);
     if (models.length === 0) return [];
     const out: SnapshotReadRow[] = [];
     for (const m of models) {
@@ -658,4 +693,22 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
     }
     return out;
   }
+}
+
+function normalizeLimit(value: number | undefined): number {
+  if (value == null) return 100;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 100_000) {
+    throw new Error(`Invalid limit "${value}"`);
+  }
+  return n;
+}
+
+function normalizeOffset(value: number | undefined): number {
+  if (value == null) return 0;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`Invalid offset "${value}"`);
+  }
+  return n;
 }

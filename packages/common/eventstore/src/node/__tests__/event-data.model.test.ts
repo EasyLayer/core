@@ -23,4 +23,9 @@ describe('createEventDataEntity()', () => {
     expect(c.id.generated).toBe('increment');
     expect(c.payload.type).toBe('blob');
   });
+  it('rejects unsafe aggregateId before creating dynamic table schema', () => {
+    expect(() => createEventDataEntity('bad"id', 'postgres')).toThrow(/invalid characters/);
+    expect(() => createEventDataEntity('123model', 'sqlite')).toThrow(/invalid characters/);
+  });
+
 });

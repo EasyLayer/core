@@ -161,4 +161,35 @@ describe('AggregateRoot', () => {
     expect(() => new TestAggregate('valid_model', 0)).not.toThrow();
     expect(() => new TestAggregate('model123', 0)).not.toThrow();
   });
+  it('getUnsavedEvents returns a readonly live view without copying', () => {
+    const a = new TestAggregate('valid-id', 1);
+    const e = new UnknownEvent({ aggregateId: 'valid-id', requestId: 'r', blockHeight: 1 }, {});
+    a.apply(e, { skipHandler: true });
+
+    const unsaved = a.getUnsavedEvents();
+    expect(unsaved.length).toBe(1);
+
+    a.markEventsAsSaved();
+    expect(unsaved.length).toBe(0);
+  });
+
+  it('fromSnapshot rejects invalid aggregateId', () => {
+    const a = new TestAggregate('valid-id', 1);
+    expect(() =>
+      a.fromSnapshot({ aggregateId: 'bad"id', version: 1, blockHeight: 1, payload: {} })
+    ).toThrow(/invalid characters/);
+  });
+
+  it('snapshot restore ignores prototype-pollution keys', () => {
+    const a = new TestAggregate('valid-id', 1);
+    a.fromSnapshot({
+      aggregateId: 'valid-id',
+      version: 1,
+      blockHeight: 1,
+      payload: JSON.parse('{"__proto__":{"polluted":true},"constructor":{"evil":true},"state":{"map":{"__t":"Map","v":[]},"set":{"__t":"Set","v":[]},"date":{"__t":"Date","v":"2024-01-01T00:00:00.000Z"},"big":{"__t":"BigInt","v":"1"},"nested":{"a":{"b":{"c":7}}},"passthrough":{"k":"v"}}}'),
+    });
+    expect(({} as any).polluted).toBeUndefined();
+    expect((a as any).constructor.evil).toBeUndefined();
+  });
+
 });

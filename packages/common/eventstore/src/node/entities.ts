@@ -3,6 +3,8 @@ import type { DriverType } from '../core';
 import type { EventDataModel } from '../core/event-data.model';
 import type { SnapshotDataModel } from '../core/snapshots.model';
 import type { OutboxDataModel } from '../core/outbox.model';
+import { validateAggregateId } from '../core/aggregate-id';
+export { validateAggregateId } from '../core/aggregate-id';
 
 function safeName(raw: string): string {
   const s = raw.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -16,34 +18,6 @@ function hashCode(str: string): number {
   return h;
 }
 
-/**
- * Validates that aggregateId is safe for direct use as a SQL table name.
- *
- * Rules:
- * - Must start with a letter [a-zA-Z]
- * - May contain letters, digits, underscores, hyphens [a-zA-Z0-9_-]
- * - Maximum 60 characters (leaves room for index/constraint name suffixes)
- *
- * This is intentionally strict: aggregateIds are defined by the developer,
- * not by end users, so there is no reason to accept exotic characters.
- *
- * @throws {Error} if the id is empty, too long, or contains invalid characters
- */
-export function validateAggregateId(id: string): void {
-  if (!id || id.length === 0) {
-    throw new Error('aggregateId must not be empty');
-  }
-  if (id.length > 60) {
-    throw new Error(`aggregateId "${id}" exceeds maximum length of 60 characters (got ${id.length})`);
-  }
-  if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(id)) {
-    throw new Error(
-      `aggregateId "${id}" contains invalid characters. ` +
-        `Only [a-zA-Z][a-zA-Z0-9_-]* is allowed (must start with a letter).`
-    );
-  }
-}
-
 export function getTableName(entity: any): string {
   return entity?.options?.tableName || entity?.options?.name || entity?.constructor?.name || String(entity);
 }
@@ -52,6 +26,7 @@ export const createEventDataEntity = (
   aggregateId: string,
   dbDriver: DriverType = 'sqlite'
 ): EntitySchema<EventDataModel> => {
+  validateAggregateId(aggregateId);
   const isPostgres = dbDriver === 'postgres';
   const id: any = { type: isPostgres ? 'bigint' : 'integer', primary: true, generated: 'increment' };
   const payload: any = { type: isPostgres ? 'bytea' : 'blob' };

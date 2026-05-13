@@ -1,19 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import type { IAppLogger, LogMeta, RootLoggerOptions, LogLevel } from '../core';
+import { sanitizeLogValue } from '../core';
 import { ContextService } from './context';
 
 type Lvl = LogLevel;
 const order: Record<Lvl, number> = { trace: 5, debug: 10, info: 20, warn: 30, error: 40, fatal: 50 };
 
 export function deerrorize(v: any): any {
-  if (v instanceof Error) return { message: v.message, stack: v.stack };
-  if (Array.isArray(v)) return v.map(deerrorize);
-  if (v && typeof v === 'object') {
-    const out: any = {};
-    for (const k of Object.keys(v)) out[k] = deerrorize(v[k]);
-    return out;
-  }
-  return v;
+  return sanitizeLogValue(v);
 }
 
 const styles: Record<Lvl, string> = {
@@ -80,7 +74,7 @@ class ConsoleRoot {
   }
 }
 
-const KEY = Symbol.for('root');
+const KEY = Symbol.for('easylayer.logger.rootConsole');
 type State = { root: ConsoleRoot };
 function _state(): State {
   const g = globalThis as any;

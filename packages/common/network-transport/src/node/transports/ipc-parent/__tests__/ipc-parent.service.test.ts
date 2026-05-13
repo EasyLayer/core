@@ -5,6 +5,7 @@ import { Actions } from '../../../../core';
 import { EventEmitter } from 'events';
 
 class FakeChild extends EventEmitter {
+  channel = {};
   send = jest.fn();
   once = super.once.bind(this) as any;
   off = super.off.bind(this) as any;
@@ -12,7 +13,7 @@ class FakeChild extends EventEmitter {
 
 describe('IpcParentTransportService', () => {
   let modRef: TestingModule | undefined;
-    
+
   afterEach(async () => {
     try { await modRef?.close(); } catch {}
     jest.clearAllTimers();
@@ -54,9 +55,10 @@ describe('IpcParentTransportService', () => {
       providers: [{ provide: IpcParentTransportService, useFactory: (qb: QueryBus) => new IpcParentTransportService({ type: 'ipc-parent', child } as any, qb), inject: [QueryBus] }],
     }).compile();
     const svc = modRef.get(IpcParentTransportService) as any;
-    const p = svc.waitForAck(200);
-    child.emit('message', { action: Actions.OutboxStreamAck, payload: { ok: true, okIndices: [0] } });
-    await expect(p).resolves.toEqual({ ok: true, okIndices: [0] });
+    await svc.send({ action: Actions.OutboxStreamBatch, correlationId: 'ack-1', payload: { events: [] } } as any);
+    const p = svc.waitForAck(200, 'ack-1');
+    child.emit('message', { action: Actions.OutboxStreamAck, correlationId: 'ack-1', payload: { ok: true, okIndices: [0] } });
+    await expect(p).resolves.toEqual({ ok: true, okIndices: [0], correlationId: 'ack-1' });
   });
 
   it('unsubscribes on destroy', async () => {

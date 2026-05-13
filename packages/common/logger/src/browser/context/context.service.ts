@@ -1,4 +1,5 @@
-import { BrowserALS } from './browser-als';
+import type { BrowserALS } from './browser-als';
+import { getGlobalBrowserALS } from './browser-als';
 import type { ContextData } from '../../core';
 
 let sharedCtx: ContextService | null = null;
@@ -21,10 +22,9 @@ export class ContextService {
   private readonly als: BrowserALS<ContextData>;
 
   constructor() {
-    // Single instance on window for safety across bundles.
-    const w = window as any;
-    if (!w.__loggerCtxALS) w.__loggerCtxALS = new BrowserALS<ContextData>();
-    this.als = w.__loggerCtxALS as BrowserALS<ContextData>;
+    // Single global ALS instance across browser, Electron renderer and SharedWorker bundles.
+    // Uses globalThis + Symbol.for(), not window-specific ad-hoc keys.
+    this.als = getGlobalBrowserALS<ContextData>();
   }
 
   run<T>(initial: ContextData, fn: () => T): T {

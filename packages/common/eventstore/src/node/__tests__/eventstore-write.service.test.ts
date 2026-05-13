@@ -46,25 +46,28 @@ function mkPersist(rawEvents: any[] = []) {
 }
 
 describe('EventStoreWriteService', () => {
-  let pub: PublisherProvider & { publisher: { publishWireStreamBatchWithAck: jest.Mock } };
+  let pub: PublisherProvider & { publisher: { hasRemoteTransport: jest.Mock; publishWireStreamBatchWithAck: jest.Mock; publishSystemEventsLocally: jest.Mock } };
   let adapter: any;
   let readSvc: any;
 
   beforeEach(() => {
     pub = {
       publisher: {
-        publishWireStreamBatchWithAck: jest.fn().mockResolvedValue(undefined),
+        hasRemoteTransport: jest.fn().mockReturnValue(true),
+        publishWireStreamBatchWithAck: jest.fn().mockImplementation(async (events: any[]) => ({ ok: true, okIndices: events.map((_, i) => i) })),
+        publishSystemEventsLocally: jest.fn(),
       },
     } as any;
 
     adapter = {
       persistAggregatesAndOutbox: jest.fn(),
       hasBacklogBefore: jest.fn(),
-      hasAnyPendingAfterWatermark: jest.fn(),
+      hasPendingAfterId: jest.fn(),
       deleteOutboxByIds: jest.fn().mockResolvedValue(undefined),
       fetchDeliverAckChunk: jest.fn(),
       createSnapshot: jest.fn(),
       rollbackAggregates: jest.fn(),
+      advanceWatermark: jest.fn(),
     };
 
     readSvc = {
@@ -81,16 +84,47 @@ describe('EventStoreWriteService', () => {
       mkPersist([{ modelName:'m',eventType:'E',eventVersion:1,requestId:'r',blockHeight:1,payload:'{}',timestamp:1 }])
     );
     adapter.hasBacklogBefore.mockResolvedValue(false);
-    adapter.hasAnyPendingAfterWatermark.mockResolvedValue(false);
+    adapter.hasPendingAfterId.mockResolvedValue(false);
 
     const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
     expect(readSvc.cache.set).toHaveBeenCalledWith('a1', a);
     expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ modelName: 'm', eventType: 'E' })]));
+    const [remotePublishCallOrder] = pub.publisher.publishWireStreamBatchWithAck.mock.invocationCallOrder;
+    const [localEmitCallOrder] = pub.publisher.publishSystemEventsLocally.mock.invocationCallOrder;
+    if (remotePublishCallOrder === undefined || localEmitCallOrder === undefined) {
+      throw new Error('Expected local and remote publisher calls to be recorded');
+    }
+    expect(remotePublishCallOrder).toBeLessThan(localEmitCallOrder);
     expect(adapter.deleteOutboxByIds).toHaveBeenCalledWith(['1','2']);
     expect(adapter.createSnapshot).toHaveBeenCalledWith(a, { minKeep: 2, keepWindow: 0 });
     expect(a.resetSnapshotCounter).toHaveBeenCalled();
+  });
+
+  it('save runs in local-only mode without writing or draining outbox when no remote transport is configured', async () => {
+    const a = new TestAgg('a1', 10, 1, false);
+    const rawEvents = [{ modelName:'m',eventType:'E',eventVersion:1,requestId:'r',blockHeight:1,payload:'{}',timestamp:1 }];
+    pub.publisher.hasRemoteTransport.mockReturnValue(false);
+    adapter.persistAggregatesAndOutbox.mockResolvedValue({
+      ...mkPersist(rawEvents),
+      insertedOutboxIds: [],
+      firstId: '0',
+      lastId: '0',
+    });
+
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
+    await svc.onModuleInit();
+    await svc.save(a as any);
+
+    expect(adapter.persistAggregatesAndOutbox).toHaveBeenCalledWith([a], { writeOutbox: false });
+    expect(adapter.fetchDeliverAckChunk).not.toHaveBeenCalled();
+    expect(adapter.hasBacklogBefore).not.toHaveBeenCalled();
+    expect(adapter.hasPendingAfterId).not.toHaveBeenCalled();
+    expect(pub.publisher.publishWireStreamBatchWithAck).not.toHaveBeenCalled();
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith(rawEvents);
   });
 
   it('save uses strict drain when backlog exists', async () => {
@@ -98,7 +132,7 @@ describe('EventStoreWriteService', () => {
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(true);
     adapter.fetchDeliverAckChunk
-      .mockImplementationOnce(async (_cap: number, cb: (evs:any[])=>Promise<void>) => {
+      .mockImplementationOnce(async (_cap: number, cb: (evs:any[])=>Promise<any>) => {
         await cb([{ modelName:'m',eventType:'E',eventVersion:1,requestId:'r',blockHeight:1,payload:'{}',timestamp:1 }]);
         return 1;
       })
@@ -107,6 +141,8 @@ describe('EventStoreWriteService', () => {
     const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith([]);
     expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledTimes(1);
     expect(adapter.deleteOutboxByIds).not.toHaveBeenCalled();
     expect(adapter.fetchDeliverAckChunk).toHaveBeenCalledTimes(2);
@@ -116,14 +152,40 @@ describe('EventStoreWriteService', () => {
     const a = new TestAgg('a1', 10, 1, false);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(false);
-    adapter.hasAnyPendingAfterWatermark.mockResolvedValue(true);
+    adapter.hasPendingAfterId.mockResolvedValue(true);
     adapter.fetchDeliverAckChunk.mockResolvedValueOnce(0);
 
     const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.save(a as any);
 
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith([]);
     expect(pub.publisher.publishWireStreamBatchWithAck).not.toHaveBeenCalled();
     expect(adapter.fetchDeliverAckChunk).toHaveBeenCalled();
+  });
+
+  it('save emits local system events even when remote transport publish fails', async () => {
+    const a = new TestAgg('a1', 10, 1, false);
+    const rawEvents = [{ modelName:'m',eventType:'E',eventVersion:1,requestId:'r',blockHeight:1,payload:'{}',timestamp:1 }];
+    adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist(rawEvents));
+    adapter.hasBacklogBefore.mockResolvedValue(false);
+    adapter.hasPendingAfterId.mockResolvedValue(false);
+    pub.publisher.publishWireStreamBatchWithAck.mockRejectedValueOnce(new Error('transport unavailable'));
+
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
+    await svc.save(a as any);
+
+    expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledTimes(1);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith(rawEvents);
+    const [remotePublishCallOrder] = pub.publisher.publishWireStreamBatchWithAck.mock.invocationCallOrder;
+    const [localEmitCallOrder] = pub.publisher.publishSystemEventsLocally.mock.invocationCallOrder;
+    if (remotePublishCallOrder === undefined || localEmitCallOrder === undefined) {
+      throw new Error('Expected local and remote publisher calls to be recorded');
+    }
+    expect(remotePublishCallOrder).toBeLessThan(localEmitCallOrder);
+    expect(adapter.deleteOutboxByIds).not.toHaveBeenCalled();
+    expect((svc as any).drainFailing).toBe(true);
   });
 
   it('rollback clears cache, rolls back, and saves modelsToSave', async () => {
@@ -132,7 +194,7 @@ describe('EventStoreWriteService', () => {
     const ms = new TestAgg('b1', 1, 1);
     adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([]));
     adapter.hasBacklogBefore.mockResolvedValue(false);
-    adapter.hasAnyPendingAfterWatermark.mockResolvedValue(false);
+    adapter.hasPendingAfterId.mockResolvedValue(false);
 
     const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
     await svc.rollback({ modelsToRollback: [m1 as any, m2 as any], blockHeight: 5, modelsToSave: [ms as any] });
@@ -140,7 +202,7 @@ describe('EventStoreWriteService', () => {
     expect(readSvc.cache.del).toHaveBeenCalledWith('a1');
     expect(readSvc.cache.del).toHaveBeenCalledWith('a2');
     expect(adapter.rollbackAggregates).toHaveBeenCalledWith(['a1','a2'], 5);
-    expect(adapter.persistAggregatesAndOutbox).toHaveBeenCalledWith([ms]);
+    expect(adapter.persistAggregatesAndOutbox).toHaveBeenCalledWith([ms], { writeOutbox: true });
   });
 
   // B5: fast-path is skipped while drain is in retry state
@@ -166,7 +228,7 @@ describe('EventStoreWriteService', () => {
     expect((svc as any).drainFailing).toBe(true);
 
     // Now save() should skip fast-path and call runDrainOnce instead
-    adapter.hasAnyPendingAfterWatermark.mockResolvedValue(false);
+    adapter.hasPendingAfterId.mockResolvedValue(false);
     await svc.save(a as any);
 
     // publishWireStreamBatchWithAck must NOT have been called directly (fast-path skipped)

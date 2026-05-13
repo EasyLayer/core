@@ -1,7 +1,7 @@
 import { Subject } from 'rxjs';
 import type { Logger, OnModuleDestroy } from '@nestjs/common';
 import type { DomainEvent } from '@easylayer/common/cqrs';
-import type { OutboxBatchSender } from '@easylayer/common/network-transport';
+import type { OutboxBatchSender, OutboxStreamAckPayload } from '@easylayer/common/network-transport';
 import type { WireEventRecord } from '../core/event-record.interface';
 
 export class Publisher implements OnModuleDestroy {
@@ -29,15 +29,37 @@ export class Publisher implements OnModuleDestroy {
     await this.publishWireStreamBatchWithAck([event]);
   }
 
-  async publishWireStreamBatchWithAck(events: WireEventRecord[]): Promise<void> {
-    if (!events.length) return;
-    // 1) Emit locally no matter what (fire-and-forget, but with stable copy)
-    // const batch = events.length > 1 ? events.slice() : events;
-    queueMicrotask(() => this.emitSystemEventsLocally(events));
+  hasRemoteTransport(): boolean {
+    return this.outboxBatchSender.hasTransport();
+  }
 
-    // 2) Try remote send+ACK; if offline, let the error occur,
-    // and outbox retries will deliver later. The local issue has already occurred.
-    await this.outboxBatchSender.streamWireWithAck(events);
+  /**
+   * Emits system-model events into the local NestJS EventBus bridge.
+   *
+   * This is intentionally separate from remote outbox delivery. EventStore calls
+   * it once for newly committed events. Outbox retry/drain paths must not call it,
+   * otherwise an undelivered old outbox row can be re-emitted locally and block
+   * crawler progress by replaying stale system events.
+   */
+  publishSystemEventsLocally(events: WireEventRecord[]): void {
+    if (!events.length) return;
+
+    // Stable array snapshot for the microtask boundary. This copies only the
+    // array of references, not the event objects themselves.
+    const batch = events.slice();
+    queueMicrotask(() => this.emitSystemEventsLocally(batch));
+  }
+
+  /**
+   * Sends a wire batch to the configured external transport and waits for ACK.
+   *
+   * This method does not emit local system events. Local EventBus propagation is
+   * owned by EventStore's save path and must happen exactly once per newly
+   * committed event, not during outbox retry/drain.
+   */
+  async publishWireStreamBatchWithAck(events: WireEventRecord[]): Promise<OutboxStreamAckPayload> {
+    if (!events.length) return { ok: true, okIndices: [] };
+    return await this.outboxBatchSender.streamWireWithAck(events);
   }
 
   private emitSystemEventsLocally(events: WireEventRecord[]): void {

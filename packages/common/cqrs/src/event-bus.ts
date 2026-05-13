@@ -24,9 +24,9 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
   // Prevents duplicate subscriptions if registerInstances() is called multiple times.
   private _linked = false;
 
-  // Default: 30 seconds. A handler that exceeds this deadline is considered stuck.
-  // The error is routed to UnhandledExceptionBus and the event stream continues.
-  // Set to 0 to disable the timeout (not recommended for production).
+  // Default: 30 seconds. A handler that exceeds this deadline is reported to
+  // UnhandledExceptionBus, but the stream still waits for the handler to finish.
+  // This preserves ordering and prevents concurrent side effects from timed-out handlers.
   private _handlerTimeoutMs = 30_000;
 
   onModuleDestroy() {
@@ -108,31 +108,33 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
             concatMap((h: any) =>
               of(h).pipe(
                 concatMap(() => {
-                  const handlerPromise = Promise.resolve(h.handle(event));
+                  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+                  let timeoutReported = false;
 
-                  // If timeout is disabled, run handler directly without a deadline.
-                  if (!this._handlerTimeoutMs) {
-                    return handlerPromise;
+                  if (this._handlerTimeoutMs > 0) {
+                    timeoutId = setTimeout(() => {
+                      timeoutReported = true;
+                      this._unhandled?.publish({
+                        cause: event,
+                        exception: new Error(
+                          `EventBus: handler "${h.constructor?.name}" timed out after ` +
+                            `${this._handlerTimeoutMs}ms for event "${key}"`
+                        ),
+                      });
+                    }, this._handlerTimeoutMs);
                   }
 
-                  // Race handler against a deadline. On timeout: the error is caught below,
-                  // routed to UnhandledExceptionBus, and the stream continues with the next event.
-                  // This prevents a single stuck handler from freezing the entire crawler.
-                  let timeoutId: ReturnType<typeof setTimeout>;
-                  const timeoutPromise = new Promise<never>((_, reject) => {
-                    timeoutId = setTimeout(
-                      () =>
-                        reject(
-                          new Error(
-                            `EventBus: handler "${h.constructor?.name}" timed out after ` +
-                              `${this._handlerTimeoutMs}ms for event "${key}"`
-                          )
+                  return Promise.resolve(h.handle(event)).finally(() => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    if (timeoutReported) {
+                      this._unhandled?.publish({
+                        cause: event,
+                        exception: new Error(
+                          `EventBus: handler "${h.constructor?.name}" completed after timeout for event "${key}"`
                         ),
-                      this._handlerTimeoutMs
-                    );
+                      });
+                    }
                   });
-
-                  return Promise.race([handlerPromise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
                 }),
                 map(() => {
                   this._eventHandlerCompletion$.next(event);
