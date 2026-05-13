@@ -1,5 +1,4 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { Block } from '../../blockchain-provider';
 import { BlocksQueueService } from '../blocks-queue.service';
 import { BlocksQueue } from '../blocks-queue';
 import { BlocksQueueIteratorService } from '../blocks-iterator';
@@ -11,7 +10,7 @@ describe('BlocksQueueService', () => {
   let mockBlocksIterator: jest.Mocked<BlocksQueueIteratorService>;
   let mockBlocksLoader: jest.Mocked<BlocksQueueLoaderService>;
   let mockMempoolLoader: jest.Mocked<MempoolLoaderService>;
-  let mockBlockQueue: jest.Mocked<BlocksQueue<Block>>;
+  let mockBlockQueue: jest.Mocked<BlocksQueue>;
   let config: { maxQueueLength: number; maxBlockHeight: number };
 
   beforeEach(async () => {
@@ -49,15 +48,17 @@ describe('BlocksQueueService', () => {
         { provide: BlocksQueueLoaderService, useValue: mockBlocksLoader },
         { provide: MempoolLoaderService, useValue: mockMempoolLoader },
         { provide: 'CONFIG', useValue: config },
+        { provide: 'BlockchainProvider', useValue: { parseBlock: jest.fn() } },
         {
           provide: BlocksQueueService,
           useFactory: (
             iterator: BlocksQueueIteratorService,
             loader: BlocksQueueLoaderService,
             mempool: MempoolLoaderService,
+            blockchainProvider: any,
             config: any
-          ) => new BlocksQueueService(iterator, loader, mempool, config),
-          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService, 'CONFIG'],
+          ) => new BlocksQueueService(iterator, loader, mempool, blockchainProvider, config),
+          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService, 'BlockchainProvider', 'CONFIG'],
         },
       ],
     }).compile();

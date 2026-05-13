@@ -23,7 +23,7 @@ export class NetworkProvider extends BaseProvider {
    * RPC calls: 0 (streaming). Time: O(1) per block, parsing ~O(#tx + bytes).
    */
   subscribeToNewBlocks(
-    callback: (block: UniversalBlock) => void,
+    callback: (raw: { hash: string; height: number; size: number; bytes: Buffer }) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
     if (typeof (this.transport as any).subscribeToNewBlocks !== 'function') {
@@ -34,7 +34,6 @@ export class NetworkProvider extends BaseProvider {
 
     return this.transport.subscribeToNewBlocks!((blockData: Buffer | Uint8Array) => {
       try {
-        // Normalize to Uint8Array without copying when possible
         const u8 =
           typeof Buffer !== 'undefined' && (blockData as any).buffer
             ? new Uint8Array(
@@ -44,11 +43,16 @@ export class NetworkProvider extends BaseProvider {
               )
             : (blockData as Uint8Array);
 
-        // Parse bytes → UniversalBlock (height may be undefined on raw stream)
+        // Parse only to extract hash and height — bytes are passed through
         const parsed = UniversalTransformer.parseBlockBytes(u8, this.network);
-        callback(parsed as UniversalBlock);
+        const bytes = Buffer.isBuffer(blockData) ? blockData : Buffer.from(u8);
+        callback({
+          hash: parsed.hash,
+          height: parsed.height ?? 0,
+          size: parsed.size ?? bytes.length,
+          bytes,
+        });
       } catch (err) {
-        // Wrap with context so the caller knows where the failure occurred
         const wrapped =
           err instanceof Error
             ? new Error(
@@ -93,6 +97,39 @@ export class NetworkProvider extends BaseProvider {
     });
 
     return hashes.map((hash) => (hash ? map.get(hash) || null : null));
+  }
+
+  async getManyBlocksRawByHeights(
+    heights: number[]
+  ): Promise<Array<{ hash: string; height: number; size: number; bytes: Buffer } | null>> {
+    const hashes = await this.getManyBlockHashesByHeights(heights);
+    const hashToHeight = new Map<string, number>();
+    hashes.forEach((h, i) => {
+      if (h) hashToHeight.set(h, heights[i]!);
+    });
+
+    const validHashes = hashes.filter((h): h is string => !!h);
+    if (validHashes.length === 0) return new Array(heights.length).fill(null);
+
+    const buffers = await this.transport.requestHexBlocks(validHashes);
+
+    const hashToResult = new Map<string, { hash: string; height: number; size: number; bytes: Buffer } | null>();
+    validHashes.forEach((hash, idx) => {
+      const buf = buffers[idx];
+      if (!buf) {
+        hashToResult.set(hash, null);
+        return;
+      }
+      const bytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as Uint8Array);
+      hashToResult.set(hash, {
+        hash,
+        height: hashToHeight.get(hash)!,
+        size: bytes.length,
+        bytes,
+      });
+    });
+
+    return hashes.map((hash) => (hash ? hashToResult.get(hash) ?? null : null));
   }
 
   async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {

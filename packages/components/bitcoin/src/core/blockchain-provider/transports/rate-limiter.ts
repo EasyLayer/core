@@ -147,7 +147,7 @@ export class RateLimiter {
     this.config = {
       maxConcurrentRequests: config.maxConcurrentRequests ?? 1,
       maxBatchSize: config.maxBatchSize ?? 15,
-      minTimeMsBetweenRequests: config.minTimeMsBetweenRequests ?? config.requestDelayMs ?? 1000,
+      minTimeMsBetweenRequests: config.minTimeMsBetweenRequests ?? config.requestDelayMs ?? 0,
       reservoir: config.reservoir,
       reservoirRefreshInterval: config.reservoirRefreshInterval,
       reservoirRefreshAmount: config.reservoirRefreshAmount,

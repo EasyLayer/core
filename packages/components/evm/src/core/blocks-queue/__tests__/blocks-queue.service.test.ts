@@ -1,6 +1,6 @@
 import { BlocksQueueService } from '../blocks-queue.service';
 import type { BlocksQueue } from '../blocks-queue';
-import type { Block } from '../../blockchain-provider/components/block.interfaces';
+import type { BlockchainProviderService } from '../../blockchain-provider';
 import type { BlocksQueueIteratorService } from '../blocks-iterator/blocks-iterator.service';
 import type { BlocksQueueLoaderService } from '../blocks-loader/blocks-loader.service';
 import type { MempoolLoaderService } from '../mempool-loader.service';
@@ -10,7 +10,8 @@ describe('BlocksQueueService', () => {
   let mockIterator: jest.Mocked<Pick<BlocksQueueIteratorService, 'startQueueIterating' | 'resolveNextBatch'>>;
   let mockLoader: jest.Mocked<Pick<BlocksQueueLoaderService, 'startBlocksLoading'>>;
   let mockMempoolLoader: jest.Mocked<Pick<MempoolLoaderService, 'refresh'>>;
-  let mockQueue: Partial<BlocksQueue<Block>>;
+  let mockBlockchainProvider: jest.Mocked<Pick<BlockchainProviderService, 'parseBlock'>>;
+  let mockQueue: Partial<BlocksQueue>;
 
   const config = {
     maxQueueSize: 10_000_000,
@@ -23,6 +24,7 @@ describe('BlocksQueueService', () => {
     queueLoaderStrategyName: 'rpc',
     basePreloadCount: 10,
     tracesEnabled: false,
+    verifyTrie: false,
   };
 
   beforeEach(() => {
@@ -39,6 +41,10 @@ describe('BlocksQueueService', () => {
       refresh: jest.fn().mockResolvedValue(undefined),
     };
 
+    mockBlockchainProvider = {
+      parseBlock: jest.fn(),
+    };
+
     mockQueue = {
       dequeue: jest.fn().mockResolvedValue(5),
       reorganize: jest.fn().mockResolvedValue(undefined),
@@ -49,6 +55,7 @@ describe('BlocksQueueService', () => {
       mockIterator as any,
       mockLoader as any,
       mockMempoolLoader as any,
+      mockBlockchainProvider as any,
       config as any
     );
   });
@@ -72,10 +79,17 @@ describe('BlocksQueueService', () => {
 
       (service['_queue'] as any) = {
         ...mockQueue,
-        dequeue: jest.fn().mockImplementation(async () => { callOrder.push('dequeue'); return 5; }),
+        dequeue: jest.fn().mockImplementation(async () => {
+          callOrder.push('dequeue');
+          return 5;
+        }),
       };
-      mockMempoolLoader.refresh.mockImplementation(async () => { callOrder.push('refresh'); });
-      mockIterator.resolveNextBatch.mockImplementation(() => { callOrder.push('resolve'); });
+      mockMempoolLoader.refresh.mockImplementation(async () => {
+        callOrder.push('refresh');
+      });
+      mockIterator.resolveNextBatch.mockImplementation(() => {
+        callOrder.push('resolve');
+      });
 
       await service.confirmProcessedBatch(['0xhash1', '0xhash2']);
 
@@ -101,10 +115,16 @@ describe('BlocksQueueService', () => {
 
       (service['_queue'] as any) = {
         ...mockQueue,
-        reorganize: jest.fn().mockImplementation(async () => { callOrder.push('reorganize'); }),
+        reorganize: jest.fn().mockImplementation(async () => {
+          callOrder.push('reorganize');
+        }),
       };
-      mockMempoolLoader.refresh.mockImplementation(async () => { callOrder.push('refresh'); });
-      mockIterator.resolveNextBatch.mockImplementation(() => { callOrder.push('resolve'); });
+      mockMempoolLoader.refresh.mockImplementation(async () => {
+        callOrder.push('refresh');
+      });
+      mockIterator.resolveNextBatch.mockImplementation(() => {
+        callOrder.push('resolve');
+      });
 
       await service.reorganizeBlocks(3);
 

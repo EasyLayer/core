@@ -1,4 +1,3 @@
-import type { Block } from '../blockchain-provider';
 import type { MempoolTxMetadata } from '../blockchain-provider';
 import type { LightTransaction } from '../cqrs-components/models/interfaces';
 
@@ -25,7 +24,14 @@ export interface NativeBlockEnqueueMeta {
   size: number;
 }
 
-export interface NativeBlocksQueue<T extends Block = Block> {
+export interface NativeRawBlock {
+  hash: string;
+  height: number;
+  size: number;
+  bytes: Buffer;
+}
+
+export interface NativeBlocksQueue {
   isQueueFull(): boolean;
   isQueueOverloaded(additionalSize: number): boolean;
   getBlockSize(): number;
@@ -38,20 +44,11 @@ export interface NativeBlocksQueue<T extends Block = Block> {
   getCurrentSize(): number;
   getLength(): number;
   getLastHeight(): number;
-  firstBlock(): T | undefined;
   validateEnqueue(meta: NativeBlockEnqueueMeta): void;
-  enqueueCleaned(block: T): void;
-  /**
-   * Compatibility/native safety alias. The TypeScript BlocksQueue path uses
-   * validateEnqueue -> cleanupBlockHexData -> enqueueCleaned so hex is not copied
-   * across the JS -> Rust boundary.
-   */
-  enqueue(block: T): void;
+  enqueueBytes(hash: string, height: number, size: number, bytes: Buffer): void;
+  getBatchUpToSize(maxSize: number): NativeRawBlock[];
+  findBlocks(hashes: string[]): NativeRawBlock[];
   dequeue(hashOrHashes: string | string[]): number;
-  fetchBlockFromInStack(height: number): T | undefined;
-  fetchBlockFromOutStack(height: number): T | undefined;
-  findBlocks(hashes: string[]): T[];
-  getBatchUpToSize(maxSize: number): T[];
   clear(): void;
   reorganize(height: number): void;
   getMemoryStats(): {
@@ -62,15 +59,17 @@ export interface NativeBlocksQueue<T extends Block = Block> {
     indexesSize: number;
     memoryUsedBytes: number;
   };
-  /**
-   * Explicit lifecycle cleanup for native memory.
-   * Does not unload the native addon; it only clears this queue instance.
-   */
   dispose(): void;
 }
 
 export interface NativeBlocksQueueConstructor {
-  new <T extends Block = Block>(options: BlocksQueueNativeOptions): NativeBlocksQueue<T>;
+  new (options: BlocksQueueNativeOptions): NativeBlocksQueue;
+}
+
+export interface NativeMerkleVerifier {
+  bitcoinComputeMerkleRoot(txidsBE: string[]): string;
+  bitcoinVerifyMerkleRoot(txidsBE: string[], expectedRootBE: string): boolean;
+  bitcoinVerifyWitnessCommitment(block: any): boolean;
 }
 
 export interface MempoolLoadInfo {
@@ -147,4 +146,5 @@ export interface NativeMempoolStateConstructor {
 export interface NativeBitcoinBindings {
   NativeBlocksQueue?: NativeBlocksQueueConstructor;
   NativeMempoolState?: NativeMempoolStateConstructor;
+  NativeMerkleVerifier?: NativeMerkleVerifier;
 }

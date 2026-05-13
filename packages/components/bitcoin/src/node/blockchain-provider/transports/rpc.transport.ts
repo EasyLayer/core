@@ -79,6 +79,12 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     if (username || password) {
       const raw = `${username ?? ''}:${password ?? ''}`;
       this.headers.Authorization = 'Basic ' + Buffer.from(raw).toString('base64');
+      // if (url.protocol === 'http:') {
+      //   console.warn(
+      //     `[EasyLayer] WARNING: RPC transport "${options.uniqName}" uses Basic Auth over plain HTTP. ` +
+      //     `Credentials are transmitted unencrypted. Use HTTPS in production.`
+      //   );
+      // }
     }
 
     this.responseTimeout = options.responseTimeout ?? 5000;

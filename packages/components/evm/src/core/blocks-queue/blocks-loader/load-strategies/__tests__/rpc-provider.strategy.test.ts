@@ -130,6 +130,29 @@ describe('RpcProviderStrategy', () => {
     expect(mockProvider.getTracesByBlockHeight).not.toHaveBeenCalled();
   });
 
+
+
+  it('does not use request batch size as queue memory size', async () => {
+    const smallQueue = new BlocksQueue<Block>({
+      lastHeight: -1,
+      maxQueueSize: 20,
+      blockSize: 10,
+      maxBlockHeight: Number.MAX_SAFE_INTEGER,
+    });
+    const blocks = [createBlock(0, 10)];
+    mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks.map((b) => ({ ...b })));
+    mockProvider.getManyBlocksWithReceipts.mockResolvedValue(blocks);
+
+    const strategy = new RpcProviderStrategy(mockLogger as any, mockProvider as any, smallQueue, {
+      maxRequestBlocksBatchSize: 8_000_000,
+      basePreloadCount: 1,
+      tracesEnabled: false,
+    });
+
+    await expect(strategy.load(0)).resolves.toBeUndefined();
+    expect(smallQueue.length).toBe(1);
+  });
+
   it('fetches traces per block when tracesEnabled=true', async () => {
     const blocks = [createBlock(0), createBlock(1)];
     mockProvider.getManyBlocksByHeights.mockResolvedValue([...blocks]);

@@ -84,8 +84,24 @@ export class MempoolLoaderService implements OnModuleInit {
 
     const raw = await this.provider.getRawMempoolFromAll(true);
 
+    if (raw.length === 0) {
+      this.log.warn('Mempool refresh skipped: all providers returned empty data', {
+        module: this.moduleName,
+        args: { height },
+      });
+      return;
+    }
+
     // 2) Deduplicate across providers (no fee logic here).
     const perProvider = this.buildPerProvider(raw);
+
+    if (Object.keys(perProvider).length === 0) {
+      this.log.warn('Mempool refresh skipped: no valid transactions from providers', {
+        module: this.moduleName,
+        args: { height },
+      });
+      return;
+    }
 
     // 3) Dispatch one command; lock only if we successfully dispatched.
     try {

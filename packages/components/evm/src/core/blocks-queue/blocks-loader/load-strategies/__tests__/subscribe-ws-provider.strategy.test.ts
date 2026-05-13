@@ -4,7 +4,7 @@ import { BlocksQueue } from '../../../blocks-queue';
 import type { Block } from '../../../../blockchain-provider/components/block.interfaces';
 import type { BlockchainProviderService } from '../../../../blockchain-provider/blockchain-provider.service';
 
-function createBlock(blockNumber: number): Block {
+function createBlock(blockNumber: number, sizeBytes = 500): Block {
   return {
     hash: `0x${'a'.repeat(63 - String(blockNumber).length)}${blockNumber}`,
     parentHash: blockNumber === 0 ? '0x' + '0'.repeat(64) : `0x${'a'.repeat(63 - String(blockNumber - 1).length)}${blockNumber - 1}`,
@@ -23,8 +23,8 @@ function createBlock(blockNumber: number): Block {
     gasUsed: 21_000,
     timestamp: 1_700_000_000,
     uncles: [],
-    size: 500,
-    sizeWithoutReceipts: 500,
+    size: sizeBytes,
+    sizeWithoutReceipts: sizeBytes,
     transactions: [],
   } as Block;
 }
@@ -139,4 +139,40 @@ describe('SubscribeWsProviderStrategy', () => {
 
     expect(mockProvider.getTracesByBlockHeight).toHaveBeenCalledTimes(2);
   });
+
+
+  it('uses block.size as queue accounting size instead of encoded payload length during catch-up', async () => {
+    const blocks = [createBlock(0, 7)];
+    mockProvider.getManyBlocksWithReceipts.mockResolvedValue(blocks);
+
+    const unsubscribe = jest.fn();
+    mockProvider.subscribeToNewBlocks.mockImplementation(() => {
+      const p = new Promise<void>((res) => setTimeout(res, 30));
+      return Object.assign(p, { unsubscribe }) as any;
+    });
+
+    const strategy = makeStrategy({ catchUpBatchSize: 50 });
+    const loadPromise = strategy.load(0);
+    await new Promise((r) => setTimeout(r, 10));
+    await strategy.stop();
+    try { await loadPromise; } catch {}
+
+    const batch = await queue.getBatchUpToSize(100);
+    expect(batch).toHaveLength(1);
+    expect(batch[0]?.size).toBe(7);
+    expect(queue.currentSize).toBe(7);
+  });
+
+  it('fails fast when catch-up block is missing required size', async () => {
+    const blockWithoutSize = createBlock(0) as any;
+    delete blockWithoutSize.size;
+    mockProvider.getManyBlocksWithReceipts.mockResolvedValue([blockWithoutSize]);
+
+    const strategy = makeStrategy({ catchUpBatchSize: 50 });
+
+    await expect(strategy.load(0)).rejects.toThrow(/EVM block 0 .*missing required size/);
+    expect(mockProvider.subscribeToNewBlocks).not.toHaveBeenCalled();
+    expect(queue.length).toBe(0);
+  });
+
 });

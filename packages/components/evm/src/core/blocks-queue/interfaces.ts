@@ -1,3 +1,10 @@
+export interface RawBlock {
+  hash: string;
+  height: number;
+  size: number;
+  bytes: Buffer;
+}
+
 import type { Block } from '../blockchain-provider/components/block.interfaces';
 import type { MempoolSnapshot } from '../cqrs-components/models/mempool/mempool.model';
 

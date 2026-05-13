@@ -118,6 +118,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   private chainTracker: ChainTracker;
   private headerSyncComplete = false;
+  private _peerBestHeight: number = -1;
 
   private blockSubscribers = new Set<BlockSubscriber>();
   private headerSyncPromise: Promise<void> | null = null;
@@ -183,6 +184,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
         this.pool.once('peerready', (peer: Peer) => {
           clearTimeout(timeout);
           this.activePeer = peer;
+          this._peerBestHeight = (peer as any).bestHeight ?? -1;
           this.setupPeerEventHandlers(peer);
           this.isConnected = true;
           resolve();
@@ -197,6 +199,7 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
 
   async disconnect(): Promise<void> {
     return this.executeWithErrorHandling(async () => {
+      this._peerBestHeight = -1;
       this.blockSubscribers.clear();
 
       this.chainTracker.clear();
@@ -220,10 +223,9 @@ export class P2PTransport extends BaseTransport<P2PTransportOptions> {
   async getBlockHeight(): Promise<number> {
     return this.executeWithErrorHandling(async () => {
       const tipHeight = this.chainTracker.getTipHeight();
-      if (tipHeight < 0) {
-        throw new Error(`Provider "${this.uniqName}": block height not available — header sync is not complete yet`);
-      }
-      return tipHeight;
+      if (tipHeight >= 0) return tipHeight;
+      if (this._peerBestHeight >= 0) return this._peerBestHeight;
+      throw new Error(`Provider "${this.uniqName}": height not available yet`);
     }, 'getBlockHeight');
   }
 

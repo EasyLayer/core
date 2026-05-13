@@ -1,5 +1,6 @@
 import { hash as fastSha256 } from 'fast-sha256';
 import { Buffer } from 'buffer';
+import { getBitcoinNativeBindings } from '../native';
 
 /**
  *
@@ -53,6 +54,18 @@ export class BitcoinMerkleVerifier {
    * Uses LE hashing internally and returns BE hex to match RPC.
    */
   static computeMerkleRoot(txidsBE: string[]): string {
+    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
+    if (native) {
+      try {
+        return native.bitcoinComputeMerkleRoot(txidsBE);
+      } catch {
+        /* fallback */
+      }
+    }
+    return BitcoinMerkleVerifier._computeMerkleRootJS(txidsBE);
+  }
+
+  private static _computeMerkleRootJS(txidsBE: string[]): string {
     if (!txidsBE || txidsBE.length === 0) throw new Error('Cannot compute Merkle root from empty transaction list');
     if (txidsBE.length === 1) return txidsBE[0]!.toLowerCase();
 
@@ -82,10 +95,18 @@ export class BitcoinMerkleVerifier {
    * Verify Merkle root equality, tolerant to empty-tx convention (64 zeros).
    */
   static verifyMerkleRoot(txidsBE: string[], expectedRootBE: string): boolean {
+    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
+    if (native) {
+      try {
+        return native.bitcoinVerifyMerkleRoot(txidsBE, expectedRootBE);
+      } catch {
+        /* fallback */
+      }
+    }
     try {
       if (!expectedRootBE) return false;
       if (!txidsBE || txidsBE.length === 0) return expectedRootBE === '0'.repeat(64);
-      const computed = this.computeMerkleRoot(txidsBE);
+      const computed = this._computeMerkleRootJS(txidsBE);
       return computed === expectedRootBE.toLowerCase();
     } catch {
       return false;
@@ -109,6 +130,18 @@ export class BitcoinMerkleVerifier {
    * If there is no commitment or no witness context, returns true (N/A).
    */
   static verifyWitnessCommitment(block: any): boolean {
+    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
+    if (native) {
+      try {
+        return native.bitcoinVerifyWitnessCommitment(block);
+      } catch {
+        /* fallback */
+      }
+    }
+    return BitcoinMerkleVerifier._verifyWitnessCommitmentJS(block);
+  }
+
+  private static _verifyWitnessCommitmentJS(block: any): boolean {
     try {
       if (!block?.tx?.length) return true;
 

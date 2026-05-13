@@ -29,13 +29,13 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
   let strategy: RpcProviderStrategy;
   let mockLogger: jest.Mocked<any>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
-  let queue: BlocksQueue<Block>;
+  let queue: BlocksQueue;
   const basePreloadCount = 4;
   const defaultBlockSize = 1000;
   const maxRpcReplyBytes = 10_000;
 
   beforeEach(() => {
-    queue = new BlocksQueue<Block>({
+    queue = new BlocksQueue({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
       blockSize: defaultBlockSize,
@@ -55,6 +55,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
     mockProvider = {
       getManyBlocksStatsByHeights: jest.fn(),
       getManyBlocksByHeights: jest.fn(),
+      getManyBlocksRawByHeights: jest.fn(),
     } as any;
 
     strategy = new RpcProviderStrategy(mockLogger, mockProvider, queue, {
@@ -181,29 +182,32 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
 
     it('fetches blocks on first try', async () => {
       const blocks = [createTestBlock(1, 'hash1', 1000), createTestBlock(2, 'hash2', 1500)];
-      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       const result = await (strategy as any).loadBlocks(infos, 3);
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith([1, 2], true, undefined, true);
-      expect(result).toEqual(blocks);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledWith([1, 2]);
+      expect(result).toHaveLength(2);
+      expect(result[0].hash).toBe('hash1');
+      expect(result[1].hash).toBe('hash2');
     });
 
     it('retries on failure and eventually succeeds', async () => {
-      const blocks = [createTestBlock(1, 'hash1', 1000)];
-      mockProvider.getManyBlocksByHeights
+      const rawBlocks = [{ hash: 'hash1', height: 1, size: 1000, bytes: Buffer.alloc(1000) }];
+      mockProvider.getManyBlocksRawByHeights
         .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValue(blocks);
+        .mockResolvedValue(rawBlocks);
 
       const result = await (strategy as any).loadBlocks(infos, 3);
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledTimes(2);
-      expect(result).toEqual(blocks);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(2);
+      expect(result).toHaveLength(1);
+      expect(result[0].hash).toBe('hash1');
     });
 
     it('throws after max retries and logs verbose with action field', async () => {
-      mockProvider.getManyBlocksByHeights.mockRejectedValue(new Error('Persistent error'));
+      mockProvider.getManyBlocksRawByHeights.mockRejectedValue(new Error('Persistent error'));
 
       await expect((strategy as any).loadBlocks(infos, 2)).rejects.toThrow('Persistent error');
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledTimes(2);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(2);
       expect(mockLogger.verbose).toHaveBeenCalledWith(
         'Exceeded max retries for fetching blocks batch',
         expect.objectContaining({
@@ -261,7 +265,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
         { hash: 'hash2', size: 2000, height: 2 },
       ];
       const blocks = [createTestBlock(1, 'hash1', 2000), createTestBlock(2, 'hash2', 2000)];
-      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(2);
@@ -277,7 +281,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
         { hash: 'hash3', size: 2000, height: 3 },
       ];
       const blocks = [createTestBlock(1, 'hash1', 2000), createTestBlock(2, 'hash2', 2000)];
-      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(2);
@@ -289,7 +293,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       (queue as any)._lastHeight = 0;
       (strategy as any)._preloadedItemsQueue = [{ hash: 'bigblock', size: 6000, height: 1 }];
       const blocks = [createTestBlock(1, 'bigblock', 6000)];
-      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(1);
@@ -331,8 +335,8 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
         { blockhash: 'h1', total_size: 1000, height: 1 },
       ]);
-      mockProvider.getManyBlocksByHeights.mockResolvedValue([
-        createTestBlock(1, 'h1', 1000),
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue([
+        { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
       ]);
 
       await strategy.load(1);

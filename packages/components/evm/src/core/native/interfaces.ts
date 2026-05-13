@@ -1,4 +1,3 @@
-import type { Block } from '../blockchain-provider/components';
 import type { MempoolTxMetadata } from '../blockchain-provider/providers/interfaces';
 
 export interface BlocksQueueNativeOptions {
@@ -20,15 +19,20 @@ export interface BlocksQueueNativeOptions {
 
 export interface NativeBlockEnqueueMeta {
   hash: string;
-  blockNumber: number;
+  height: number;
   size: number;
 }
 
-export interface NativeBlocksQueue<T extends Block = Block> {
+export interface NativeRawBlock {
+  hash: string;
+  height: number;
+  size: number;
+  bytes: Buffer;
+}
+
+export interface NativeBlocksQueue {
   isQueueFull(): boolean;
   isQueueOverloaded(additionalSize: number): boolean;
-  getBlockSize(): number;
-  setBlockSize(size: number): void;
   isMaxHeightReached(): boolean;
   getMaxBlockHeight(): number;
   setMaxBlockHeight(height: number): void;
@@ -37,15 +41,13 @@ export interface NativeBlocksQueue<T extends Block = Block> {
   getCurrentSize(): number;
   getLength(): number;
   getLastHeight(): number;
-  firstBlock(): T | undefined;
   validateEnqueue(meta: NativeBlockEnqueueMeta): void;
-  enqueueCleaned(block: T): void;
-  enqueue(block: T): void;
+  enqueueBytes(hash: string, height: number, size: number, bytes: Buffer): void;
+  getBlockSize(): number;
+  setBlockSize(size: number): void;
+  getBatchUpToSize(maxSize: number): NativeRawBlock[];
+  findBlocks(hashes: string[]): NativeRawBlock[];
   dequeue(hashOrHashes: string | string[]): number;
-  fetchBlockFromInStack(height: number): T | undefined;
-  fetchBlockFromOutStack(height: number): T | undefined;
-  findBlocks(hashes: string[]): T[];
-  getBatchUpToSize(maxSize: number): T[];
   clear(): void;
   reorganize(height: number): void;
   getMemoryStats(): {
@@ -60,7 +62,7 @@ export interface NativeBlocksQueue<T extends Block = Block> {
 }
 
 export interface NativeBlocksQueueConstructor {
-  new <T extends Block = Block>(options: BlocksQueueNativeOptions): NativeBlocksQueue<T>;
+  new (options: BlocksQueueNativeOptions): NativeBlocksQueue;
 }
 
 export interface EvmMempoolLoadInfo {

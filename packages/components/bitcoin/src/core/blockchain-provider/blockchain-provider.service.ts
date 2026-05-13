@@ -9,6 +9,7 @@ import type {
   UniversalMempoolTxMetadata,
   UniversalMempoolInfo,
 } from './providers';
+import { UniversalTransformer } from './providers/universal-transformer';
 import type { NetworkConfig } from './transports';
 import { ConnectionError, TimeoutError, RateLimitError } from './transports/errors';
 import { BitcoinNormalizer } from './normalizer';
@@ -178,8 +179,10 @@ export class BlockchainProviderService {
    * @param callback Function to call when new block arrives
    * @returns Subscription promise with unsubscribe method
    */
-  // BlockchainProviderService — optional error handler
-  public subscribeToNewBlocks(callback: (block: Block) => void, onError?: (err: Error) => void): Subscription {
+  public subscribeToNewBlocks(
+    callback: (raw: { hash: string; height: number; size: number; bytes: Buffer }) => void,
+    onError?: (err: Error) => void
+  ): Subscription {
     this.ensureNetworkProviders();
 
     let resolveSubscription!: () => void;
@@ -190,8 +193,6 @@ export class BlockchainProviderService {
       rejectSubscription = reject;
     }) as Subscription;
 
-    // Pre-assign a no-op so unsubscribe() is always callable even if getActiveProvider()
-    // hasn't resolved yet (e.g. during fast shutdown or onModuleDestroy).
     subscriptionPromise.unsubscribe = () => {};
 
     this.networkConnectionManager
@@ -207,19 +208,9 @@ export class BlockchainProviderService {
         }
 
         const sub = networkProvider.subscribeToNewBlocks(
-          (uBlock) => {
+          (raw) => {
             try {
-              const isValid =
-                uBlock.height === 0
-                  ? BitcoinMerkleVerifier.verifyGenesisMerkleRoot(uBlock)
-                  : BitcoinMerkleVerifier.verifyBlockMerkleRoot(uBlock, this.networkConfig.hasSegWit);
-
-              if (!isValid) {
-                throw new Error(`Merkle root verification failed for block ${uBlock.hash} at height ${uBlock.height}`);
-              }
-
-              const normalized = this.normalizer.normalizeBlock(uBlock);
-              callback(normalized);
+              callback(raw);
             } catch (err) {
               onError?.(err as Error);
             }
@@ -244,6 +235,20 @@ export class BlockchainProviderService {
   }
 
   // ===== NETWORK OPERATIONS (using networkConnectionManager) =====
+
+  /**
+   * Parse raw block bytes into a normalized Block object.
+   * Called by the queue iterator after getBatchUpToSize.
+   * Bitcoin path: wire bytes → parseBlockBytes → verifyMerkle → normalizeBlock.
+   */
+  public parseBlock(bytes: Buffer, height: number): Block {
+    const u8 = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length);
+    const universal = UniversalTransformer.parseBlockBytes(u8, height, this.networkConfig);
+    if (!this.verifyBlockMerkleRoot(universal)) {
+      throw new Error(`Merkle root verification failed for block ${universal.hash} at height ${height}`);
+    }
+    return this.normalizer.normalizeBlock(universal);
+  }
 
   /**
    * Execute network provider method with automatic error handling and provider switching.
@@ -387,6 +392,18 @@ export class BlockchainProviderService {
       }
 
       return this.processAndValidateBlocks(universalBlocks, verifyMerkle);
+    });
+  }
+
+  /**
+   * Get multiple blocks as raw bytes by heights — no parsing.
+   * Used by load strategies to enqueue without intermediate Block object creation.
+   */
+  public async getManyBlocksRawByHeights(
+    heights: number[]
+  ): Promise<Array<{ hash: string; height: number; size: number; bytes: Buffer } | null>> {
+    return this.executeNetworkProviderMethod('getManyBlocksRawByHeights', async (provider) => {
+      return provider.getManyBlocksRawByHeights(heights);
     });
   }
 

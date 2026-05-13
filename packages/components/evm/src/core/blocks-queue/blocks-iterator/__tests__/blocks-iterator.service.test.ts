@@ -1,7 +1,10 @@
 import 'reflect-metadata';
 import { BlocksQueueIteratorService } from '../blocks-iterator.service';
 import { BlocksQueue } from '../../blocks-queue';
+import type { RawBlock } from '../../interfaces';
+import type { BlockchainProviderService } from '../../../blockchain-provider';
 import type { Block } from '../../../blockchain-provider/components/block.interfaces';
+import { encodeEvmBlockPayload } from '../../../blockchain-provider/codecs/block-payload-codec';
 
 function createBlock(blockNumber: number, size = 512): Block {
   return {
@@ -28,19 +31,39 @@ function createBlock(blockNumber: number, size = 512): Block {
   } as Block;
 }
 
+function createRawBlock(blockNumber: number, size = 512): RawBlock {
+  const block = createBlock(blockNumber, size);
+  return {
+    hash: block.hash,
+    height: block.blockNumber,
+    size: block.size,
+    bytes: encodeEvmBlockPayload(block),
+  };
+}
+
 describe('BlocksQueueIteratorService', () => {
   let service: BlocksQueueIteratorService;
   let executor: { handleBatch: jest.Mock };
+  let blockchainProvider: jest.Mocked<Pick<BlockchainProviderService, 'parseBlock'>>;
 
   beforeEach(() => {
     executor = {
       handleBatch: jest.fn().mockResolvedValue(undefined),
     };
 
-    service = new BlocksQueueIteratorService(executor as any, {
-      queueIteratorBlocksBatchSize: 1024,
-      blockTimeMs: 12_000,
-    } as any);
+    blockchainProvider = {
+      parseBlock: jest.fn(async (_bytes: Buffer, height: number) => createBlock(height, 400)),
+    };
+
+    service = new BlocksQueueIteratorService(
+      executor as any,
+      blockchainProvider as any,
+      {
+        queueIteratorBlocksBatchSize: 1024,
+        blockTimeMs: 12_000,
+        verifyTrie: false,
+      } as any
+    );
 
     (service as any).log = {
       debug: jest.fn(),
@@ -61,21 +84,22 @@ describe('BlocksQueueIteratorService', () => {
   });
 
   it('peekNextBatch returns blocks up to configured size', async () => {
-    const queue = new BlocksQueue<Block>({
+    const queue = new BlocksQueue({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
       blockSize: 512,
       maxQueueSize: 10 * 1024 * 1024,
     });
-    await queue.enqueue(createBlock(0, 400));
-    await queue.enqueue(createBlock(1, 400));
-    await queue.enqueue(createBlock(2, 400));
+    await queue.enqueue(createRawBlock(0, 400));
+    await queue.enqueue(createRawBlock(1, 400));
+    await queue.enqueue(createRawBlock(2, 400));
 
     (service as any)._queue = queue;
     const batch = await (service as any).peekNextBatch();
 
     expect(batch.length).toBeGreaterThan(0);
     expect(batch.reduce((sum: number, block: Block) => sum + block.size, 0)).toBeLessThanOrEqual(1024);
+    expect(blockchainProvider.parseBlock).toHaveBeenCalledTimes(batch.length);
   });
 
   it('processBatch delegates to blocksCommandExecutor.handleBatch', async () => {

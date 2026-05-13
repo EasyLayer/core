@@ -40,9 +40,14 @@ export class BlocksQueueModule {
         },
         {
           provide: BlocksQueueService,
-          useFactory: (iterator, loader, mempoolService) =>
-            new BlocksQueueService(iterator, loader, mempoolService, restConfig),
-          inject: [BlocksQueueIteratorService, BlocksQueueLoaderService, MempoolLoaderService],
+          useFactory: (iterator, loader, mempoolService, blockchainProvider) =>
+            new BlocksQueueService(iterator, loader, mempoolService, blockchainProvider, restConfig),
+          inject: [
+            BlocksQueueIteratorService,
+            BlocksQueueLoaderService,
+            MempoolLoaderService,
+            BlockchainProviderService,
+          ],
         },
         {
           provide: BlocksQueueLoaderService,
@@ -52,8 +57,9 @@ export class BlocksQueueModule {
         },
         {
           provide: BlocksQueueIteratorService,
-          useFactory: (executor) => new BlocksQueueIteratorService(executor, restConfig),
-          inject: ['BlocksCommandExecutor'],
+          useFactory: (executor, blockchainProvider) =>
+            new BlocksQueueIteratorService(executor, blockchainProvider, restConfig),
+          inject: ['BlocksCommandExecutor', BlockchainProviderService],
         },
         {
           provide: MempoolLoaderService,

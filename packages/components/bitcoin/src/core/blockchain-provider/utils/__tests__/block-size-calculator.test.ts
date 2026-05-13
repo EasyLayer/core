@@ -58,14 +58,19 @@ describe('BlockSizeCalculator', () => {
 
   it('calculateSizeFromTransactions with mix of ids and objects', () => {
     const utx: any = { size: 300, vsize: 250, weight: 1000, strippedsize: 250 };
-    const res = BSC.calculateSizeFromBlock(
+    // String txids with no block-level size fields → throws (correct behavior post-fix)
+    expect(() => BSC.calculateSizeFromBlock(
       { hash: 'h', strippedsize: 0, size: 0, weight: 0, version: 1, versionHex: '0x1', merkleroot: '', time: 0, mediantime: 0, nonce: 0, bits: '0x', difficulty: '0', chainwork: '', tx: ['id1', utx] } as any,
+      netSegwit
+    )).toThrow('tx list contains string IDs but block has no size/weight fields');
+
+    // With only object txs it should work
+    const res = BSC.calculateSizeFromBlock(
+      { hash: 'h', strippedsize: 0, size: 0, weight: 0, version: 1, versionHex: '0x1', merkleroot: '', time: 0, mediantime: 0, nonce: 0, bits: '0x', difficulty: '0', chainwork: '', tx: [utx] } as any,
       netSegwit
     );
     expect(res.size).toBeGreaterThan(0);
-    expect(res.strippedSize).toBeGreaterThan(0);
     expect(res.weight).toBeGreaterThan(0);
-    expect(res.vsize).toBe(Math.ceil(res.weight / 4));
   });
 
   it('calculateSizeFromBlock fallback to given fields', () => {

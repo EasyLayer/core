@@ -26,8 +26,8 @@ impl CapacityPlanner {
       cfg.and_then(|v| v.get(key)).and_then(Value::as_u64).unwrap_or(default)
     };
 
-    let min_avg_bytes = get_num("minAvgBytes", 256.0);
-    let max_avg_bytes = get_num("maxAvgBytes", 64.0 * 1024.0);
+    let min_avg_bytes = get_num("minAvgBytes", 512.0);
+    let max_avg_bytes = get_num("maxAvgBytes", 8.0 * 1024.0 * 1024.0);
     let clamped = initial_avg_bytes.max(min_avg_bytes).min(max_avg_bytes);
 
     Self {

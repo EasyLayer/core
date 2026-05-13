@@ -9,6 +9,9 @@ export interface RateLimits {
 
   /**
    * Minimum time between requests in milliseconds (preferred).
+   * Default: 0 — no artificial throttling.
+   * The node enforces load limits via HTTP 429, handled as RateLimitError.
+   * Set explicitly per provider: public RPC = 100-1000ms, own node = 0.
    */
   minTimeMsBetweenRequests?: number;
 

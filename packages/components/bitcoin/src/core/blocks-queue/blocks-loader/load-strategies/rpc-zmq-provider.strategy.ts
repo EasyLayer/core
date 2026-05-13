@@ -1,8 +1,9 @@
 import type { Logger } from '@nestjs/common';
-import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
+import type { BlockchainProviderService } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy, Subscription } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
+import type { RawBlock } from '../../interfaces';
 
 interface BlockInfo {
   hash: string;
@@ -47,7 +48,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
   constructor(
     private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
-    private readonly queue: BlocksQueue<Block>,
+    private readonly queue: BlocksQueue,
     config: {
       maxRpcReplyBytes: number;
       basePreloadCount: number;
@@ -128,7 +129,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
       let settledWithError = false;
 
       this._subscription = this.blockchainProvider.subscribeToNewBlocks(
-        async (block: Block) => {
+        async (raw: RawBlock) => {
           try {
             if (this.queue.isMaxHeightReached) return;
 
@@ -139,7 +140,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
               return;
             }
 
-            await this.enqueueBlock(block);
+            await this.enqueueBlock(raw);
           } catch (error) {
             this.logger.verbose('RPC+ZMQ strategy: block processing error', {
               module: this.moduleName,
@@ -185,15 +186,15 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     });
   }
 
-  private async enqueueBlock(block: Block): Promise<void> {
-    if (block.height <= this.queue.lastHeight) {
+  private async enqueueBlock(raw: RawBlock): Promise<void> {
+    if (raw.height <= this.queue.lastHeight) {
       this.logger.verbose('RPC+ZMQ strategy: skipping block with height ≤ lastHeight', {
         module: this.moduleName,
-        args: { blockHeight: block.height, lastHeight: this.queue.lastHeight },
+        args: { blockHeight: raw.height, lastHeight: this.queue.lastHeight },
       });
       return;
     }
-    await this.queue.enqueue(block);
+    await this.queue.enqueue(raw);
   }
 
   // ===== PHASE 1: RPC batch catch-up =====
@@ -281,7 +282,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
 
     if (infos.length === 0) return;
 
-    const blocks: Block[] = await this.loadBlocks(infos, retryLimit);
+    const blocks: RawBlock[] = await this.loadBlocks(infos, retryLimit);
 
     this.logger.debug('Loaded RPC+ZMQ block batch', {
       module: this.moduleName,
@@ -295,17 +296,16 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     this._lastLoadAndEnqueueDuration = Date.now() - startTime;
   }
 
-  private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
+  private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<RawBlock[]> {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
         const heights = infos.map((i) => i.height);
-        return await this.blockchainProvider.getManyBlocksByHeights(
-          heights,
-          true, // useHex = true (bytes path)
-          undefined, // verbosity ignored for hex path
-          true // verifyMerkle = true
-        );
+        const fetched = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+        if (!Array.isArray(fetched)) {
+          throw new Error('getManyBlocksRawByHeights must return an array of raw blocks');
+        }
+        return fetched.filter(Boolean) as RawBlock[];
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
@@ -321,7 +321,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     throw new Error('Failed to fetch blocks batch after maximum retries.');
   }
 
-  private async enqueueBlocks(blocks: Block[]): Promise<void> {
+  private async enqueueBlocks(blocks: RawBlock[]): Promise<void> {
     blocks.sort((a, b) => {
       if (a.height < b.height) return 1;
       if (a.height > b.height) return -1;

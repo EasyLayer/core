@@ -1,9 +1,11 @@
 import type { Logger } from '@nestjs/common';
 import type { BlockchainProviderService } from '../../../blockchain-provider/blockchain-provider.service';
 import type { Block } from '../../../blockchain-provider/components/block.interfaces';
+import { encodeEvmBlockPayload } from '../../../blockchain-provider/codecs/block-payload-codec';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
+import type { RawBlock } from '../../interfaces';
 
 export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
   readonly name = StrategyNames.WS_SUBSCRIBE;
@@ -15,7 +17,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
   constructor(
     private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
-    private readonly queue: BlocksQueue<Block>,
+    private readonly queue: BlocksQueue,
     config: {
       maxRequestBlocksBatchSize?: number;
       basePreloadCount?: number;
@@ -41,7 +43,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
           await this.performCatchUp(currentNetworkHeight);
 
           this._subscription = this.blockchainProvider.subscribeToNewBlocks(
-            async (block) => {
+            async (block: Block) => {
               try {
                 if (this.queue.isMaxHeightReached) return;
                 if (this.queue.isQueueFull) {
@@ -49,7 +51,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
                   reject(new Error('Queue full'));
                   return;
                 }
-                if (this.tracesEnabled && block) {
+                if (this.tracesEnabled) {
                   block.traces = await this.blockchainProvider.getTracesByBlockHeight(block.blockNumber);
                 }
                 await this.enqueueBlock(block);
@@ -102,9 +104,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
       const heights = Array.from({ length: gap }, (_, i) => start + i);
       const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, this.verifyTrie);
       await this.attachTracesIfNeeded(blocks);
-      for (const block of blocks) {
-        await this.enqueueBlock(block);
-      }
+      for (const block of blocks) await this.enqueueBlock(block);
       return;
     }
 
@@ -113,9 +113,7 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
       const heights = Array.from({ length: batchEnd - batchStart + 1 }, (_, i) => batchStart + i);
       const blocks = await this.blockchainProvider.getManyBlocksWithReceipts(heights, true, this.verifyTrie);
       await this.attachTracesIfNeeded(blocks);
-      for (const block of blocks) {
-        await this.enqueueBlock(block);
-      }
+      for (const block of blocks) await this.enqueueBlock(block);
     }
   }
 
@@ -126,8 +124,22 @@ export class SubscribeWsProviderStrategy implements BlocksLoadingStrategy {
     }
   }
 
+  private getRequiredBlockSize(block: Block): number {
+    if (typeof block.size !== 'number' || !Number.isFinite(block.size) || block.size < 0) {
+      throw new Error(`EVM block ${block.blockNumber} (${block.hash}) is missing required size`);
+    }
+    return block.size;
+  }
+
   private async enqueueBlock(block: Block): Promise<void> {
     if (block.blockNumber <= this.queue.lastHeight) return;
-    await this.queue.enqueue(block);
+    const bytes = encodeEvmBlockPayload(block);
+    const raw: RawBlock = {
+      hash: block.hash,
+      height: block.blockNumber,
+      size: this.getRequiredBlockSize(block),
+      bytes,
+    };
+    await this.queue.enqueue(raw);
   }
 }

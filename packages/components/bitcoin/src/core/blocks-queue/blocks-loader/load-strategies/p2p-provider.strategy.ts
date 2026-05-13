@@ -1,8 +1,9 @@
 import type { Logger } from '@nestjs/common';
-import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
+import type { BlockchainProviderService } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy, Subscription } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
+import type { RawBlock } from '../../interfaces';
 
 /**
  * P2PProviderStrategy
@@ -11,38 +12,28 @@ import type { BlocksQueue } from '../../blocks-queue';
  *
  * Phase 1 — P2P batch catch-up:
  *   While queue.lastHeight < currentNetworkHeight, fetch blocks via P2P GetData
- *   (getManyBlocksByHeights → ChainTracker hash lookup + GetData batches of 128).
- *   Requires header sync to be complete so ChainTracker can resolve heights → hashes.
+ *   (getManyBlocksRawByHeights → ChainTracker hash lookup + GetData batches of 128).
  *
  * Phase 2 — P2P real-time subscription:
  *   Once caught up, subscribe to the P2P block stream for real-time delivery.
- *   On any error (peer disconnect, block processing failure, backpressure):
- *   strategy rejects → loader supervisor resets timer → next tick restarts
+ *   On any error: strategy rejects → loader supervisor resets timer → next tick restarts
  *   from Phase 1 (catch-up recovers any missed blocks).
- *
- * Note: Both phases use the same underlying P2PTransport. The transport must
- * support subscribeToNewBlocks (peer block events) for Phase 2.
  */
 export class P2PProviderStrategy implements BlocksLoadingStrategy {
   readonly name: StrategyNames = StrategyNames.P2P;
   private readonly moduleName = 'blocks-queue';
 
-  // Active P2P block subscription (Phase 2), if any
   private _subscription?: Subscription;
+  private _isBlockProcessing = false;
 
   constructor(
     private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
-    private readonly queue: BlocksQueue<Block>,
-    _config?: unknown // no extra config needed; kept for factory symmetry
+    private readonly queue: BlocksQueue,
+    _config?: unknown
   ) {}
 
-  /**
-   * Phase 1: P2P batch catch-up to currentNetworkHeight.
-   * Phase 2: P2P real-time subscription until disconnect or stop().
-   */
   public async load(currentNetworkHeight: number): Promise<void> {
-    // Phase 1: catch-up via P2P GetData batches
     if (this.queue.lastHeight < currentNetworkHeight) {
       this.logger.verbose('P2P strategy: starting catch-up', {
         module: this.moduleName,
@@ -61,9 +52,7 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
       });
     }
 
-    // Phase 2: caught up — subscribe to P2P stream if not already active
     if (this._subscription) {
-      // Already subscribed — block until disconnect or stop()
       await this._subscription;
       return;
     }
@@ -76,10 +65,8 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
     await this.startP2PSubscription();
   }
 
-  /**
-   * Stop both catch-up and any active P2P subscription.
-   */
   public async stop(): Promise<void> {
+    this._isBlockProcessing = false;
     if (this._subscription) {
       try {
         this._subscription.unsubscribe();
@@ -88,41 +75,34 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
       }
       this._subscription = undefined;
     }
-
     this.logger.verbose('P2P strategy stopped', { module: this.moduleName });
   }
 
-  // ===== PHASE 1: P2P GetData catch-up =====
-
-  /**
-   * Fetch all blocks [queue.lastHeight+1 .. targetHeight] via P2P GetData.
-   * getManyBlocksByHeights uses:
-   *   - P2PTransport.getManyBlockHashesByHeights → ChainTracker local lookup O(1) per height
-   *   - P2PTransport.requestHexBlocks → GetData batches of 128 with hash→position mapping
-   */
   private async performCatchup(targetHeight: number): Promise<void> {
     const fromHeight = this.queue.lastHeight + 1;
     const heights: number[] = [];
     for (let h = fromHeight; h <= targetHeight; h++) heights.push(h);
 
-    const blocks = await this.blockchainProvider.getManyBlocksByHeights(
-      heights,
-      true, // useHex → P2P bytes path
-      undefined, // verbosity ignored for hex path
-      true // verifyMerkle
-    );
-
+    const raw = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+    const blocks: RawBlock[] = raw.filter(Boolean) as RawBlock[];
     await this.enqueueBlocks(blocks);
   }
-
-  // ===== PHASE 2: P2P real-time subscription =====
 
   private async startP2PSubscription(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settledWithError = false;
 
       this._subscription = this.blockchainProvider.subscribeToNewBlocks(
-        async (block: Block) => {
+        async (raw: RawBlock) => {
+          if (this._isBlockProcessing) {
+            this.logger.verbose('P2P strategy: block skipped (previous still processing)', {
+              module: this.moduleName,
+              args: { height: raw.height },
+            });
+            return;
+          }
+
+          this._isBlockProcessing = true;
           try {
             if (this.queue.isMaxHeightReached) return;
 
@@ -133,7 +113,7 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
               return;
             }
 
-            await this.enqueueBlock(block);
+            await this.enqueueBlock(raw);
           } catch (error) {
             this.logger.verbose('P2P strategy: block processing error', {
               module: this.moduleName,
@@ -143,10 +123,11 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
             this._subscription?.unsubscribe();
             this._subscription = undefined;
             reject(error);
+          } finally {
+            this._isBlockProcessing = false;
           }
         },
         (subscriptionError) => {
-          // Peer disconnected or transport error
           this.logger.verbose('P2P strategy: subscription error', {
             module: this.moduleName,
             args: { action: 'p2pError', error: subscriptionError },
@@ -162,14 +143,11 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
         }
       );
 
-      // Wait until unsubscribe() resolves or onError rejects
       this._subscription
         .then(() => {
           this._subscription = undefined;
           if (!settledWithError) {
-            this.logger.verbose('P2P subscription completed gracefully', {
-              module: this.moduleName,
-            });
+            this.logger.verbose('P2P subscription completed gracefully', { module: this.moduleName });
             resolve();
           }
         })
@@ -180,21 +158,18 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
     });
   }
 
-  // ===== SHARED HELPERS =====
-
-  private async enqueueBlock(block: Block): Promise<void> {
-    if (block.height <= this.queue.lastHeight) {
+  private async enqueueBlock(raw: RawBlock): Promise<void> {
+    if (raw.height <= this.queue.lastHeight) {
       this.logger.verbose('P2P strategy: skipping block with height ≤ lastHeight', {
         module: this.moduleName,
-        args: { blockHeight: block.height, lastHeight: this.queue.lastHeight },
+        args: { blockHeight: raw.height, lastHeight: this.queue.lastHeight },
       });
       return;
     }
-    // No try/catch — let errors propagate so supervisor resets the timer
-    await this.queue.enqueue(block);
+    await this.queue.enqueue(raw);
   }
 
-  private async enqueueBlocks(blocks: Block[]): Promise<void> {
+  private async enqueueBlocks(blocks: RawBlock[]): Promise<void> {
     blocks.sort((a, b) => a.height - b.height);
     for (const block of blocks) {
       await this.enqueueBlock(block);
