@@ -14,7 +14,7 @@ function createRawBlock(blockNumber: number, sizeBytes = 1000, hashSuffix = ''):
     transactions: [],
   };
   const bytes = encodeEvmBlockPayload(block as any);
-  return { hash, height: blockNumber, size: bytes.length, bytes };
+  return { hash, height: blockNumber, size: sizeBytes, bytes };
 }
 
 describe('BlocksQueue', () => {
@@ -63,6 +63,28 @@ describe('BlocksQueue', () => {
       await tinyQueue.enqueue(raw0);
       await tinyQueue.enqueue(raw1);
       await expect(tinyQueue.enqueue(raw2)).rejects.toThrow();
+    });
+
+    it('accepts one oversized block when the queue is empty', async () => {
+      const oversized = createRawBlock(0, 2);
+      const queue = new BlocksQueue({ ...defaultOpts, maxQueueSize: 1, blockSize: 1 });
+
+      expect(queue.isQueueOverloaded(oversized.size)).toBe(false);
+      await queue.enqueue(oversized);
+
+      expect(queue.length).toBe(1);
+      expect(queue.currentSize).toBe(oversized.size);
+      expect(queue.isQueueFull).toBe(true);
+      expect(await queue.getBatchUpToSize(1)).toEqual([oversized]);
+    });
+
+    it('rejects additional blocks when the queue is non-empty and the memory budget would be exceeded', async () => {
+      const queue = new BlocksQueue({ ...defaultOpts, maxQueueSize: 1, blockSize: 1 });
+
+      await queue.enqueue(createRawBlock(0, 2));
+
+      expect(queue.isQueueOverloaded(1)).toBe(true);
+      await expect(queue.enqueue(createRawBlock(1, 1))).rejects.toThrow('Would exceed memory limit');
     });
   });
 

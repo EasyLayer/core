@@ -74,6 +74,9 @@ impl NativeBlocksQueue {
 
   #[napi(js_name = "isQueueOverloaded")]
   pub fn is_queue_overloaded(&self, additional_size: f64) -> bool {
+    if self.current_block_count == 0 {
+      return false;
+    }
     self.size.saturating_add(additional_size.max(0.0) as u64) > self.max_queue_size
   }
 
@@ -250,7 +253,7 @@ impl NativeBlocksQueue {
     if self.last_height >= self.max_block_height {
       return Err(Error::from_reason(format!("Can't enqueue block. Max height reached: {}", self.max_block_height)));
     }
-    if self.size.saturating_add(total_block_size) > self.max_queue_size {
+    if self.current_block_count > 0 && self.size.saturating_add(total_block_size) > self.max_queue_size {
       return Err(Error::from_reason(format!(
         "Can't enqueue block. Would exceed memory limit: {}/{} bytes",
         self.size.saturating_add(total_block_size), self.max_queue_size
@@ -398,4 +401,46 @@ mod tests {
     assert_eq!(queue.get_last_height(), 10.0);
     assert!(queue.find_blocks(vec!["hash0".to_string()]).is_empty());
   }
+
+  #[test]
+  fn allows_single_oversized_block_when_queue_is_empty() {
+    let mut queue = NativeBlocksQueue::new(json!({
+      "lastHeight": -1,
+      "maxQueueSize": 10,
+      "blockSize": 10,
+      "maxBlockHeight": 100,
+      "plannerConfig": { "minSlots": 2, "maxSlots": 100 }
+    })).expect("queue");
+
+    assert!(!queue.is_queue_overloaded(20.0));
+
+    let bytes: Buffer = vec![1_u8; 20].into();
+    queue.enqueue_bytes("hash0".to_string(), 0.0, 20.0, bytes).expect("enqueue oversized");
+
+    assert_eq!(queue.get_length(), 1.0);
+    assert_eq!(queue.get_current_size(), 20.0);
+    assert!(queue.is_queue_full());
+    assert_eq!(queue.get_batch_up_to_size(10.0).len(), 1);
+  }
+
+  #[test]
+  fn rejects_additional_blocks_when_non_empty_queue_would_exceed_budget() {
+    let mut queue = NativeBlocksQueue::new(json!({
+      "lastHeight": -1,
+      "maxQueueSize": 10,
+      "blockSize": 10,
+      "maxBlockHeight": 100,
+      "plannerConfig": { "minSlots": 2, "maxSlots": 100 }
+    })).expect("queue");
+
+    let bytes: Buffer = vec![1_u8; 20].into();
+    queue.enqueue_bytes("hash0".to_string(), 0.0, 20.0, bytes).expect("enqueue oversized");
+
+    assert!(queue.is_queue_overloaded(1.0));
+
+    let next_bytes: Buffer = vec![2_u8; 1].into();
+    let err = queue.enqueue_bytes("hash1".to_string(), 1.0, 1.0, next_bytes).expect_err("second block should exceed budget");
+    assert!(err.reason.contains("Would exceed memory limit"));
+  }
+
 }

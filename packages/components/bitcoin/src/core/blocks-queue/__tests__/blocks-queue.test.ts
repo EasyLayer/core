@@ -116,6 +116,38 @@ describe('BlocksQueue', () => {
       expect(queue.isMaxHeightReached).toBe(true);
     });
 
+    it('accepts one oversized block when the queue is empty', async () => {
+      const oversized = createRawBlock(0, 2048);
+      const q = new BlocksQueue({
+        lastHeight: -1,
+        maxBlockHeight: Number.MAX_SAFE_INTEGER,
+        blockSize: 512,
+        maxQueueSize: 1024,
+      });
+
+      expect(q.isQueueOverloaded(oversized.size)).toBe(false);
+      await q.enqueue(oversized);
+
+      expect(q.length).toBe(1);
+      expect(q.currentSize).toBe(oversized.size);
+      expect(q.isQueueFull).toBe(true);
+      expect(await q.getBatchUpToSize(1024)).toEqual([oversized]);
+    });
+
+    it('rejects additional blocks when the queue is non-empty and the memory budget would be exceeded', async () => {
+      const q = new BlocksQueue({
+        lastHeight: -1,
+        maxBlockHeight: Number.MAX_SAFE_INTEGER,
+        blockSize: 512,
+        maxQueueSize: 1024,
+      });
+
+      await q.enqueue(createRawBlock(0, 2048));
+
+      expect(q.isQueueOverloaded(1)).toBe(true);
+      await expect(q.enqueue(createRawBlock(1, 1))).rejects.toThrow('Would exceed memory limit');
+    });
+
     it('native path calls validateEnqueue then enqueueBytes', async () => {
       const calls: string[] = [];
       let receivedHash = '';

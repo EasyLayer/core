@@ -208,6 +208,7 @@ export class BlocksQueue {
 
   public isQueueOverloaded(additionalSize: number): boolean {
     if (this.native) return this.native.isQueueOverloaded(additionalSize);
+    if (this.currentBlockCount === 0) return false;
     const projectedSize = this.currentSize + additionalSize;
     return projectedSize > this.maxQueueSize;
   }
@@ -327,7 +328,7 @@ export class BlocksQueue {
         }
       }
 
-      if (this._size + totalBlockSize > this._maxQueueSize) {
+      if (this.currentBlockCount > 0 && this._size + totalBlockSize > this._maxQueueSize) {
         throw new Error(
           `Can't enqueue block. Would exceed memory limit: ${this._size + totalBlockSize}/${this._maxQueueSize} bytes`
         );

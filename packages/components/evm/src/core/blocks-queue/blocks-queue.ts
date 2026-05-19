@@ -140,6 +140,7 @@ export class BlocksQueue<TBlock = RawBlock> {
 
   isQueueOverloaded(additionalSize: number): boolean {
     if (this.native) return this.native.isQueueOverloaded(additionalSize);
+    if (this.currentBlockCount === 0) return false;
     return this._size + additionalSize > this._maxQueueSize;
   }
 
@@ -208,7 +209,7 @@ export class BlocksQueue<TBlock = RawBlock> {
         }
       }
 
-      if (this._size + totalBlockSize > this._maxQueueSize) {
+      if (this.currentBlockCount > 0 && this._size + totalBlockSize > this._maxQueueSize) {
         throw new Error(
           `Can't enqueue block. Would exceed memory limit: ${this._size + totalBlockSize}/${this._maxQueueSize} bytes`
         );
