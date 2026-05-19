@@ -1,7 +1,6 @@
 import { Injectable, OnModuleDestroy, Logger, OnModuleInit } from '@nestjs/common';
 import { BlockchainProviderService } from '../../blockchain-provider';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
-import type { Block } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
 import {
   RpcProviderStrategy,
@@ -55,7 +54,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
     this._isLoading = false;
   }
 
-  public async startBlocksLoading(queue: BlocksQueue<Block>): Promise<void> {
+  public async startBlocksLoading(queue: BlocksQueue): Promise<void> {
     // NOTE: We use this to make sure that
     // method startBlocksLoading() is executed only once in its entire life.
     if (this._isLoading) {
@@ -79,17 +78,33 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
 
     this._timer = exponentialIntervalAsync(
       async (resetInterval) => {
+        let currentNetworkHeight: number;
+
         try {
-          // IMPORTANT: every exponential tick we fetch current blockchain network height
-          const currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeightFromNetwork();
+          currentNetworkHeight = await this.blockchainProviderService.getCurrentBlockHeightFromNetwork();
           this.logger.verbose('Fetch blockchain network height', {
             module: this.moduleName,
             args: { queueLastHeight: queue.lastHeight, currentNetworkHeight },
           });
+        } catch (error) {
+          this.logger.verbose('Loading blocks on pause', {
+            module: this.moduleName,
+            args: { action: 'getHeight', error },
+          });
+          resetInterval();
+          return;
+        }
 
+        try {
           await this.mempoolService.refresh(currentNetworkHeight);
+        } catch (mempoolError) {
+          this.logger.verbose('Mempool refresh error (block loading continues)', {
+            module: this.moduleName,
+            args: { error: (mempoolError as any)?.message },
+          });
+        }
 
-          // Get the strategy that should work now
+        try {
           this._currentStrategy = this.getCurrentStrategy();
 
           this.logger.verbose('Loading strategy created', {
@@ -97,21 +112,13 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
             args: { strategy: this._currentStrategy?.name },
           });
 
-          // IMPORTANT: We expect that strategy load all blocks to currentNetworkHeight for one method call
           await this._currentStrategy?.load(currentNetworkHeight);
-
-          // SUCCESS CASE: Don't reset interval, let it continue with maxInterval (monitoring mode)
-          // Next attempt will be in ~monitoringInterval ms (half of block time)
         } catch (error) {
           this.logger.verbose('Loading blocks on pause', {
             module: this.moduleName,
             args: { action: 'load', error },
           });
           await this._currentStrategy?.stop();
-
-          // ERROR CASE: Reset interval to retry immediately
-          // because error means we didn't load blocks to currentHeight so we need to try again ASAP
-          // Next attempt will be exponential: 1000ms -> 10000ms -> 100000ms -> up to maxInterval
           resetInterval();
         }
       },
@@ -128,7 +135,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
   }
 
   // Factory method to create strategies
-  private createStrategies(queue: BlocksQueue<Block>): void {
+  private createStrategies(queue: BlocksQueue): void {
     const strategyOptions = {
       maxRpcReplyBytes: this.config.queueLoaderRequestBlocksBatchSize,
       basePreloadCount: this.config.basePreloadCount,

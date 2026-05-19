@@ -198,4 +198,108 @@ describe('exponentialIntervalAsync', () => {
 
     timer.destroy();
   });
+
+  // --- New tests for documented edge cases ---
+
+  describe('reset() semantics', () => {
+    it('after reset() inside fn, next tick fires at interval*multiplier, not interval', async () => {
+      // interval=100, multiplier=2 → after reset(), currentInterval becomes 100*2=200ms
+      // (not 100ms, because multiplication happens after fn returns)
+      const callTimes: number[] = [];
+      let callReset: (() => void) | null = null;
+
+      const asyncFunc = jest.fn().mockImplementation(async (reset: () => void) => {
+        callTimes.push(Date.now());
+        if (callReset === null) {
+          // Save reset to call after fn returns (simulate: fn calls reset then returns)
+          reset();
+        }
+        callReset = reset;
+      });
+
+      const options = { interval: 100, multiplier: 2, maxInterval: 1000 };
+      const timer = exponentialIntervalAsync(asyncFunc, options);
+
+      // 1st tick at 100ms — fn calls reset(), currentInterval resets to 100, then becomes 100*2=200
+      jest.advanceTimersByTime(100);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1);
+
+      // 150ms after 1st tick: next tick NOT yet fired (it's at 200ms, not 100ms)
+      jest.advanceTimersByTime(150);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1);
+
+      // 50ms more (total 200ms after 1st tick): 2nd tick fires
+      jest.advanceTimersByTime(50);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(2);
+
+      timer.destroy();
+    });
+  });
+
+  describe('destroy() during in-flight fn', () => {
+    it('destroy() during in-flight fn: current call completes, no next tick scheduled', async () => {
+      let resolveInFlight!: () => void;
+      let destroyCalled = false;
+
+      const asyncFunc = jest.fn().mockImplementation(async () => {
+        // Simulate a slow async operation
+        await new Promise<void>((resolve) => {
+          resolveInFlight = resolve;
+        });
+      });
+
+      const options = { interval: 100, multiplier: 2, maxInterval: 1000 };
+      const timer = exponentialIntervalAsync(asyncFunc, options);
+
+      // Trigger first tick
+      jest.advanceTimersByTime(100);
+      // fn is now in-flight (awaiting the inner promise)
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1);
+
+      // Call destroy while fn is still running
+      timer.destroy();
+      destroyCalled = true;
+
+      // Complete the in-flight operation
+      resolveInFlight();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // No second tick should be scheduled after fn completes
+      jest.advanceTimersByTime(10000);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1); // still only 1 call
+      expect(destroyCalled).toBe(true);
+    });
+  });
+
+  describe('immediate=true timing', () => {
+    it('immediate=true: first tick at 0ms, second tick at interval*multiplier', async () => {
+      // interval=100, multiplier=2 → second tick at 200ms (not 100ms)
+      const asyncFunc = jest.fn().mockResolvedValue(undefined);
+      const options = { interval: 100, multiplier: 2, maxInterval: 1000, immediate: true };
+
+      const timer = exponentialIntervalAsync(asyncFunc, options);
+
+      // First tick fires immediately (microtask)
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1);
+
+      // At 150ms: second tick NOT yet fired (it's at 200ms = interval*multiplier)
+      jest.advanceTimersByTime(150);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(1);
+
+      // At 200ms total: second tick fires
+      jest.advanceTimersByTime(50);
+      await Promise.resolve();
+      expect(asyncFunc).toHaveBeenCalledTimes(2);
+
+      timer.destroy();
+    });
+  });
 });

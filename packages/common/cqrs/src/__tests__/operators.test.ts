@@ -1,6 +1,6 @@
 import { of, lastValueFrom } from 'rxjs';
 import { take, toArray, defaultIfEmpty } from 'rxjs/operators';
-import { executeWithRetry, executeWithRollback, ofType } from '../operators';
+import { executeWithRetry, executeWithRollback, executeWithSkip, ofType } from '../operators';
 import { BasicEvent } from '../basic-event';
 
 class Ev extends BasicEvent {}
@@ -28,6 +28,31 @@ describe('Operators', () => {
     expect(attempts).toBe(3);
 
     jest.useRealTimers();
+  });
+
+
+
+  it('executeWithSkip drops failed payload without completing the outer stream', async () => {
+    const events = [
+      new Ev({ aggregateId: 'a', requestId: 'r1', blockHeight: 1 }, {}),
+      new Ev({ aggregateId: 'a', requestId: 'r2', blockHeight: 2 }, {}),
+    ];
+    const seen: string[] = [];
+    const out = await lastValueFrom(
+      of(...events).pipe(
+        executeWithSkip({
+          event: Ev,
+          command: async (event) => {
+            if (event.requestId === 'r1') throw new Error('skip-me');
+            seen.push(event.requestId);
+          },
+        }),
+        toArray()
+      )
+    );
+
+    expect(seen).toEqual(['r2']);
+    expect(out.map((event) => event.requestId)).toEqual(['r2']);
   });
 
   it('executeWithRollback runs rollback and eventually errors after limit', async () => {

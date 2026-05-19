@@ -1,4 +1,4 @@
-import type { NativeBitcoinBindings } from './interfaces';
+import type { NativeBitcoinBindings, NativeMerkleVerifier } from './interfaces';
 
 let bindings: NativeBitcoinBindings | undefined;
 let loadError: Error | undefined;

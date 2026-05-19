@@ -38,7 +38,9 @@ export class AppLogger implements IAppLogger {
       info: (m, meta) => wrap('info', m, meta, false),
       warn: (m, meta) => wrap('warn', m, meta, false),
       error: (m, meta) => wrap('error', m, meta, true),
-      fatal: (m, meta) => wrap('fatal', m, meta, false),
+      // fatal gets withCtx=true: when a process crashes, knowing the requestId (which
+      // block/batch triggered the fatal) is critical for post-mortem debugging.
+      fatal: (m, meta) => wrap('fatal', m, meta, true),
       child: (sub) => this.child(`${component}:${sub}`),
     };
   }
@@ -59,7 +61,8 @@ export class AppLogger implements IAppLogger {
     this.do('error', m, meta, true);
   }
   fatal(m: string, meta?: LogMeta) {
-    this.do('fatal', m, meta, false);
+    // withCtx=true: fatal errors benefit from requestId for post-mortem correlation.
+    this.do('fatal', m, meta, true);
   }
 
   private do(level: LogLevel, message: string, meta?: LogMeta, withCtx = false) {

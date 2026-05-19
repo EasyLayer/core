@@ -42,6 +42,28 @@ export class BlockSizeCalculator {
   static calculateSizeFromBlock(block: UniversalBlock, networkConfig: NetworkConfig): BlockSizeResult {
     if (block.hex) return this.calculateSizeFromHex(block.hex, networkConfig);
 
+    // Bitcoin Core always returns size/strippedsize/weight at verbosity >= 1.
+    // size already includes all witness data — no need to sum from transactions.
+    if (
+      typeof block.size === 'number' &&
+      block.size > 0 &&
+      typeof block.strippedsize === 'number' &&
+      typeof block.weight === 'number'
+    ) {
+      const vsize = Math.ceil(block.weight / 4);
+      const witnessSize =
+        networkConfig.hasSegWit && block.size > block.strippedsize ? block.size - block.strippedsize : undefined;
+      return {
+        size: block.size,
+        strippedSize: block.strippedsize,
+        weight: block.weight,
+        vsize,
+        witnessSize,
+        headerSize: 80,
+        transactionsSize: block.size - 80,
+      };
+    }
+
     if (block.tx && Array.isArray(block.tx) && block.tx.length > 0) {
       return this.calculateSizeFromTransactions(block.tx as (string | UniversalTransaction)[], networkConfig);
     }
@@ -141,9 +163,10 @@ export class BlockSizeCalculator {
 
     for (const tx of transactions) {
       if (typeof tx === 'string') {
-        totalSize += 250;
-        totalStrippedSize += 200;
-        totalWeight += 1000;
+        throw new Error(
+          `calculateSizeFromTransactions: tx list contains string IDs but block has no size/weight fields. ` +
+            `Provider must return block-level size fields with verbosity>=1 or use hex path.`
+        );
       } else {
         const txSizes = this.calculateTransactionSize(tx, networkConfig);
         totalSize += txSizes.size;

@@ -1,38 +1,20 @@
-import { BlockchainProviderService, Block } from '../../../../blockchain-provider';
 import { P2PProviderStrategy } from '../p2p-provider.strategy';
 import { BlocksQueue } from '../../../blocks-queue';
+import type { BlockchainProviderService } from '../../../../blockchain-provider';
+import type { RawBlock } from '../../../interfaces';
 
-function createTestBlock(height: number, hash: string, size: number): Block {
-  return {
-    height,
-    hash,
-    tx: [],
-    size,
-    strippedsize: size,
-    sizeWithoutWitnesses: size,
-    weight: size * 4,
-    vsize: size,
-    witnessSize: undefined,
-    transactionsSize: size - 80,
-    version: 1,
-    versionHex: '00000001',
-    merkleroot: '0'.repeat(64),
-    time: Date.now(),
-    nonce: 0,
-    bits: '0'.repeat(8),
-    difficulty: '1',
-    nTx: 0,
-  } as Block;
+function createRawBlock(height: number, hash: string, size: number): RawBlock {
+  return { hash, height, size, bytes: Buffer.alloc(size) };
 }
 
 describe('P2PProviderStrategy', () => {
   let strategy: P2PProviderStrategy;
   let mockLogger: jest.Mocked<any>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
-  let queue: BlocksQueue<Block>;
+  let queue: BlocksQueue;
 
   beforeEach(() => {
-    queue = new BlocksQueue<Block>({
+    queue = new BlocksQueue({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
       blockSize: 1000,
@@ -48,7 +30,7 @@ describe('P2PProviderStrategy', () => {
     } as any;
 
     mockProvider = {
-      getManyBlocksByHeights: jest.fn(),
+      getManyBlocksRawByHeights: jest.fn(),
       subscribeToNewBlocks: jest.fn(),
     } as any;
 
@@ -58,8 +40,6 @@ describe('P2PProviderStrategy', () => {
   afterEach(() => {
     jest.clearAllMocks();
   });
-
-  // ===== stop() =====
 
   describe('stop()', () => {
     it('resolves immediately when no subscription is active', async () => {
@@ -83,15 +63,12 @@ describe('P2PProviderStrategy', () => {
     });
   });
 
-  // ===== Phase 1: catch-up =====
-
   describe('load() - Phase 1: P2P catch-up', () => {
-    it('fetches blocks via getManyBlocksByHeights with useHex=true and verifyMerkle=true', async () => {
+    it('fetches blocks via getManyBlocksRawByHeights and enqueues them', async () => {
       (queue as any)._lastHeight = 0;
-      const blocks = [createTestBlock(1, 'hash1', 1000)];
-      mockProvider.getManyBlocksByHeights.mockResolvedValue(blocks);
+      const raw = createRawBlock(1, 'hash1', 1000);
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue([raw]);
 
-      // After catch-up, strategy tries to subscribe — keep it simple by mocking subscription
       let resolveSubscription!: () => void;
       const subscriptionPromise = new Promise<void>((res) => {
         resolveSubscription = res;
@@ -104,12 +81,7 @@ describe('P2PProviderStrategy', () => {
       resolveSubscription();
       await loadPromise;
 
-      expect(mockProvider.getManyBlocksByHeights).toHaveBeenCalledWith(
-        [1],
-        true,
-        undefined,
-        true
-      );
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledWith([1]);
       expect(queue.lastHeight).toBe(1);
     });
 
@@ -128,24 +100,22 @@ describe('P2PProviderStrategy', () => {
       resolveSubscription();
       await loadPromise;
 
-      expect(mockProvider.getManyBlocksByHeights).not.toHaveBeenCalled();
+      expect(mockProvider.getManyBlocksRawByHeights).not.toHaveBeenCalled();
     });
 
     it('propagates catch-up errors so supervisor can reset timer', async () => {
       (queue as any)._lastHeight = 0;
-      mockProvider.getManyBlocksByHeights.mockRejectedValue(new Error('P2P fetch failed'));
+      mockProvider.getManyBlocksRawByHeights.mockRejectedValue(new Error('P2P fetch failed'));
 
       await expect(strategy.load(1)).rejects.toThrow('P2P fetch failed');
     });
   });
 
-  // ===== Phase 2: P2P subscription =====
-
   describe('load() - Phase 2: P2P subscription', () => {
-    it('subscribes after catch-up and enqueues incoming blocks', async () => {
+    it('subscribes after catch-up and enqueues incoming RawBlocks', async () => {
       (queue as any)._lastHeight = 5;
 
-      let blockCallback: ((b: Block) => void) | undefined;
+      let blockCallback: ((raw: RawBlock) => void) | undefined;
       let resolveSubscription!: () => void;
       const subscriptionPromise = new Promise<void>((res) => {
         resolveSubscription = res;
@@ -160,8 +130,7 @@ describe('P2PProviderStrategy', () => {
       const loadPromise = strategy.load(5);
       await new Promise((r) => setImmediate(r));
 
-      const newBlock = createTestBlock(6, 'hash6', 1000);
-      await blockCallback!(newBlock);
+      await blockCallback!(createRawBlock(6, 'hash6', 1000));
 
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(6);
@@ -192,7 +161,7 @@ describe('P2PProviderStrategy', () => {
     it('rejects when queue is full during subscription', async () => {
       (queue as any)._lastHeight = 5;
 
-      let blockCallback: ((b: Block) => void) | undefined;
+      let blockCallback: ((raw: RawBlock) => void) | undefined;
       const subscriptionPromise = new Promise<void>(() => {}) as any;
       subscriptionPromise.unsubscribe = jest.fn();
 
@@ -205,7 +174,7 @@ describe('P2PProviderStrategy', () => {
       await new Promise((r) => setImmediate(r));
 
       Object.defineProperty(queue, 'isQueueFull', { get: () => true, configurable: true });
-      await blockCallback!(createTestBlock(6, 'hash6', 1000));
+      await blockCallback!(createRawBlock(6, 'hash6', 1000));
 
       await expect(loadPromise).rejects.toThrow('The queue is full');
     });
@@ -213,7 +182,7 @@ describe('P2PProviderStrategy', () => {
     it('skips blocks with height ≤ lastHeight in subscription', async () => {
       (queue as any)._lastHeight = 5;
 
-      let blockCallback: ((b: Block) => void) | undefined;
+      let blockCallback: ((raw: RawBlock) => void) | undefined;
       let resolveSubscription!: () => void;
       const subscriptionPromise = new Promise<void>((res) => {
         resolveSubscription = res;
@@ -228,8 +197,7 @@ describe('P2PProviderStrategy', () => {
       const loadPromise = strategy.load(5);
       await new Promise((r) => setImmediate(r));
 
-      // Old block — should be skipped
-      await blockCallback!(createTestBlock(3, 'oldHash', 1000));
+      await blockCallback!(createRawBlock(3, 'oldHash', 1000));
       expect(queue.length).toBe(0);
       expect(mockLogger.verbose).toHaveBeenCalledWith(
         'P2P strategy: skipping block with height ≤ lastHeight',

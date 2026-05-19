@@ -1,6 +1,7 @@
 import type { Logger } from '@nestjs/common';
 import type { BlockchainProviderService } from '../../../blockchain-provider/blockchain-provider.service';
 import type { Block } from '../../../blockchain-provider/components/block.interfaces';
+import { encodeEvmBlockPayload } from '../../../blockchain-provider/codecs/block-payload-codec';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
@@ -18,7 +19,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
   constructor(
     private readonly log: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
-    private readonly queue: BlocksQueue<Block>,
+    private readonly queue: BlocksQueue,
     config: {
       maxRequestBlocksBatchSize: number;
       basePreloadCount: number;
@@ -42,10 +43,6 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
 
       if (this._preloadedItemsQueue.length === 0) {
         await this.preloadBlocksWithTransactions(currentNetworkHeight);
-      }
-
-      if (this.queue.isQueueOverloaded(this._maxRequestBlocksBatchSize)) {
-        throw new Error('The queue is overloaded, waiting before retry');
       }
 
       if (this._preloadedItemsQueue.length > 0) {
@@ -156,6 +153,13 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     }
   }
 
+  private getRequiredBlockSize(block: Block): number {
+    if (typeof block.size !== 'number' || !Number.isFinite(block.size) || block.size < 0) {
+      throw new Error(`EVM block ${block.blockNumber} (${block.hash}) is missing required size`);
+    }
+    return block.size;
+  }
+
   private async enqueueBlocks(blocks: Block[]): Promise<void> {
     const sorted = [...blocks].sort((a, b) => a.blockNumber - b.blockNumber);
     for (const block of sorted) {
@@ -163,7 +167,13 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
         this.log.debug('Skipping block below lastHeight', { args: { blockNumber: block.blockNumber } });
         continue;
       }
-      await this.queue.enqueue(block);
+      const bytes = encodeEvmBlockPayload(block);
+      await this.queue.enqueue({
+        hash: block.hash,
+        height: block.blockNumber,
+        size: this.getRequiredBlockSize(block),
+        bytes,
+      });
     }
   }
 }

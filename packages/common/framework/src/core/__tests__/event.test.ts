@@ -45,6 +45,14 @@ describe('event factory', () => {
     expect(secondConstructor).not.toBe(firstConstructor);
   });
 
+
+
+  it('rejects invalid dynamic event names', () => {
+    expect(() => makeNamedEventCtor('bad-name')).toThrow('Invalid eventName');
+    expect(() => makeNamedEventCtor('__proto__')).toThrow('Invalid eventName');
+    expect(() => makeNamedEventCtor('constructor')).toThrow('Invalid eventName');
+  });
+
   it('constructs an instance that is instance of BasicEvent and preserves payload identity', () => {
     const eventName = 'CartUpdated';
     const EventConstructor = makeNamedEventCtor(eventName);

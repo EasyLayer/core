@@ -8,9 +8,6 @@ import { Actions } from '../../../core';
 import { buildQuery } from '../../build-query';
 
 // -- helpers ------------------------------------------------------------------
-function delay(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 function normalize(raw: unknown): Message | null {
   if (!raw) return null;
   if (typeof raw === 'string') {
@@ -23,12 +20,20 @@ function normalize(raw: unknown): Message | null {
   if (typeof raw === 'object') return raw as Message;
   return null;
 }
+
 function assertIpcParentBinding(child: ChildProcess) {
   const p: any = process;
   if (p && p.channel) throw new Error('IPC parent: running inside a child; use ipc-child transport here');
   if (!child || typeof child?.send !== 'function') throw new Error('IPC parent: child.send is not available');
-  if ((child as any).channel == null)
+  if ((child as any).channel == null) {
     throw new Error('IPC parent: child has no IPC channel (stdio must include "ipc")');
+  }
+}
+
+interface OnlineWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 export interface IpcParentOptions {
@@ -69,6 +74,8 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
   private ackBuffer: { id: string; payload: OutboxStreamAckPayload } | null = null;
   private currentBatchCorrelationId: string | null = null;
 
+  private readonly onlineWaiters = new Set<OnlineWaiter>();
+
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
 
@@ -84,6 +91,7 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     this.opts.child.on('message', this.childMessageHandler);
     this.opts.child.once('exit', () => {
       this.online = false;
+      this.rejectOnlineWaiters(new Error('IPC parent: child process exited'));
       this.log.error('IPC parent: child process exited', { module: 'network-transport' });
     });
     this.startHeartbeat();
@@ -95,6 +103,9 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
       this.opts.child.off('message', this.childMessageHandler);
     } catch {}
     this.stopHeartbeat();
+
+    this.rejectOnlineWaiters(new Error('IPC parent: transport destroyed'));
+
     if (this.pendingAck) {
       clearTimeout(this.pendingAck.timer);
       this.pendingAck.reject(new Error('IPC parent: transport destroyed'));
@@ -112,21 +123,46 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
   }
 
   async waitForOnline(deadlineMs = this.opts.timeouts?.onlineMs ?? 2_000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < deadlineMs) {
-      if (this.isOnline()) return;
-      this.heartbeatReset?.();
-      await delay(1000);
-    }
-    throw new Error(`${this.kind.toUpperCase()}: peer is offline (no valid Pong)`);
+    if (this.isOnline()) return;
+
+    // Nudge heartbeat: reset() resets the internal interval counter, but may
+    // not cancel an already pending timer in the interval implementation.
+    this.heartbeatReset?.();
+
+    return new Promise<void>((resolve, reject) => {
+      const waiter: OnlineWaiter = {
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          this.onlineWaiters.delete(waiter);
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(waiter.timer);
+          this.onlineWaiters.delete(waiter);
+          reject(error);
+        },
+        timer: setTimeout(
+          () => {
+            waiter.reject(new Error(`${this.kind.toUpperCase()}: peer is offline (no valid Pong)`));
+          },
+          Math.max(1, deadlineMs)
+        ),
+      };
+
+      this.onlineWaiters.add(waiter);
+
+      // Avoid a race where Pong arrives between the first isOnline() check and
+      // registering the waiter.
+      if (this.isOnline()) waiter.resolve();
+    });
   }
 
   async send(msg: Message | string): Promise<void> {
-    // Always ensure correlationId for object messages
+    // Always ensure correlationId for object messages.
     if (typeof msg === 'object') {
       if (!msg.correlationId) (msg as any).correlationId = randomUUID();
 
-      // Track correlationId only for batches to pair with waitForAck()
+      // Track correlationId only for batches to pair with waitForAck().
       if (msg.action === Actions.OutboxStreamBatch) {
         this.currentBatchCorrelationId = (msg as any).correlationId!;
       }
@@ -153,8 +189,11 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     }
   }
 
-  async waitForAck(deadlineMs = this.opts.timeouts?.ackMs ?? 2_000): Promise<OutboxStreamAckPayload> {
-    const id = this.currentBatchCorrelationId;
+  async waitForAck(
+    deadlineMs = this.opts.timeouts?.ackMs ?? 2_000,
+    correlationId?: string
+  ): Promise<OutboxStreamAckPayload> {
+    const id = correlationId ?? this.currentBatchCorrelationId;
     if (!id) throw new Error('IPC parent: waitForAck called without a preceding batch send');
 
     if (this.ackBuffer && this.ackBuffer.id === id) {
@@ -187,7 +226,7 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
 
     switch (msg.action) {
       case Actions.Ping: {
-        // Not expected from child; still reply Pong defensively
+        // Not expected from child; still reply Pong defensively.
         await this.send({
           action: Actions.Pong,
           correlationId: msg.correlationId || randomUUID(),
@@ -202,6 +241,7 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
         if (ok) {
           this.lastPongAt = Date.now();
           this.online = true;
+          this.notifyOnlineWaiters();
           this.log.verbose('IPC parent pong accepted, peer online', {
             module: 'network-transport',
           });
@@ -222,9 +262,9 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
           const { resolve } = this.pendingAck;
           this.pendingAck = null;
           this.currentBatchCorrelationId = null;
-          resolve(ack);
+          resolve({ ...ack, correlationId: ack.correlationId ?? id });
         } else if (!this.pendingAck && this.currentBatchCorrelationId === id) {
-          this.ackBuffer = { id, payload: ack };
+          this.ackBuffer = { id, payload: { ...ack, correlationId: ack.correlationId ?? id } };
         }
         return;
       }
@@ -255,6 +295,21 @@ export class IpcParentTransportService implements TransportPort, OnModuleDestroy
     } catch (e: any) {
       const resp: Message = { ...base, payload: { ok: false, err: String(e?.message ?? e) } } as any;
       await this.send(resp);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Online waiters
+  // --------------------------------------------------------------------------
+  private notifyOnlineWaiters(): void {
+    for (const waiter of Array.from(this.onlineWaiters)) {
+      waiter.resolve();
+    }
+  }
+
+  private rejectOnlineWaiters(error: Error): void {
+    for (const waiter of Array.from(this.onlineWaiters)) {
+      waiter.reject(error);
     }
   }
 

@@ -1,5 +1,12 @@
 import type { Block, MempoolTxMetadata } from '../blockchain-provider';
 
+export interface RawBlock {
+  hash: string;
+  height: number;
+  size: number;
+  bytes: Buffer;
+}
+
 export interface BlocksCommandExecutor {
   handleBatch({ batch, requestId }: { batch: Block[]; requestId: string }): Promise<void>;
 }

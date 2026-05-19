@@ -57,6 +57,18 @@ function matchAdapter(adapters: SnapshotAdapters | undefined, path: string, key:
   return adapters[path] ?? adapters[key];
 }
 
+const FORBIDDEN_SNAPSHOT_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function assertValidAggregateId(aggregateId: string): void {
+  if (!aggregateId) throw new Error('aggregateId is required');
+  if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(aggregateId) || aggregateId.length > 60) {
+    throw new Error(
+      `aggregateId "${aggregateId}" contains invalid characters or exceeds 60 chars. ` +
+        `Only [a-zA-Z][a-zA-Z0-9_-]* is allowed (must start with a letter).`
+    );
+  }
+}
+
 function reviveObjectDeepWithAdapters(input: any, adapters?: SnapshotAdapters): any {
   const pathStack: string[] = [];
 
@@ -86,6 +98,7 @@ function reviveObjectDeepWithAdapters(input: any, adapters?: SnapshotAdapters): 
         }
         const out: any = {};
         for (const k of Object.keys(value)) {
+          if (FORBIDDEN_SNAPSHOT_KEYS.has(k)) continue;
           out[k] = walk((value as any)[k], k);
         }
         return out;
@@ -133,6 +146,7 @@ function serializeObjectDeep(input: any, adapters?: SnapshotAdapters): any {
         }
         const out: any = {};
         for (const k of Object.keys(value)) {
+          if (FORBIDDEN_SNAPSHOT_KEYS.has(k)) continue;
           const v = walk((value as any)[k], k);
           if (v !== undefined) out[k] = v;
         }
@@ -166,7 +180,11 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
   private _allowPruning: boolean = false;
 
   constructor(aggregateId: string, lastBlockHeight: number, options?: AggregateOptions) {
-    if (!aggregateId) throw new Error('aggregateId is required');
+    // Early validation: aggregateId is used directly as a SQL table name in all storage adapters.
+    // Rejecting invalid values here surfaces the error at model creation time,
+    // not at the first DB write which is harder to trace.
+    assertValidAggregateId(aggregateId);
+
     this._aggregateId = aggregateId;
     this._lastBlockHeight = lastBlockHeight;
     this._version = 0;
@@ -246,9 +264,12 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
   /**
    * Get events that need to be saved to database but haven't been saved yet.
    * These are events added via apply() but not yet persisted.
+   *
+   * This returns a readonly live view of the internal unsaved queue. It avoids
+   * allocating on every read; callers that cross an async boundary or need a
+   * stable snapshot must copy explicitly at that boundary.
    */
-  public getUnsavedEvents(): E[] {
-    // All events in INTERNAL_EVENTS are unsaved until markEventsAsSaved() is called
+  public getUnsavedEvents(): readonly E[] {
     return this[INTERNAL_EVENTS];
   }
 
@@ -337,6 +358,18 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
         this._version++;
         this._versionsFromSnapshot++;
         this._lastBlockHeight = event.blockHeight ?? this._lastBlockHeight;
+      } else {
+        // Programming error: every event applied to an aggregate must have a matching
+        // `on<EventName>` method. Without it the aggregate version does not advance
+        // and state reconstruction from history will produce an inconsistent aggregate.
+        // If you intentionally want to queue an event without applying state, use
+        // apply(event, { skipHandler: true }) — this bypasses handler lookup entirely.
+        const eventName = this.getEventName(event);
+        throw new Error(
+          `AggregateRoot "${this._aggregateId}" has no handler for event "${eventName}". ` +
+            `Add an "on${eventName}(event: ${eventName}): void" method to the aggregate class, ` +
+            `or pass { skipHandler: true } if applying without state update is intentional.`
+        );
       }
     }
   }
@@ -378,6 +411,7 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
     if (!aggregateId) {
       throw new Error('aggregate Id is missed');
     }
+    assertValidAggregateId(aggregateId);
 
     if (blockHeight == null) {
       throw new Error('lastBlockHeight is missing');
@@ -451,8 +485,8 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
     for (const key of allKeys) {
       const keyString = key.toString();
 
-      // Skip excluded system fields
-      if (excludedFields.includes(keyString)) {
+      // Skip excluded system fields and prototype-pollution keys.
+      if (excludedFields.includes(keyString) || FORBIDDEN_SNAPSHOT_KEYS.has(keyString)) {
         continue;
       }
 

@@ -1,3 +1,11 @@
+## [1.3.3](https://github.com/EasyLayer/core/compare/v1.3.2...v1.3.3) (2026-05-12)
+
+
+### Bug Fixes
+
+* **cqrs, eventstore:** correctness and reliability hardening; ([848bf9a](https://github.com/EasyLayer/core/commit/848bf9a52b952bcbe9e4c2ecf7dd1b2889cd6ac2))
+* **logger, network-trasnport, framework:** correctness and reliability hardening; ([68edd4d](https://github.com/EasyLayer/core/commit/68edd4dba0770a99cf9961d90936e2963ba35dde))
+
 ## [1.3.2](https://github.com/EasyLayer/core/compare/v1.3.1...v1.3.2) (2026-05-04)
 
 ## [1.3.1](https://github.com/EasyLayer/core/compare/v1.2.1...v1.3.1) (2026-05-01)

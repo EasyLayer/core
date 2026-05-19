@@ -1,14 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Injectable, Inject, OnModuleDestroy, Logger } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
-import { Block } from '../../blockchain-provider/components/index';
+import { Block, BlockchainProviderService } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
-import type { BlocksCommandExecutor } from '../interfaces';
+import type { BlocksCommandExecutor, RawBlock } from '../interfaces';
 
 @Injectable()
 export class BlocksQueueIteratorService implements OnModuleDestroy {
   log = new Logger(BlocksQueueIteratorService.name);
-  private _queue!: BlocksQueue<Block>;
+  private _queue!: BlocksQueue;
   private _isIterating: boolean = false;
   private batchProcessedPromise!: Promise<void>;
   protected _resolveNextBatch!: () => void;
@@ -19,6 +19,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   constructor(
     @Inject('BlocksCommandExecutor')
     private readonly blocksCommandExecutor: BlocksCommandExecutor,
+    private readonly blockchainProvider: BlockchainProviderService,
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
@@ -53,7 +54,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
   /**
    * Starts iterating over the block queue and processing blocks.
    */
-  public async startQueueIterating(queue: BlocksQueue<Block>): Promise<void> {
+  public async startQueueIterating(queue: BlocksQueue): Promise<void> {
     this.log.debug('Start blocks iterating', {
       args: { initialQueueLength: queue.length },
     });
@@ -144,9 +145,13 @@ export class BlocksQueueIteratorService implements OnModuleDestroy {
     // Maximum batch size in bytes - this is our memory/processing limit
     const maxBatchSize = this._blocksBatchSize;
 
-    // Get all available blocks up to the maximum size limit
-    // This ensures we always make progress while respecting resource constraints
-    const batch: Block[] = await this._queue.getBatchUpToSize(maxBatchSize);
+    // This is a peek: queue-owned payload is released only after confirmProcessedBatch().
+    const rawBatch: RawBlock[] = await this._queue.getBatchUpToSize(maxBatchSize);
+    const blocks: Block[] = [];
+    for (const raw of rawBatch) {
+      blocks.push(await this.blockchainProvider.parseBlock(raw.bytes, raw.height, this.config.verifyTrie ?? false));
+    }
+    const batch = blocks;
 
     this.log.debug('Fetched batch for processing', {
       args: {

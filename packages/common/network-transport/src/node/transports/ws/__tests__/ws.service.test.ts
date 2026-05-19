@@ -106,10 +106,39 @@ describe('WsTransportService minimal unit', () => {
 
   it('waitForAck resolves from buffer', async () => {
     svc = new WsTransportService(baseOpts(3001), makeQB());
-    (svc as any).lastAckBuffer = { ok: true, okIndices: [0] };
-    const got = await svc.waitForAck(200);
+    (svc as any).ackBuffer.set('c1', { ok: true, okIndices: [0], correlationId: 'c1' });
+    const got = await svc.waitForAck(200, 'c1');
     expect(got.ok).toBe(true);
     expect(got.okIndices).toEqual([0]);
+  });
+
+  it('waitForAck resolves correlated outbox ACK', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    const p = svc.waitForAck(500, 'batch-1');
+
+    (svc as any).onMessage(JSON.stringify({
+      action: Actions.OutboxStreamAck,
+      correlationId: 'batch-1',
+      timestamp: Date.now(),
+      payload: { ok: true, okIndices: [0] },
+    }));
+
+    await expect(p).resolves.toEqual({ ok: true, okIndices: [0], correlationId: 'batch-1' });
+  });
+
+  it('waitForAck ignores outbox ACK without correlationId', async () => {
+    svc = new WsTransportService(baseOpts(3001), makeQB());
+    jest.useFakeTimers();
+    const p = svc.waitForAck(100, 'batch-1');
+
+    (svc as any).onMessage(JSON.stringify({
+      action: Actions.OutboxStreamAck,
+      timestamp: Date.now(),
+      payload: { ok: true, okIndices: [0] },
+    }));
+
+    jest.advanceTimersByTime(120);
+    await expect(p).rejects.toThrow(/ack timeout/i);
   });
 
   it('waitForAck times out', async () => {

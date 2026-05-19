@@ -29,13 +29,13 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
   let strategy: RpcZmqProviderStrategy;
   let mockLogger: jest.Mocked<any>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
-  let queue: BlocksQueue<Block>;
+  let queue: BlocksQueue;
   const basePreloadCount = 4;
   const defaultBlockSize = 1000;
   const maxRpcReplyBytes = 10_000;
 
   beforeEach(() => {
-    queue = new BlocksQueue<Block>({
+    queue = new BlocksQueue({
       lastHeight: -1,
       maxBlockHeight: Number.MAX_SAFE_INTEGER,
       blockSize: defaultBlockSize,
@@ -55,6 +55,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
     mockProvider = {
       getManyBlocksStatsByHeights: jest.fn(),
       getManyBlocksByHeights: jest.fn(),
+      getManyBlocksRawByHeights: jest.fn(),
       hasNetworkProvidersAvailable: jest.fn().mockReturnValue(false),
       getActiveNetworkProviderName: jest.fn(),
       getNetworkProviderByName: jest.fn(),

@@ -10,6 +10,59 @@ export interface SnapshotOptions {
   keepWindow: number;
 }
 
+export interface OutboxDeliveryAck {
+  ok: boolean;
+  okIndices?: number[];
+  correlationId?: string;
+  err?: string;
+}
+
+export interface PersistAggregatesOptions {
+  /**
+   * When false, adapters persist aggregate event tables only and skip outbox rows.
+   * This is the local-only mode for runtimes without configured remote transport.
+   */
+  writeOutbox: boolean;
+}
+
+export interface PersistAggregatesResult {
+  insertedOutboxIds: string[];
+  firstTs: number;
+  firstId: string;
+  lastTs: number;
+  lastId: string;
+  rawEvents: WireEventRecord[];
+}
+
+export function assertFullOutboxAck(ack: OutboxDeliveryAck, expectedCount: number): void {
+  if (!ack || ack.ok !== true) {
+    throw new Error(`Outbox delivery failed${ack?.err ? `: ${ack.err}` : ''}`);
+  }
+
+  if (!Array.isArray(ack.okIndices)) {
+    throw new Error('Outbox delivery ACK must include okIndices');
+  }
+
+  if (ack.okIndices.length !== expectedCount) {
+    throw new Error(`Outbox delivery ACK is partial: ${ack.okIndices.length}/${expectedCount} events acknowledged`);
+  }
+
+  const seen = new Set<number>();
+  for (const index of ack.okIndices) {
+    if (!Number.isInteger(index) || index < 0 || index >= expectedCount) {
+      throw new Error(`Outbox delivery ACK contains invalid index ${index}`);
+    }
+    if (seen.has(index)) {
+      throw new Error(`Outbox delivery ACK contains duplicate index ${index}`);
+    }
+    seen.add(index);
+  }
+
+  for (let i = 0; i < expectedCount; i++) {
+    if (!seen.has(i)) throw new Error(`Outbox delivery ACK is missing index ${i}`);
+  }
+}
+
 export interface FindEventsOptions {
   versionGte?: number;
   versionLte?: number;
@@ -58,21 +111,17 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
 
   protected readonly idGen = new MonotonicId(10);
 
-  abstract persistAggregatesAndOutbox(aggregates: T[]): Promise<{
-    insertedOutboxIds: string[];
-    firstTs: number;
-    firstId: string;
-    lastTs: number;
-    lastId: string;
-    rawEvents: WireEventRecord[];
-  }>;
+  abstract persistAggregatesAndOutbox(
+    aggregates: T[],
+    options: PersistAggregatesOptions
+  ): Promise<PersistAggregatesResult>;
 
   abstract hasBacklogBefore(firstTs: number, firstId: string): Promise<boolean>;
-  abstract hasAnyPendingAfterWatermark(): Promise<boolean>;
+  abstract hasPendingAfterId(lastId: string): Promise<boolean>;
   abstract deleteOutboxByIds(ids: string[]): Promise<void>;
   abstract fetchDeliverAckChunk(
     transportMaxFrameBytes: number,
-    publish: (events: WireEventRecord[]) => Promise<void>
+    publish: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
   ): Promise<number>;
   abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
   abstract advanceWatermark(lastId: string): void;

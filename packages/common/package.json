@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Meta-package that routes subpath exports to per-subpackage builds.",
   "type": "commonjs",
   "main": "./index.js",
@@ -63,7 +63,7 @@
     "LICENSE",
     "index.js",
     "index.mjs",
-    "index.d.td",
+    "index.d.ts",
     "arithmetic/dist",
     "exponential-interval-async/dist",
     "shared-interfaces/dist",

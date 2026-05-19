@@ -20,11 +20,21 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
   private _commandBus?: { execute(cmd: ICommand): Promise<any> };
   private _unhandled?: { publish(exc: any): void };
 
+  // Guard: ensures linkHandlers() is called at most once per EventBus instance.
+  // Prevents duplicate subscriptions if registerInstances() is called multiple times.
+  private _linked = false;
+
+  // Default: 30 seconds. A handler that exceeds this deadline is reported to
+  // UnhandledExceptionBus, but the stream still waits for the handler to finish.
+  // This preserves ordering and prevents concurrent side effects from timed-out handlers.
+  private _handlerTimeoutMs = 30_000;
+
   onModuleDestroy() {
     this.subject$.complete();
     this._eventHandlerCompletion$.complete();
     this._sagaCompletion$.complete();
     this.handlersByName.clear();
+    this._linked = false; // Reset so the instance can be re-initialized if needed
   }
 
   bindCommandBus(bus: { execute(cmd: ICommand): Promise<any> }) {
@@ -32,6 +42,15 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
   }
   bindUnhandledBus(bus: { publish(exc: any): void }) {
     this._unhandled = bus;
+  }
+
+  /**
+   * Sets the maximum allowed execution time per event handler.
+   * Called from CqrsModule.forRoot() if handlerTimeoutMs is configured.
+   * Must be called before registerInstances() to take effect.
+   */
+  setHandlerTimeout(ms: number): void {
+    this._handlerTimeoutMs = ms;
   }
 
   get events$(): Observable<E> {
@@ -58,10 +77,20 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
       for (const evt of events) {
         const key = evt.name;
         if (!this.handlersByName.has(key)) this.handlersByName.set(key, []);
-        this.handlersByName.get(key)!.push(h);
+        const list = this.handlersByName.get(key)!;
+        // Deduplicate: do not add the same handler instance twice
+        if (!list.includes(h)) {
+          list.push(h);
+        }
       }
     }
-    this.linkHandlers();
+    // Link handlers only once. Subsequent calls add handlers to handlersByName
+    // (picked up automatically by the existing subscription) but do not create
+    // a new subscription that would cause duplicate event processing.
+    if (!this._linked) {
+      this._linked = true;
+      this.linkHandlers();
+    }
   }
 
   // registerSagaFunctions(sagas: Array<(events$: Observable<E>) => Observable<ICommand>>) {
@@ -78,12 +107,42 @@ export class EventBus<E extends IEvent = IEvent> implements OnModuleDestroy {
           return from(list).pipe(
             concatMap((h: any) =>
               of(h).pipe(
-                concatMap(() => Promise.resolve(h.handle(event))),
+                concatMap(() => {
+                  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+                  let timeoutReported = false;
+
+                  if (this._handlerTimeoutMs > 0) {
+                    timeoutId = setTimeout(() => {
+                      timeoutReported = true;
+                      this._unhandled?.publish({
+                        cause: event,
+                        exception: new Error(
+                          `EventBus: handler "${h.constructor?.name}" timed out after ` +
+                            `${this._handlerTimeoutMs}ms for event "${key}"`
+                        ),
+                      });
+                    }, this._handlerTimeoutMs);
+                  }
+
+                  return Promise.resolve(h.handle(event)).finally(() => {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    if (timeoutReported) {
+                      this._unhandled?.publish({
+                        cause: event,
+                        exception: new Error(
+                          `EventBus: handler "${h.constructor?.name}" completed after timeout for event "${key}"`
+                        ),
+                      });
+                    }
+                  });
+                }),
                 map(() => {
                   this._eventHandlerCompletion$.next(event);
                   return undefined;
                 }),
                 catchError((err) => {
+                  // Both handler errors and timeout errors are routed to UnhandledExceptionBus.
+                  // The stream recovers and continues processing subsequent events.
                   this._unhandled?.publish({ cause: event, exception: err });
                   return of(undefined);
                 })

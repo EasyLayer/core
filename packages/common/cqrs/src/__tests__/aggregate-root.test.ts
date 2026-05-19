@@ -4,6 +4,7 @@ import { BasicEvent as BaseEvent } from '../basic-event';
 import { AggregateRoot } from '../aggregate-root';
 
 class TestEvent extends BaseEvent {}
+class UnknownEvent extends BaseEvent {}
 
 type Snap = {
   map: Map<string, number>;
@@ -119,4 +120,76 @@ describe('AggregateRoot', () => {
     const after = a.getUnsavedEvents().length;
     expect(after).toBe(before);
   });
+
+  // B3: apply() throws when no matching handler exists
+  it('apply throws when no matching on<EventName> handler exists', () => {
+    const a = new TestAggregate('valid-id', 1);
+    const e = new UnknownEvent({ aggregateId: 'valid-id', requestId: 'r', blockHeight: 1 }, {});
+    expect(() => a.apply(e)).toThrow(/has no handler for event "UnknownEvent"/);
+  });
+
+  it('apply with skipHandler:true does not throw even without a handler', () => {
+    const a = new TestAggregate('valid-id', 1);
+    const e = new UnknownEvent({ aggregateId: 'valid-id', requestId: 'r', blockHeight: 1 }, {});
+    expect(() => a.apply(e, { skipHandler: true })).not.toThrow();
+  });
+
+  it('apply with skipHandler:true pushes event to INTERNAL_EVENTS without advancing version', () => {
+    const a = new TestAggregate('valid-id', 1);
+    const versionBefore = (a as any)._version;
+    const e = new UnknownEvent({ aggregateId: 'valid-id', requestId: 'r', blockHeight: 1 }, {});
+    a.apply(e, { skipHandler: true });
+    expect(a.getUnsavedEvents().length).toBe(1);
+    expect((a as any)._version).toBe(versionBefore); // version unchanged when skipHandler
+  });
+
+  it('constructor throws on aggregateId with invalid characters', () => {
+    expect(() => new TestAggregate('invalid"id', 0)).toThrow(/invalid characters/);
+  });
+
+  it('constructor throws on aggregateId starting with digit', () => {
+    expect(() => new TestAggregate('123model', 0)).toThrow(/invalid characters/);
+  });
+
+  it('constructor throws on empty aggregateId', () => {
+    expect(() => new TestAggregate('', 0)).toThrow(/aggregateId is required/);
+  });
+
+  it('constructor accepts valid aggregateId patterns', () => {
+    expect(() => new TestAggregate('validId', 0)).not.toThrow();
+    expect(() => new TestAggregate('valid-model', 0)).not.toThrow();
+    expect(() => new TestAggregate('valid_model', 0)).not.toThrow();
+    expect(() => new TestAggregate('model123', 0)).not.toThrow();
+  });
+  it('getUnsavedEvents returns a readonly live view without copying', () => {
+    const a = new TestAggregate('valid-id', 1);
+    const e = new UnknownEvent({ aggregateId: 'valid-id', requestId: 'r', blockHeight: 1 }, {});
+    a.apply(e, { skipHandler: true });
+
+    const unsaved = a.getUnsavedEvents();
+    expect(unsaved.length).toBe(1);
+
+    a.markEventsAsSaved();
+    expect(unsaved.length).toBe(0);
+  });
+
+  it('fromSnapshot rejects invalid aggregateId', () => {
+    const a = new TestAggregate('valid-id', 1);
+    expect(() =>
+      a.fromSnapshot({ aggregateId: 'bad"id', version: 1, blockHeight: 1, payload: {} })
+    ).toThrow(/invalid characters/);
+  });
+
+  it('snapshot restore ignores prototype-pollution keys', () => {
+    const a = new TestAggregate('valid-id', 1);
+    a.fromSnapshot({
+      aggregateId: 'valid-id',
+      version: 1,
+      blockHeight: 1,
+      payload: JSON.parse('{"__proto__":{"polluted":true},"constructor":{"evil":true},"state":{"map":{"__t":"Map","v":[]},"set":{"__t":"Set","v":[]},"date":{"__t":"Date","v":"2024-01-01T00:00:00.000Z"},"big":{"__t":"BigInt","v":"1"},"nested":{"a":{"b":{"c":7}}},"passthrough":{"k":"v"}}}'),
+    });
+    expect(({} as any).polluted).toBeUndefined();
+    expect((a as any).constructor.evil).toBeUndefined();
+  });
+
 });

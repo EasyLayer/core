@@ -5,6 +5,8 @@ import { BlockchainNormalizer } from './normalizer';
 import type { Block, Trace } from './components/block.interfaces';
 import type { TransactionReceipt } from './components/transaction.interfaces';
 import { quantityToDecimalString, quantityToNumber, normalizeAddress, normalizeHex } from './value-normalization';
+import { EvmTrieVerifier } from './providers/trie-verifier';
+import { decodeEvmBlockPayload } from './codecs/block-payload-codec';
 
 /**
  * A Subscription is a Promise that resolves once unsubscribed,
@@ -229,6 +231,23 @@ export class BlockchainProviderService {
   }
 
   // ===== TRACE METHODS =====
+
+  /**
+   * Parse raw bytes back into a Block object.
+   * EVM path: MessagePack bytes → Block, with JSON fallback for tests/browser compatibility.
+   * If verifyTrie is true, validates transactionsRoot after parse.
+   * Called by the queue iterator after getBatchUpToSize.
+   */
+  public async parseBlock(bytes: Buffer, _height: number, verifyTrie = false): Promise<Block> {
+    const block = decodeEvmBlockPayload(bytes);
+    if (verifyTrie && block.transactions?.length && block.transactionsRoot) {
+      const valid = await EvmTrieVerifier.verifyTransactionsRoot(block.transactions, block.transactionsRoot);
+      if (!valid) {
+        throw new Error(`Transactions root verification failed for block ${block.hash} at height ${block.blockNumber}`);
+      }
+    }
+    return block;
+  }
 
   public async assertTraceSupport(): Promise<void> {
     if (!this.networkConfig.supportsTraces) {

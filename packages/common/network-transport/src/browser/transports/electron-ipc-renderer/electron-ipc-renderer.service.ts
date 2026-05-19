@@ -39,19 +39,24 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
   private online = false;
   private lastPongAt = 0;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
-  private pendingAck: { resolve: (v: OutboxStreamAckPayload) => void; reject: (e: any) => void; timer: any } | null =
-    null;
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
+  private pendingAck: {
+    correlationId?: string;
+    resolve: (v: OutboxStreamAckPayload) => void;
+    reject: (e: any) => void;
+    timer: any;
+  } | null = null;
 
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
 
   private ipc: IpcRenderer | null = null;
+  private readonly ready: Promise<void>;
 
   private readonly onIpcMessage = (_ev: any, raw: unknown) => this.onRaw(raw);
 
   constructor(private readonly opts: ElectronIpcRendererOptions) {
-    this.init();
+    this.ready = this.init();
   }
 
   private async init() {
@@ -63,6 +68,7 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
 
   async onModuleDestroy(): Promise<void> {
     this.stopHeartbeat();
+    await this.ready.catch(() => undefined);
     this.ipc?.off('transport:message', this.onIpcMessage);
   }
 
@@ -83,13 +89,15 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
   }
 
   async send(msg: Message | string): Promise<void> {
-    this.ipc?.send('transport:message', msg);
+    await this.ready;
+    if (!this.ipc) throw new Error('ipc-renderer: ipcRenderer is not initialized');
+    this.ipc.send('transport:message', msg);
   }
 
-  async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+  async waitForAck(deadlineMs = 2_000, correlationId?: string): Promise<OutboxStreamAckPayload> {
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
@@ -98,6 +106,7 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
         reject(new Error('ipc-renderer: ACK timeout'));
       }, deadlineMs);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(timer);
           this.pendingAck = null;
@@ -111,6 +120,22 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
         timer,
       };
     });
+  }
+
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(ack);
+        return;
+      }
+    }
+    if (correlationId) {
+      if (this.ackBuffer.size >= 128) {
+        const oldest = this.ackBuffer.keys().next().value as string | undefined;
+        if (oldest) this.ackBuffer.delete(oldest);
+      }
+      this.ackBuffer.set(correlationId, ack);
+    }
   }
 
   private startHeartbeat() {
@@ -128,7 +153,7 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
           correlationId: uuid(),
         };
         try {
-          this.ipc?.send('transport:message', ping);
+          await this.send(ping);
           this.log.verbose('IPC renderer ping sent', { module: 'network-transport' });
         } catch (e: any) {
           this.log.verbose('IPC renderer ping send failed', {
@@ -164,8 +189,9 @@ export class ElectronIpcRendererService implements TransportPort, OnModuleDestro
       }
       case Actions.OutboxStreamAck: {
         const ack = msg.payload as any as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
+        const correlationId = msg.correlationId ?? ack.correlationId;
+        if (!correlationId) return;
+        this.acceptAck({ ...ack, correlationId: ack.correlationId ?? correlationId }, correlationId);
         return;
       }
       default:

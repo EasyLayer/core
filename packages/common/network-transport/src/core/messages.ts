@@ -33,6 +33,8 @@ export type PongPayload = {
 export interface OutboxStreamAckPayload {
   ok: boolean;
   okIndices?: number[];
+  correlationId?: string;
+  err?: string;
 }
 
 export interface QueryRequestPayload {

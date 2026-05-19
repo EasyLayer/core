@@ -35,9 +35,18 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
   // Set to true on onModuleDestroy to prevent reconnect after intentional close
   private destroyed = false;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
-  private pendingAck: { resolve: (v: OutboxStreamAckPayload) => void; reject: (e: any) => void; timer: any } | null =
-    null;
+  // Guards against concurrent connect() calls from both the close-event handler
+  // and the heartbeat — both check !this.socket and can race if the socket is null
+  // but a connection attempt is already in progress.
+  private connecting = false;
+
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
+  private pendingAck: {
+    correlationId?: string;
+    resolve: (v: OutboxStreamAckPayload) => void;
+    reject: (e: any) => void;
+    timer: any;
+  } | null = null;
 
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
@@ -88,10 +97,10 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
     s.send(frame);
   }
 
-  async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+  async waitForAck(deadlineMs = 2_000, correlationId?: string): Promise<OutboxStreamAckPayload> {
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
@@ -100,6 +109,7 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
         reject(new Error('browser-ws: ACK timeout'));
       }, deadlineMs);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(timer);
           this.pendingAck = null;
@@ -115,15 +125,45 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
     });
   }
 
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (!correlationId) {
+      this.log.warn('WS browser outbox ACK ignored because correlationId is missing', {
+        module: 'network-transport',
+      });
+      return;
+    }
+
+    const correlatedAck = { ...ack, correlationId: ack.correlationId ?? correlationId };
+
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(correlatedAck);
+        return;
+      }
+    }
+
+    if (this.ackBuffer.size >= 128) {
+      const oldest = this.ackBuffer.keys().next().value as string | undefined;
+      if (oldest) this.ackBuffer.delete(oldest);
+    }
+    this.ackBuffer.set(correlationId, correlatedAck);
+  }
+
   private connect() {
     if (this.destroyed) return;
+    // Prevent double-connect: close-event setTimeout and heartbeat can both see
+    // !this.socket and race to call connect(). The connecting flag ensures only
+    // one WebSocket is created at a time.
+    if (this.connecting) return;
 
+    this.connecting = true;
     this.clientId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const ws = new WebSocket(this.opts.url, this.opts.protocols);
 
     ws.addEventListener('message', (ev) => this.onRaw(ev.data));
 
     ws.addEventListener('close', () => {
+      this.connecting = false;
       if (this.socket === ws) {
         this.socket = null;
         this.online = false;
@@ -144,16 +184,17 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
     });
 
     ws.addEventListener('open', () => {
+      this.connecting = false;
       this.log.verbose('WS browser socket opened', { module: 'network-transport' });
       /* connection established; wait for pong to mark online */
     });
 
-    ws.addEventListener('error', (ev) => {
+    ws.addEventListener('error', () => {
+      // close event will fire after error — connecting flag reset there
       this.log.verbose('WS browser socket error', {
         module: 'network-transport',
         args: { url: this.opts.url },
       });
-      // close event will fire after error — reconnect is handled there
     });
 
     this.socket = ws;
@@ -219,8 +260,8 @@ export class WsBrowserTransportService implements TransportPort, OnModuleDestroy
       }
       case Actions.OutboxStreamAck: {
         const ack = msg.payload as any as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
+        const correlationId = msg.correlationId ?? ack.correlationId;
+        this.acceptAck(ack, correlationId);
         return;
       }
       default:

@@ -29,12 +29,12 @@ describe('HttpTransportService', () => {
     expect(() => new HttpTransportService(bad2, makeQueryBus() as any)).toThrow(/webhook\.pingUrl/i);
   });
 
-  it('resolves waitForAck from lastAckBuffer', async () => {
+  it('resolves waitForAck from correlation ackBuffer', async () => {
     const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
-    (svc as any).lastAckBuffer = { ok: true, okIndices: [0] };
-    const ack = await svc.waitForAck(50);
+    (svc as any).ackBuffer.set('c1', { ok: true, okIndices: [0], correlationId: 'c1' });
+    const ack = await svc.waitForAck(50, 'c1');
     expect(ack.ok).toBe(true);
-    expect((svc as any).lastAckBuffer).toBeNull();
+    expect((svc as any).ackBuffer.has('c1')).toBe(false);
     await svc.onModuleDestroy();
   });
 
@@ -50,10 +50,10 @@ describe('HttpTransportService', () => {
   it('resolves ack when send() receives OutboxStreamAck', async () => {
     const svc = new HttpTransportService(baseOpts(), makeQueryBus() as any);
     jest.spyOn(svc as any, 'post').mockResolvedValueOnce(
-      JSON.stringify({ action: Actions.OutboxStreamAck, timestamp: Date.now(), payload: { ok: true, okIndices: [0] } })
+      JSON.stringify({ action: Actions.OutboxStreamAck, timestamp: Date.now(), correlationId: 'c2', payload: { ok: true, okIndices: [0], correlationId: 'c2' } })
     );
-    const wait = svc.waitForAck(200);
-    await svc.send({ action: 'OutboxStreamBatch' as any, timestamp: Date.now(), payload: {} as any });
+    const wait = svc.waitForAck(200, 'c2');
+    await svc.send({ action: 'OutboxStreamBatch' as any, timestamp: Date.now(), correlationId: 'c2', payload: {} as any });
     const ack = await wait;
     expect(ack.ok).toBe(true);
     await svc.onModuleDestroy();

@@ -1,15 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Injectable, Inject, OnModuleDestroy, Logger, OnModuleInit } from '@nestjs/common';
 import { exponentialIntervalAsync, ExponentialTimer } from '@easylayer/common/exponential-interval-async';
-import { Block } from '../../blockchain-provider';
+import { Block, BlockchainProviderService } from '../../blockchain-provider';
 import { BlocksQueue } from '../blocks-queue';
-import type { BlocksCommandExecutor } from '../interfaces';
+import type { BlocksCommandExecutor, RawBlock } from '../interfaces';
 
 @Injectable()
 export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit {
   private readonly logger = new Logger(BlocksQueueIteratorService.name);
   private readonly moduleName = 'blocks-queue';
-  private _queue!: BlocksQueue<Block>;
+  private _queue!: BlocksQueue;
   private _isIterating: boolean = false;
   private batchProcessedPromise!: Promise<void>;
   protected _resolveNextBatch!: () => void;
@@ -21,6 +21,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
   constructor(
     @Inject('BlocksCommandExecutor')
     private readonly blocksCommandExecutor: BlocksCommandExecutor,
+    private readonly blockchainProvider: BlockchainProviderService,
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
@@ -63,7 +64,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
   /**
    * Starts iterating over the block queue and processing blocks.
    */
-  public async startQueueIterating(queue: BlocksQueue<Block>): Promise<void> {
+  public async startQueueIterating(queue: BlocksQueue): Promise<void> {
     // NOTE: We use this to make sure that
     // method startQueueIterating() is executed only once in its entire life.
     if (this._isIterating) {
@@ -155,23 +156,26 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
       module: this.moduleName,
     });
 
-    // Maximum batch size in bytes - this is our memory/processing limit
     const maxBatchSize = this._blocksBatchSize;
 
-    // Get all available blocks up to the maximum size limit
-    // This ensures we always make progress while respecting resource constraints
-    const batch: Block[] = await this._queue.getBatchUpToSize(maxBatchSize);
+    // This is a peek: queue-owned payload is released only after confirmProcessedBatch().
+    const rawBatch: RawBlock[] = await this._queue.getBatchUpToSize(maxBatchSize);
+
+    const blocks: Block[] = [];
+    for (const raw of rawBatch) {
+      blocks.push(this.blockchainProvider.parseBlock(raw.bytes, raw.height));
+    }
 
     this.logger.verbose('Fetched batch for processing', {
       module: this.moduleName,
       args: {
-        batchLength: batch.length,
+        batchLength: blocks.length,
         maxBatchSize,
-        totalBatchSize: batch.reduce((sum, block) => sum + block.size, 0),
+        totalBatchSize: blocks.reduce((sum, block) => sum + block.size, 0),
       },
     });
 
-    return batch;
+    return blocks;
   }
 
   private initBatchProcessedPromise(): void {

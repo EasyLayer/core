@@ -34,8 +34,9 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
   private online = false;
   private lastPongAt = 0;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
   private pendingAck: {
+    correlationId?: string;
     resolve: (v: OutboxStreamAckPayload) => void;
     reject: (e: any) => void;
     timer: NodeJS.Timeout;
@@ -95,10 +96,10 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
     });
   }
 
-  async waitForAck(deadlineMs = this.opts.timeouts?.ackMs ?? 2_000): Promise<OutboxStreamAckPayload> {
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+  async waitForAck(deadlineMs = 2_000, correlationId?: string): Promise<OutboxStreamAckPayload> {
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
@@ -107,6 +108,7 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
         reject(new Error('Electron main: ACK timeout'));
       }, deadlineMs);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(timer);
           this.pendingAck = null;
@@ -120,6 +122,22 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
         timer,
       };
     });
+  }
+
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(ack);
+        return;
+      }
+    }
+    if (correlationId) {
+      if (this.ackBuffer.size >= 128) {
+        const oldest = this.ackBuffer.keys().next().value as string | undefined;
+        if (oldest) this.ackBuffer.delete(oldest);
+      }
+      this.ackBuffer.set(correlationId, ack);
+    }
   }
 
   private startHeartbeat() {
@@ -175,8 +193,9 @@ export class ElectronIpcMainService implements TransportPort, OnModuleDestroy {
       }
       case Actions.OutboxStreamAck: {
         const ack = msg.payload as any as OutboxStreamAckPayload;
-        if (this.pendingAck) this.pendingAck.resolve(ack);
-        else this.lastAckBuffer = ack;
+        const correlationId = msg.correlationId ?? ack.correlationId;
+        if (!correlationId) return;
+        this.acceptAck({ ...ack, correlationId: ack.correlationId ?? correlationId }, correlationId);
         return;
       }
       case Actions.QueryRequest: {

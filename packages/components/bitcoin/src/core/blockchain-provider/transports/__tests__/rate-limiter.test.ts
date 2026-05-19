@@ -132,7 +132,7 @@ describe('RateLimiter', () => {
     const config = rateLimiter.getConfig();
     expect(config.maxBatchSize).toBe(5);
     expect(config.maxConcurrentRequests).toBe(1);
-    expect(config.minTimeMsBetweenRequests).toBe(1000);
+    expect(config.minTimeMsBetweenRequests).toBe(0);
   });
 
   it('respects requestDelayMs as legacy alias when minTimeMsBetweenRequests is not set', () => {

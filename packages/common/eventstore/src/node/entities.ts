@@ -3,6 +3,8 @@ import type { DriverType } from '../core';
 import type { EventDataModel } from '../core/event-data.model';
 import type { SnapshotDataModel } from '../core/snapshots.model';
 import type { OutboxDataModel } from '../core/outbox.model';
+import { validateAggregateId } from '../core/aggregate-id';
+export { validateAggregateId } from '../core/aggregate-id';
 
 function safeName(raw: string): string {
   const s = raw.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -24,6 +26,7 @@ export const createEventDataEntity = (
   aggregateId: string,
   dbDriver: DriverType = 'sqlite'
 ): EntitySchema<EventDataModel> => {
+  validateAggregateId(aggregateId);
   const isPostgres = dbDriver === 'postgres';
   const id: any = { type: isPostgres ? 'bigint' : 'integer', primary: true, generated: 'increment' };
   const payload: any = { type: isPostgres ? 'bytea' : 'blob' };

@@ -5,6 +5,8 @@ import { EVENTS_HANDLER_METADATA } from '../constants';
 
 class AEvent extends BasicEvent {}
 class BEvent extends BasicEvent {}
+class SlowEvent extends BasicEvent {}
+class FastEvent extends BasicEvent {}
 
 interface IEventHandler<E> { handle(event: E): any | Promise<any>; }
 
@@ -81,5 +83,79 @@ describe('EventBus', () => {
 
     await waitFor(() => (unhandled.publish as any).mock.calls.length > 0);
     expect(unhandled.publish).toHaveBeenCalled();
+  });
+
+  // B4: registerInstances called twice must not create a duplicate subscription
+  it('registerInstances called twice does not cause handler to run twice per event', async () => {
+    let callCount = 0;
+
+    class CountHandler implements IEventHandler<AEvent> {
+      async handle(_event: AEvent) { callCount++; }
+    }
+    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [AEvent], CountHandler);
+
+    const handler = new CountHandler();
+    bus.registerInstances([handler as any]);
+    bus.registerInstances([handler as any]); // second call — must not create a second subscription
+
+    await bus.publish(new AEvent({ aggregateId: 'x', requestId: '1', blockHeight: 1 }, {}));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(callCount).toBe(1); // exactly once, not twice
+  });
+
+  // B7: timeout is diagnostic only — ordering is preserved and the handler is not aborted.
+  it('reports timeout, waits for the handler to finish, then continues processing next event', async () => {
+    const errors: any[] = [];
+    const completed: string[] = [];
+
+    bus.setHandlerTimeout(30);
+    bus.bindUnhandledBus({ publish: (e: any) => errors.push(e) });
+
+    class SlowHandler implements IEventHandler<SlowEvent> {
+      async handle(_event: SlowEvent) {
+        await new Promise((r) => setTimeout(r, 80));
+        completed.push('slow');
+      }
+    }
+    class QuickHandler implements IEventHandler<FastEvent> {
+      async handle(_event: FastEvent) { completed.push('fast'); }
+    }
+
+    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [SlowEvent], SlowHandler);
+    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [FastEvent], QuickHandler);
+
+    bus.registerInstances([new SlowHandler() as any, new QuickHandler() as any]);
+
+    await bus.publish(new SlowEvent({ aggregateId: 'x', requestId: 's1', blockHeight: 1 }, {}));
+    await bus.publish(new FastEvent({ aggregateId: 'x', requestId: 'f1', blockHeight: 2 }, {}));
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(errors[0].exception.message).toMatch(/timed out after 30ms/);
+    expect(completed).toEqual([]);
+
+    await waitFor(() => completed.length === 2, 500);
+    expect(completed).toEqual(['slow', 'fast']);
+    expect(errors.some((e) => String(e.exception.message).includes('completed after timeout'))).toBe(true);
+  });
+
+  // B7: timeout disabled when handlerTimeoutMs = 0
+  it('does not timeout when handlerTimeoutMs is set to 0', async () => {
+    const errors: any[] = [];
+    bus.setHandlerTimeout(0); // disabled
+    bus.bindUnhandledBus({ publish: (e: any) => errors.push(e) });
+
+    class SlowButOkHandler implements IEventHandler<AEvent> {
+      async handle(_event: AEvent) {
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    }
+    Reflect.defineMetadata(EVENTS_HANDLER_METADATA, [AEvent], SlowButOkHandler);
+    bus.registerInstances([new SlowButOkHandler() as any]);
+
+    await bus.publish(new AEvent({ aggregateId: 'x', requestId: '1', blockHeight: 1 }, {}));
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(errors.length).toBe(0); // no timeout error
   });
 });

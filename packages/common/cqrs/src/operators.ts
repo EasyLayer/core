@@ -1,112 +1,81 @@
 import type { Observable, OperatorFunction } from 'rxjs';
-import { defer, of, from, mergeMap, map, catchError, delay, throwError, retryWhen } from 'rxjs';
+import { EMPTY, defer, of, from, mergeMap, map, delay, throwError, retryWhen, catchError } from 'rxjs';
 import type { Type } from '@nestjs/common';
 import { filter } from 'rxjs/operators';
 import type { DomainEvent } from './basic-event';
 
-/**
- * Configuration options for retry behavior.
- */
 export interface RetryOptions {
-  /**
-   * Maximum number of retry attempts.
-   */
+  /** Maximum number of retry attempts after the initial attempt. Infinity keeps retrying. */
   count?: number;
-  /**
-   * Base delay in milliseconds between retries; actual delay is exponential.
-   */
+  /** Base delay in milliseconds between retries; actual delay is exponential. */
   delay?: number;
+  /** Upper bound for exponential delay. */
+  maxDelay?: number;
+  /** Add jitter up to this ratio of the computed delay. Example: 0.2 = ±20%. */
+  jitterRatio?: number;
 }
 
-/**
- * Parameters for executing a command when an event is received, with retry logic only.
- * @template T The event type.
- */
 export interface ExecuteParams<T extends DomainEvent = DomainEvent> {
-  /**
-   * The event class to filter for.
-   */
   event: Type<T>;
-  /**
-   * Asynchronous command to invoke when the event is received.
-   */
   command: (data: T) => Promise<void>;
 }
 
-/**
- * Parameters for executing a command with rollback and optional retry when an event is received.
- * @template T The event type.
- */
 export interface ExecuteWithRollbackParams<T extends DomainEvent = DomainEvent> {
-  /**
-   * The event class to filter for.
-   */
   event: Type<T>;
-  /**
-   * Asynchronous command to invoke when the event is received.
-   */
   command: (data: T) => Promise<void>;
-  /**
-   * Asynchronous rollback function to invoke if the command fails.
-   */
   rollback: (data: T, error?: any) => Promise<void>;
-  /**
-   * Optional retry configuration for the rollback operation.
-   */
   retryOpt?: RetryOptions;
 }
 
-/**
- * Compute exponential backoff delay for retry attempts.
- * @param attempt Zero-based retry attempt index.
- * @param base Base delay in ms. Defaults to 1000.
- * @returns Milliseconds to wait before next retry.
- */
-const exponentialBackoff = (attempt: number, base: number = 1000) => Math.pow(2, attempt) * base;
+function normalizeRetryOptions(input?: RetryOptions | number): Required<RetryOptions> {
+  if (typeof input === 'number') {
+    return { count: Number.POSITIVE_INFINITY, delay: input, maxDelay: 60_000, jitterRatio: 0 };
+  }
+  return {
+    count: input?.count ?? Number.POSITIVE_INFINITY,
+    delay: input?.delay ?? 1000,
+    maxDelay: input?.maxDelay ?? 60_000,
+    jitterRatio: input?.jitterRatio ?? 0,
+  };
+}
 
-/**
- * Operator that filters an Observable to events of the specified class,
- * executes a command with infinite retries and exponential backoff,
- * and re-emits the original payload on success.
- * @param params Event and command configuration.
- * @param baseDelay Optional base delay for exponential backoff.
- * @returns An RxJS operator function.
- */
+function retryDelay(attempt: number, opts: Required<RetryOptions>): number {
+  const exponential = Math.min(opts.maxDelay, Math.pow(2, attempt) * opts.delay);
+  if (!opts.jitterRatio) return exponential;
+
+  const range = exponential * opts.jitterRatio;
+  return Math.max(0, Math.round(exponential - range + Math.random() * range * 2));
+}
+
+function retryStrategy(opts: Required<RetryOptions>) {
+  return (errors: Observable<unknown>) =>
+    errors.pipe(
+      mergeMap((error, attempt) => {
+        if (Number.isFinite(opts.count) && attempt >= opts.count) {
+          return throwError(() => error);
+        }
+        return of(error).pipe(delay(retryDelay(attempt, opts)));
+      })
+    );
+}
+
 export function executeWithRetry<T extends DomainEvent = DomainEvent>(
   { event, command }: ExecuteParams<T>,
-  baseDelay: number = 1000
+  retryOpt: RetryOptions | number = {}
 ): OperatorFunction<T, T> {
+  const opts = normalizeRetryOptions(retryOpt);
   return (source: Observable<T>) =>
     source.pipe(
       ofType(event),
       mergeMap((payload) =>
         defer(() => from(command(payload))).pipe(
           map(() => payload),
-          catchError((error) => {
-            return throwError(() => error); // Ensure error is passed down for retry
-          }),
-          retryWhen((errors) =>
-            errors.pipe(
-              mergeMap((error, attempt) => {
-                if (attempt >= Infinity) {
-                  // Handle case when retries exceed the limit
-                  return throwError(() => new Error('Retry limit exceeded'));
-                }
-                return of(error).pipe(delay(exponentialBackoff(attempt, baseDelay)));
-              })
-            )
-          )
+          retryWhen(retryStrategy(opts))
         )
       )
     );
 }
 
-/**
- * Operator that filters an Observable to events of the specified class,
- * executes a command once, and on error silently skips the event.
- * @param params Event and command configuration.
- * @returns An RxJS operator function.
- */
 export function executeWithSkip<T extends DomainEvent = DomainEvent>({
   event,
   command,
@@ -117,70 +86,47 @@ export function executeWithSkip<T extends DomainEvent = DomainEvent>({
       mergeMap((payload) =>
         defer(() => from(command(payload))).pipe(
           map(() => payload),
-
-          catchError((error) => {
-            return of(payload); // Skip error
-          })
+          // Skip means no success-like emission for the failed payload.
+          // This keeps downstream operators from treating a failed command as completed work
+          // and does not complete the outer event stream.
+          catchError(() => EMPTY)
         )
       )
     );
 }
 
-/**
- * Operator that filters an Observable to events of the specified class,
- * executes a command, and upon failure runs a rollback function with retry logic,
- * then re-emits the original payload on success.
- * @param params Event, command, rollback, and retry configuration.
- * @returns An RxJS operator function.
- */
 export function executeWithRollback<T extends DomainEvent = DomainEvent>({
   event,
   command,
   rollback,
   retryOpt = {},
 }: ExecuteWithRollbackParams<T>): OperatorFunction<T, T> {
+  const opts = normalizeRetryOptions(retryOpt);
   return (source: Observable<T>) =>
     source.pipe(
       ofType(event),
       mergeMap((payload) =>
         defer(() => from(command(payload))).pipe(
+          map(() => payload),
           catchError((error) =>
             from(rollback(payload, error)).pipe(
-              retryWhen((errors) =>
-                errors.pipe(
-                  mergeMap((error, attempt) => {
-                    if (attempt >= (retryOpt.count ?? Infinity)) {
-                      // Handle case when retries exceed the limit
-                      return throwError(() => new Error('Retry limit exceeded'));
-                    }
-                    return of(error).pipe(delay(exponentialBackoff(attempt, retryOpt.delay)));
-                  })
-                )
-              )
+              retryWhen(retryStrategy(opts)),
+              mergeMap(() => throwError(() => error))
             )
-          ),
-          map(() => payload)
+          )
         )
       )
     );
 }
 
-/**
- * Type guard operator that filters an Observable of events,
- * passing through only those instances matching the provided classes.
- * @param types One or more event classes to filter.
- * @returns An RxJS operator function narrowing the stream.
- */
 export function ofType<TInput extends DomainEvent, TOutput extends TInput>(
   ...types: Type<TOutput>[]
 ): (source: Observable<TInput>) => Observable<TOutput> {
   const isInstanceOf = (event: TInput): event is TOutput => {
     return types.some((classType) => {
-      // Checking if event is an instance of a class
       if (event instanceof classType) {
         return true;
       }
-      // Checking if event has a constructor.name field corresponding to the class name
       return event.constructor?.name === classType.name;
     });
   };

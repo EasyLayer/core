@@ -23,9 +23,13 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
   private online = false;
   private lastPongAt = 0;
 
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
-  private pendingAck: { resolve: (v: OutboxStreamAckPayload) => void; reject: (e: any) => void; timer: any } | null =
-    null;
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
+  private pendingAck: {
+    correlationId?: string;
+    resolve: (v: OutboxStreamAckPayload) => void;
+    reject: (e: any) => void;
+    timer: any;
+  } | null = null;
 
   private heartbeatController: { destroy: () => void } | null = null;
   private heartbeatReset: (() => void) | null = null;
@@ -76,15 +80,16 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
 
     if (parsed.action === Actions.OutboxStreamAck && parsed.payload) {
       const ack = parsed.payload as OutboxStreamAckPayload;
-      if (this.pendingAck) this.pendingAck.resolve(ack);
-      else this.lastAckBuffer = ack;
+      const ackCorrelationId =
+        parsed.correlationId ?? ack.correlationId ?? (typeof msg === 'object' ? msg.correlationId : undefined);
+      this.acceptAck({ ...ack, correlationId: ack.correlationId ?? ackCorrelationId }, ackCorrelationId);
     }
   }
 
-  async waitForAck(deadlineMs = 2_000): Promise<OutboxStreamAckPayload> {
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+  async waitForAck(deadlineMs = 2_000, correlationId?: string): Promise<OutboxStreamAckPayload> {
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
@@ -93,6 +98,7 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
         reject(new Error('browser-http: ACK timeout'));
       }, deadlineMs);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(timer);
           this.pendingAck = null;
@@ -108,6 +114,22 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
     });
   }
 
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(ack);
+        return;
+      }
+    }
+    if (correlationId) {
+      if (this.ackBuffer.size >= 128) {
+        const oldest = this.ackBuffer.keys().next().value as string | undefined;
+        if (oldest) this.ackBuffer.delete(oldest);
+      }
+      this.ackBuffer.set(correlationId, ack);
+    }
+  }
+
   private startHeartbeat() {
     const multiplier = this.opts.ping?.factor ?? 1.6;
     const interval = this.opts.ping?.minMs ?? 600;
@@ -119,14 +141,28 @@ export class HttpBrowserService implements TransportPort, OnModuleDestroy {
 
         const ping: Message = { action: Actions.Ping, timestamp: Date.now() }; // no password in ping
         try {
-          await this.post(
+          const resText = await this.post(
             this.opts.webhook.pingUrl ?? this.opts.webhook.url,
             JSON.stringify(ping),
             this.opts.webhook.token,
             this.opts.webhook.timeoutMs
           );
-          this.log.verbose('HTTP browser ping sent', { module: 'network-transport' });
+          const parsed = safeParse(resText) as Message | null;
+          if (parsed?.action === Actions.Pong) {
+            const pw = (parsed.payload as any)?.password;
+            const ok = this.opts.webhook.password ? pw === this.opts.webhook.password : true;
+            if (ok) {
+              this.lastPongAt = Date.now();
+              this.online = true;
+              this.log.verbose('HTTP browser pong accepted, peer online', { module: 'network-transport' });
+              return;
+            }
+          }
+
+          this.online = false;
+          this.log.debug('HTTP browser pong invalid or missing', { module: 'network-transport' });
         } catch (e: any) {
+          this.online = false;
           this.log.verbose('HTTP browser ping send failed', {
             module: 'network-transport',
             args: { action: 'heartbeat', error: e?.message ?? e },

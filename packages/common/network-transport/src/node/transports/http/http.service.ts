@@ -58,8 +58,9 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
 
   private online = false;
   private lastPongAt = 0;
-  private lastAckBuffer: OutboxStreamAckPayload | null = null;
+  private readonly ackBuffer = new Map<string, OutboxStreamAckPayload>();
   private pendingAck: {
+    correlationId?: string;
     resolve: (v: OutboxStreamAckPayload) => void;
     reject: (e: any) => void;
     timer: NodeJS.Timeout;
@@ -191,27 +192,29 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
 
     if (parsed.action === Actions.OutboxStreamAck && parsed.payload) {
       const ack = parsed.payload as OutboxStreamAckPayload;
-      if (this.pendingAck) this.pendingAck.resolve(ack);
-      else this.lastAckBuffer = ack;
+      const ackCorrelationId =
+        parsed.correlationId ?? ack.correlationId ?? (typeof msg === 'object' ? msg.correlationId : undefined);
+      this.acceptAck({ ...ack, correlationId: ack.correlationId ?? ackCorrelationId }, ackCorrelationId);
     }
   }
 
-  async waitForAck(deadlineMs?: number): Promise<OutboxStreamAckPayload> {
-    // Compute default deadline if not provided: must exceed client processing timeout.
+  async waitForAck(deadlineMs?: number, correlationId?: string): Promise<OutboxStreamAckPayload> {
     const defaultAckMs = Math.max(3000, (this.opts.webhook?.timeoutMs ?? 2000) + 1500, this.opts.ackTimeoutMs ?? 0);
     const finalDeadline = deadlineMs && deadlineMs > 0 ? deadlineMs : defaultAckMs;
 
-    if (this.lastAckBuffer) {
-      const ack = this.lastAckBuffer;
-      this.lastAckBuffer = null;
+    if (correlationId && this.ackBuffer.has(correlationId)) {
+      const ack = this.ackBuffer.get(correlationId)!;
+      this.ackBuffer.delete(correlationId);
       return ack;
     }
+
     return new Promise<OutboxStreamAckPayload>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingAck = null;
         reject(new Error('HTTP: ACK timeout'));
       }, finalDeadline);
       this.pendingAck = {
+        correlationId,
         resolve: (v) => {
           clearTimeout(timer);
           this.pendingAck = null;
@@ -225,6 +228,22 @@ export class HttpTransportService implements TransportPort, OnModuleDestroy {
         timer,
       };
     });
+  }
+
+  private acceptAck(ack: OutboxStreamAckPayload, correlationId?: string): void {
+    if (this.pendingAck) {
+      if (!this.pendingAck.correlationId || this.pendingAck.correlationId === correlationId) {
+        this.pendingAck.resolve(ack);
+        return;
+      }
+    }
+    if (correlationId) {
+      if (this.ackBuffer.size >= 128) {
+        const oldest = this.ackBuffer.keys().next().value as string | undefined;
+        if (oldest) this.ackBuffer.delete(oldest);
+      }
+      this.ackBuffer.set(correlationId, ack);
+    }
   }
 
   // --- Heartbeat (Ping publisher + Pong processing) --------------------------

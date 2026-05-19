@@ -70,7 +70,7 @@ describe('PostgresAdapter', () => {
     a.addUnsaved(mkEvent('agg1', 'r1', 1, { x: 1 }, t1, 1));
     a.addUnsaved(mkEvent('agg1', 'r2', 2, { x: 2 }, t2, 2));
 
-    const res = await adapter.persistAggregatesAndOutbox([a as any]);
+    const res = await adapter.persistAggregatesAndOutbox([a as any], { writeOutbox: true });
 
     expect(qr.query).toHaveBeenCalledWith('BEGIN');
     expect(qr.query).toHaveBeenCalledWith('COMMIT');
@@ -80,6 +80,26 @@ describe('PostgresAdapter', () => {
     expect(mgrCalls.some(([sql]) => String(sql).includes(`INSERT INTO "outbox"`))).toBe(true);
     expect(res.insertedOutboxIds.length).toBe(2);
     expect(res.rawEvents.length).toBe(2);
+  });
+
+  it('persistAggregatesAndOutbox skips outbox rows in local-only mode', async () => {
+    const { ds, qr } = mkDS();
+    const adapter = new PostgresAdapter(ds as any);
+    (adapter as any).idGen = { next: jest.fn((ts: number) => BigInt(ts)) };
+
+    const a = new TestAgg('agg1', 1, 1);
+    a.addUnsaved(mkEvent('agg1', 'r1', 1, { x: 1 }, 1000001, 1));
+
+    const res = await adapter.persistAggregatesAndOutbox([a as any], { writeOutbox: false });
+
+    const mgrCalls = callsOf(qr.manager.query as any);
+    expect(mgrCalls.some(([sql]) => String(sql).includes(`INSERT INTO "agg1"`))).toBe(true);
+    expect(mgrCalls.some(([sql]) => String(sql).includes(`INSERT INTO "outbox"`))).toBe(false);
+    expect((adapter as any).idGen.next).not.toHaveBeenCalled();
+    expect(res.insertedOutboxIds).toEqual([]);
+    expect(res.firstId).toBe('0');
+    expect(res.lastId).toBe('0');
+    expect(res.rawEvents.length).toBe(1);
   });
 
   it('deleteOutboxByIds chunks ids', async () => {
@@ -101,12 +121,12 @@ describe('PostgresAdapter', () => {
     expect(ds.query).toHaveBeenCalled();
   });
 
-  it('hasAnyPendingAfterWatermark checks new rows using lastSeenId', async () => {
+  it('hasPendingAfterId checks new rows using lastSeenId', async () => {
     const { ds } = mkDS();
     const adapter = new PostgresAdapter(ds as any);
     (adapter as any).lastSeenId = 50n;
     (ds.query as jest.Mock).mockResolvedValueOnce([{}]);
-    const ok = await adapter.hasAnyPendingAfterWatermark();
+    const ok = await adapter.hasPendingAfterId('50');
     expect(ok).toBe(true);
     expect(ds.query).toHaveBeenCalled();
   });
@@ -118,7 +138,7 @@ describe('PostgresAdapter', () => {
       { id: '1', aggregateId: 'A', eventType: 'Ev', eventVersion: 1, requestId: 'r1', blockHeight: 1, payload: Buffer.from('{"a":1}'), isCompressed: false, timestamp: 11, ulen: 12 },
       { id: '2', aggregateId: 'A', eventType: 'Ev', eventVersion: 1, requestId: 'r2', blockHeight: 2, payload: Buffer.from('{"b":2}'), isCompressed: false, timestamp: 12, ulen: 12 },
     ]);
-    const pub = jest.fn().mockResolvedValue(undefined);
+    const pub = jest.fn().mockResolvedValue({ ok: true, okIndices: [0, 1] });
     const n = await adapter.fetchDeliverAckChunk(1024 * 1024, pub);
     expect(n).toBe(2);
     expect(pub).toHaveBeenCalledTimes(1);

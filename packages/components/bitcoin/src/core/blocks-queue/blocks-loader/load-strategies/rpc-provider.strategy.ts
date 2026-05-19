@@ -1,8 +1,9 @@
 import type { Logger } from '@nestjs/common';
-import type { BlockchainProviderService, Block } from '../../../blockchain-provider';
+import type { BlockchainProviderService } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
+import type { RawBlock } from '../../interfaces';
 
 interface BlockInfo {
   hash: string;
@@ -40,7 +41,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
   constructor(
     private readonly logger: Logger,
     private readonly blockchainProvider: BlockchainProviderService,
-    private readonly queue: BlocksQueue<Block>,
+    private readonly queue: BlocksQueue,
     config: {
       maxRpcReplyBytes: number;
       basePreloadCount: number;
@@ -174,7 +175,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
 
     if (infos.length === 0) return;
 
-    const blocks: Block[] = await this.loadBlocks(infos, retryLimit);
+    const blocks: RawBlock[] = await this.loadBlocks(infos, retryLimit);
 
     this.logger.debug('Loaded RPC block batch', {
       module: this.moduleName,
@@ -188,17 +189,16 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     this._lastLoadAndEnqueueDuration = Date.now() - startTime;
   }
 
-  private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<Block[]> {
+  private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<RawBlock[]> {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
         const heights = infos.map((i) => i.height);
-        return await this.blockchainProvider.getManyBlocksByHeights(
-          heights,
-          true, // useHex = true (bytes path)
-          undefined, // verbosity ignored for hex path
-          true // verifyMerkle = true
-        );
+        const raw = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+        if (!Array.isArray(raw)) {
+          throw new Error('getManyBlocksRawByHeights must return an array of raw blocks');
+        }
+        return raw.filter(Boolean) as RawBlock[];
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
@@ -214,7 +214,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     throw new Error('Failed to fetch blocks batch after maximum retries.');
   }
 
-  private async enqueueBlocks(blocks: Block[]): Promise<void> {
+  private async enqueueBlocks(blocks: RawBlock[]): Promise<void> {
     blocks.sort((a, b) => {
       if (a.height < b.height) return 1;
       if (a.height > b.height) return -1;

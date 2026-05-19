@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { Block } from '../blockchain-provider/components/block.interfaces';
 import { BlocksQueue } from './blocks-queue';
+import { BlockchainProviderService } from '../blockchain-provider';
 import type { BlocksQueueIteratorService } from './blocks-iterator/blocks-iterator.service';
 import type { BlocksQueueLoaderService } from './blocks-loader/blocks-loader.service';
 import type { MempoolLoaderService } from './mempool-loader.service';
@@ -9,12 +10,13 @@ import type { MempoolLoaderService } from './mempool-loader.service';
 export class BlocksQueueService implements OnModuleInit {
   private readonly logger = new Logger(BlocksQueueService.name);
   private readonly moduleName = 'blocks-queue';
-  private _queue!: BlocksQueue<Block>;
+  private _queue!: BlocksQueue;
 
   constructor(
     private readonly blocksQueueIterator: BlocksQueueIteratorService,
     private readonly blocksQueueLoader: BlocksQueueLoaderService,
     private readonly mempoolService: MempoolLoaderService,
+    private readonly blockchainProvider: BlockchainProviderService,
     private readonly config: any
   ) {}
 
@@ -22,7 +24,7 @@ export class BlocksQueueService implements OnModuleInit {
     this.logger.verbose('Blocks queue service initialized', { module: this.moduleName });
   }
 
-  get queue(): BlocksQueue<Block> {
+  get queue(): BlocksQueue {
     return this._queue;
   }
 
@@ -34,7 +36,7 @@ export class BlocksQueueService implements OnModuleInit {
   }
 
   private initQueue(indexedHeight: string | number): void {
-    this._queue = new BlocksQueue<Block>({
+    this._queue = new BlocksQueue({
       lastHeight: Number(indexedHeight),
       maxQueueSize: this.config.maxQueueSize,
       maxBlockHeight: this.config.maxBlockHeight,
@@ -84,6 +86,11 @@ export class BlocksQueueService implements OnModuleInit {
 
   public async getBlocksByHashes(hashes: string[]): Promise<Block[]> {
     const hashSet = new Set(hashes);
-    return this._queue.findBlocks(hashSet);
+    const rawBlocks = await this._queue.findBlocks(hashSet);
+    return Promise.all(
+      rawBlocks
+        .filter(Boolean)
+        .map((raw) => this.blockchainProvider.parseBlock(raw.bytes, raw.height, this.config.verifyTrie ?? false))
+    );
   }
 }

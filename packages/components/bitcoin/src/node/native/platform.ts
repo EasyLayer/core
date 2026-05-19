@@ -17,11 +17,32 @@ function detectLibc(): 'gnu' | 'musl' | undefined {
     }
   ).report;
   const report = typeof processReport?.getReport === 'function' ? processReport.getReport() : undefined;
-  const glibc = report?.header?.glibcVersionRuntime;
-  if (glibc) return 'gnu';
+  if (report?.header?.glibcVersionRuntime) return 'gnu';
 
-  // Conservative fallback: Node official linux binaries normally run on glibc.
-  // Alpine/musl support can be added later as a separate target.
+  const fs = (() => {
+    try {
+      return require('fs');
+    } catch {
+      return null;
+    }
+  })();
+  if (fs) {
+    const muslMarkers = [
+      '/lib/libc.musl-x86_64.so.1',
+      '/lib/libc.musl-aarch64.so.1',
+      '/lib/ld-musl-x86_64.so.1',
+      '/lib/ld-musl-aarch64.so.1',
+      '/usr/lib/libc.musl-x86_64.so.1',
+    ];
+    for (const marker of muslMarkers) {
+      try {
+        if (fs.existsSync(marker)) return 'musl';
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   return 'gnu';
 }
 

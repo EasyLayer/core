@@ -17,7 +17,7 @@ jest.mock('electron', () => {
 
 describe('ElectronIpcMainService', () => {
   let modRef: TestingModule | undefined;
-  
+
   afterEach(async () => {
     try { await modRef?.close(); } catch {}
     jest.clearAllTimers();
@@ -47,9 +47,9 @@ describe('ElectronIpcMainService', () => {
     ipcMain.emit('transport:message', {}, { action: Actions.Pong, payload: { password: 'pw' } });
     await expect(p).resolves.toBeUndefined();
 
-    const ackP = svc.waitForAck(200);
-    ipcMain.emit('transport:message', {}, { action: Actions.OutboxStreamAck, payload: { ok: true, okIndices: [0] } });
-    await expect(ackP).resolves.toEqual({ ok: true, okIndices: [0] });
+    const ackP = svc.waitForAck(200, 'ack-1');
+    ipcMain.emit('transport:message', {}, { action: Actions.OutboxStreamAck, correlationId: 'ack-1', payload: { ok: true, okIndices: [0] } });
+    await expect(ackP).resolves.toEqual({ ok: true, okIndices: [0], correlationId: 'ack-1' });
   });
 
   it('executes query and replies via webContents', async () => {

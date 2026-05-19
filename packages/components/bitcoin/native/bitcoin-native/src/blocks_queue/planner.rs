@@ -83,3 +83,34 @@ impl CapacityPlanner {
     self.last_resize_at = now;
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn desired_slots_reacts_to_observed_average() {
+    let mut planner = CapacityPlanner::new(1024.0, Some(&json!({ "maxSlots": 10_000, "minSlots": 1 })));
+    let initial = planner.desired_slots(64 * 1024);
+
+    for _ in 0..50 {
+      planner.observe(8 * 1024);
+    }
+    let after_large_blocks = planner.desired_slots(64 * 1024);
+
+    assert!(after_large_blocks < initial);
+  }
+
+  #[test]
+  fn resize_decision_respects_cooldown() {
+    let mut planner = CapacityPlanner::new(1024.0, Some(&json!({
+      "resizeCooldownMs": 1_000,
+      "growThreshold": 0.2,
+      "shrinkThreshold": 0.3
+    })));
+    planner.mark_resized(10_000);
+
+    assert_eq!(planner.should_resize(10_500, 1024 * 1024, 10, 1), None);
+  }
+}

@@ -62,6 +62,7 @@ declare module 'bitcore-p2p' {
     host: string;
     port: number;
     services?: bigint;
+    bestHeight?: number;
     
     constructor(options: PeerOptions);
     sendMessage(message: any): void;
