@@ -1,3 +1,10 @@
+## [1.3.4](https://github.com/EasyLayer/core/compare/v1.3.3...v1.3.4) (2026-05-23)
+
+
+### Bug Fixes
+
+* fixed evm mempool bugs; ([768770f](https://github.com/EasyLayer/core/commit/768770fa17fe830e367c1e27b4e4f52f038faf3b))
+
 ## [1.3.3](https://github.com/EasyLayer/core/compare/v1.3.2...v1.3.3) (2026-05-12)
 
 
