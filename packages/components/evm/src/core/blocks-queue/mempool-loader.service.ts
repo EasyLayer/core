@@ -2,8 +2,8 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { v4 as uuidv4 } from 'uuid';
 import type { BlockchainProviderService } from '../blockchain-provider/blockchain-provider.service';
 import type { MempoolCommandExecutor } from './interfaces';
-import type { MempoolTxMetadata } from '../blockchain-provider/providers/interfaces';
 import type { MempoolSnapshot } from '../cqrs-components/models/mempool/mempool.model';
+import type { EvmLoadedMempoolTx } from '../native';
 
 /**
  * EVM MempoolLoaderService — two strategies:
@@ -138,7 +138,7 @@ export class MempoolLoaderService implements OnModuleInit, OnModuleDestroy {
     this.log.verbose('Mempool flush', { module: this.moduleName, args: { count: hashes.length } });
 
     // Batch fetch metadata
-    const metas: Array<{ hash: string; metadata: MempoolTxMetadata }> = [];
+    const metas: EvmLoadedMempoolTx[] = [];
     // Fetch in parallel with a reasonable concurrency limit
     const CONCURRENCY = 20;
     for (let i = 0; i < hashes.length; i += CONCURRENCY) {

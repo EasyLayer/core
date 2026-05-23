@@ -99,24 +99,44 @@ export interface EvmMempoolMemoryUsage {
   };
 }
 
-export type EvmMempoolProviderSnapshot = Record<string, Array<{ hash: string; metadata: MempoolTxMetadata }>>;
-
-export interface EvmMempoolReplacementCandidate {
+/**
+ * A mempool transaction in the loaded set: hash + metadata pair.
+ *
+ * "Loaded" means the entry has passed through `recordLoaded` after a sync phase.
+ * In EVM the metadata returned by `txpool_content` already contains the full
+ * transaction shape (from, to, value, gas, gasPrice, maxFeePerGas, maxPriorityFeePerGas,
+ * nonce, input, v, r, s), so there is no separate "load full transaction" step
+ * like in bitcoin — metadata IS the loaded payload.
+ */
+export interface EvmLoadedMempoolTx {
   hash: string;
   metadata: MempoolTxMetadata;
 }
+
+/**
+ * A loaded mempool transaction enriched with provider attribution. Used when
+ * the loader needs to record which provider supplied a given entry.
+ */
+export interface EvmLoadedMempoolTxWithProvider extends EvmLoadedMempoolTx {
+  providerName?: string;
+}
+
+export type EvmMempoolProviderSnapshot = Record<string, EvmLoadedMempoolTx[]>;
+
+export interface EvmMempoolReplacementCandidate extends EvmLoadedMempoolTx {}
 
 export interface EvmMempoolStateStore {
   applySnapshot(perProvider: EvmMempoolProviderSnapshot): void;
   addTransactions(perProvider: EvmMempoolProviderSnapshot, maxPendingCount: number): void;
   providers(): string[];
   pendingHashes(providerName: string, limit: number): string[];
-  recordLoaded(loadedTransactions: Array<{ hash: string; metadata: MempoolTxMetadata; providerName?: string }>): void;
+  recordLoaded(loadedTransactions: EvmLoadedMempoolTxWithProvider[]): void;
   removeHash(hash: string): boolean;
   removeHashes(hashes: string[]): number;
   getReplacementCandidate(from: string, nonce: number): EvmMempoolReplacementCandidate | undefined;
   hashes(): Iterable<string>;
   metadata(): Iterable<MempoolTxMetadata>;
+  loadedEntries(): Iterable<EvmLoadedMempoolTx>;
   hasTransaction(hash: string): boolean;
   isTransactionLoaded(hash: string): boolean;
   getTransactionMetadata(hash: string): MempoolTxMetadata | undefined;

@@ -313,6 +313,27 @@ impl NativeEvmMempoolState {
     self.store.metadata.values().cloned().collect()
   }
 
+  /// Returns loaded entries (entries which have passed through `record_loaded`
+  /// after a sync phase) as `[{ hash, metadata }, ...]`.
+  ///
+  /// Symmetric with bitcoin's `loaded_transactions`, but EVM stores only metadata
+  /// in its backing store — `txpool_content` (Geth) already returns the full
+  /// transaction shape as part of metadata, so there is no separate "load full tx"
+  /// phase in EVM, and `metadata` is the loaded payload itself.
+  #[napi(js_name = "loadedEntries")]
+  pub fn loaded_entries(&self) -> Vec<Value> {
+    let mut entries: Vec<Value> = Vec::with_capacity(self.store.load_tracker.len());
+    for handle in self.store.load_tracker.keys() {
+      let Some(hash) = self.store.hash_of_handle(*handle) else { continue };
+      let Some(metadata) = self.store.metadata.get(handle).cloned() else { continue };
+      entries.push(json!({
+        "hash": hash,
+        "metadata": metadata,
+      }));
+    }
+    entries
+  }
+
   #[napi(js_name = "hasTransaction")]
   pub fn has_transaction(&self, hash: String) -> bool {
     self.store.handle_of_hash(&hash).is_some()
