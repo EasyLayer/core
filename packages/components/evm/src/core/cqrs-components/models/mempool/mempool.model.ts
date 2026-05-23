@@ -2,7 +2,7 @@ import type { Logger } from '@nestjs/common';
 import { AggregateRoot } from '@easylayer/common/cqrs';
 import type { BlockchainProviderService } from '../../../blockchain-provider/blockchain-provider.service';
 import type { MempoolTxMetadata } from '../../../blockchain-provider/providers/interfaces';
-import type { EvmMempoolStateStore } from '../../../native';
+import type { EvmLoadedMempoolTx, EvmLoadedMempoolTxWithProvider, EvmMempoolStateStore } from '../../../native';
 import { createEvmMempoolStateStore } from './mempool-state.store';
 import { BatchSizer } from './components';
 import {
@@ -14,7 +14,7 @@ import {
   EvmMempoolTxsConfirmedEvent,
 } from '../../events/mempool';
 
-export type MempoolSnapshot = Record<string, Array<{ hash: string; metadata: MempoolTxMetadata }>>;
+export type MempoolSnapshot = Record<string, EvmLoadedMempoolTx[]>;
 
 /**
  * EVM mempool aggregate.
@@ -135,7 +135,7 @@ export class Mempool extends AggregateRoot {
     for (const [provider, items] of Object.entries(perProvider)) {
       if (!Array.isArray(items) || items.length === 0) continue;
 
-      const out: Array<{ hash: string; metadata: MempoolTxMetadata }> = [];
+      const out: EvmLoadedMempoolTx[] = [];
       for (const { hash, metadata } of items) {
         if (!hash || seen.has(hash)) continue;
         if (!this.meetsMinGasPrice(metadata)) continue;
@@ -222,7 +222,7 @@ export class Mempool extends AggregateRoot {
       return;
     }
 
-    const loaded: Array<{ hash: string; metadata: MempoolTxMetadata; providerName?: string }> = [];
+    const loaded: EvmLoadedMempoolTxWithProvider[] = [];
     const batchDurations: Record<string, number> = {};
 
     const tasks = Array.from(byProvider.entries()).map(([providerName, hashes]) =>
@@ -325,6 +325,28 @@ export class Mempool extends AggregateRoot {
 
   public getLastUpdatedMs(): number {
     return this.lastUpdatedMs;
+  }
+
+  /**
+   * Iterates over loaded mempool entries — pairs of (hash, metadata) for every
+   * transaction that has passed through `recordLoaded` after a sync phase.
+   *
+   * Delegates to the backing store (Rust native when available; JS fallback
+   * otherwise). The native store returns an Array of `{ hash, metadata }`
+   * objects in one NAPI call; arrays are iterable, so `yield*` works directly.
+   */
+  public *iterLoadedTx(): IterableIterator<EvmLoadedMempoolTx> {
+    yield* this.store.loadedEntries();
+  }
+
+  /**
+   * Awaitable form of `iterLoadedTx`. The callback can be sync or async; awaited
+   * sequentially so user code observing the mempool sees deterministic ordering.
+   */
+  public async forEachLoadedTx(cb: (tx: EvmLoadedMempoolTx) => void | Promise<void>): Promise<void> {
+    for (const entry of this.store.loadedEntries()) {
+      await cb(entry);
+    }
   }
 
   public dispose(): void {

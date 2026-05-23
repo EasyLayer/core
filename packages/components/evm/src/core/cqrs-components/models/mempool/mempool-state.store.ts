@@ -1,4 +1,6 @@
 import type {
+  EvmLoadedMempoolTx,
+  EvmLoadedMempoolTxWithProvider,
   EvmMempoolLoadInfo,
   EvmMempoolMemoryUsage,
   EvmMempoolProviderSnapshot,
@@ -113,7 +115,7 @@ export class JsEvmMempoolStateStore implements EvmMempoolStateStore {
     return out;
   }
 
-  recordLoaded(loadedTransactions: Array<{ hash: string; metadata: MempoolTxMetadata; providerName?: string }>): void {
+  recordLoaded(loadedTransactions: EvmLoadedMempoolTxWithProvider[]): void {
     const timestamp = Date.now();
     for (const { hash, metadata, providerName } of loadedTransactions) {
       const id = this.hashToId.get(canonicalHash(hash));
@@ -166,6 +168,14 @@ export class JsEvmMempoolStateStore implements EvmMempoolStateStore {
 
   *metadata(): Iterable<MempoolTxMetadata> {
     yield* this.metadataStore.values();
+  }
+
+  *loadedEntries(): Iterable<EvmLoadedMempoolTx> {
+    for (const id of this.loadTracker.keys()) {
+      const hash = this.idToHash.get(id);
+      const metadata = this.metadataStore.get(id);
+      if (hash && metadata) yield { hash, metadata };
+    }
   }
 
   hasTransaction(hash: string): boolean {

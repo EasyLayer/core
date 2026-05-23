@@ -1,8 +1,8 @@
 import { BasicEvent } from '@easylayer/common/cqrs';
-import type { MempoolTxMetadata } from '../../../blockchain-provider/providers/interfaces';
+import type { EvmLoadedMempoolTxWithProvider } from '../../../native';
 
 export interface EvmMempoolSyncProcessedEventPayload {
-  loadedTransactions: Array<{ hash: string; metadata: MempoolTxMetadata; providerName?: string }>;
+  loadedTransactions: EvmLoadedMempoolTxWithProvider[];
   /** Optional: time spent to complete each provider batch, ms. */
   batchDurations?: Record<string, number>;
 }
