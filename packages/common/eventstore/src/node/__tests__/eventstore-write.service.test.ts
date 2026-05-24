@@ -100,7 +100,7 @@ describe('EventStoreWriteService', () => {
     }
     expect(remotePublishCallOrder).toBeLessThan(localEmitCallOrder);
     expect(adapter.deleteOutboxByIds).toHaveBeenCalledWith(['1','2']);
-    expect(adapter.createSnapshot).toHaveBeenCalledWith(a, { minKeep: 2, keepWindow: 0 });
+    expect(adapter.createSnapshot).toHaveBeenCalledWith(a, { minKeep: 2, keepWindow: 0, allowPruning: false }, undefined);
     expect(a.resetSnapshotCounter).toHaveBeenCalled();
   });
 

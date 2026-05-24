@@ -8,6 +8,8 @@ export type DriverType = 'postgres' | 'sqlite' | 'sqlite-opfs';
 export interface SnapshotOptions {
   minKeep: number;
   keepWindow: number;
+  /** Global prune flag — overrides per-aggregate allowPruning. All models share the same files. */
+  allowPruning: boolean;
 }
 
 export interface OutboxDeliveryAck {
@@ -107,7 +109,7 @@ class MonotonicId {
  * Node adapters pass their DataSource; browser adapters pass nothing (null).
  */
 export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
-  constructor(protected readonly dataSource: any = null) {}
+  constructor(protected dataSource: any = null) {}
 
   protected readonly idGen = new MonotonicId(10);
 
@@ -125,7 +127,7 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
   ): Promise<number>;
   abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
   abstract advanceWatermark(lastId: string): void;
-  abstract createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void>;
+  abstract createSnapshot(aggregate: T, opts: SnapshotOptions, irreversibleHeight?: number): Promise<void>;
   abstract findLatestSnapshot(aggregateId: string): Promise<SnapshotDataModel | null>;
   abstract findLatestSnapshotBeforeHeight(aggregateId: string, height: number): Promise<SnapshotDataModel | null>;
   abstract applyEventsToAggregate(opts: {

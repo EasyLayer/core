@@ -421,10 +421,10 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   // ── SNAPSHOTS ──────────────────────────────────────────────────────────────
 
-  public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+  public async createSnapshot(aggregate: T, opts: SnapshotOptions, _irreversibleHeight?: number): Promise<void> {
     validateAggregateId(aggregate.aggregateId);
     const row = await toSnapshotDataModel(aggregate);
-    const allowPruning = (aggregate as any).allowPruning === true;
+    const allowPruning = opts.allowPruning === true;
 
     await this.writeLock.runExclusive(async () => {
       this.run(
