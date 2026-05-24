@@ -1,3 +1,11 @@
+## [1.3.5](https://github.com/EasyLayer/core/compare/v1.3.4...v1.3.5) (2026-05-24)
+
+
+### Features
+
+* added mempool tx confirmed logic; ([d976458](https://github.com/EasyLayer/core/commit/d976458ae437d5ebb730bc312aa0654ec6dd8989))
+* implemented eventstore rotation mechanism for node sqlite only; ([5876f90](https://github.com/EasyLayer/core/commit/5876f90d4d2a4ac336c6003003b1d2532225825f))
+
 ## [1.3.4](https://github.com/EasyLayer/core/compare/v1.3.3...v1.3.4) (2026-05-23)
 
 
