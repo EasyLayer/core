@@ -109,7 +109,23 @@ export interface MempoolMemoryUsage {
 export type MempoolProviderSnapshot = Record<string, Array<{ txid: string; metadata: MempoolTxMetadata }>>;
 
 export interface MempoolStateStore {
+  /**
+   * FULL REPLACE — replaces the entire mempool state from a provider snapshot.
+   * Used only for the initial load or explicit reset.
+   * For incremental refresh use mergeSnapshot().
+   */
   applySnapshot(perProvider: MempoolProviderSnapshot): void;
+  /**
+   * ADDITIVE MERGE — adds new transactions and updates metadata for existing ones.
+   * Does NOT remove transactions that are absent from the new snapshot.
+   * Transactions are only removed via removeTxids() when confirmed in a block.
+   */
+  mergeSnapshot(perProvider: MempoolProviderSnapshot): void;
+  /**
+   * Remove transactions by txid (e.g. confirmed in a block).
+   * Cleans up all associated metadata, loaded data and load tracker entries.
+   */
+  removeTxids(txids: string[]): void;
   providers(): string[];
   pendingTxids(providerName: string, limit: number): string[];
   recordLoaded(
