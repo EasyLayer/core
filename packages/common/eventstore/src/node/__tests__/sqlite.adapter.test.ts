@@ -258,3 +258,105 @@ describe('SqliteAdapter', () => {
     expect(rows.length).toBe(2);
   });
 });
+
+// ─────────────────────────────── ROTATION MODE ───────────────────────────────
+
+describe('SqliteAdapter — rotation mode', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function mkFileManager(rotateFn = jest.fn()) {
+    return {
+      rotate: rotateFn,
+      pruneArchivedFiles: jest.fn(),
+    } as any;
+  }
+
+  it('createSnapshot() calls fileManager.rotate() when blockHeight <= irreversibleHeight', async () => {
+    const { ds } = mkDS();
+    const rotateFn = jest.fn().mockResolvedValue({ newDataSource: ds });
+    const fileManager = mkFileManager(rotateFn);
+    const adapter = new SqliteAdapter(ds as any, fileManager);
+
+    const agg: any = new TestAgg('agg1', 1, 5);
+    agg.toSnapshot = () => '{}';
+
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, 10);
+
+    expect(rotateFn).toHaveBeenCalledWith(ds, 5);
+  });
+
+  it('createSnapshot() does NOT call rotate() when irreversibleHeight is undefined', async () => {
+    const { ds } = mkDS();
+    const rotateFn = jest.fn();
+    const fileManager = mkFileManager(rotateFn);
+    const adapter = new SqliteAdapter(ds as any, fileManager);
+
+    const agg: any = new TestAgg('agg1', 1, 5);
+    agg.toSnapshot = () => '{}';
+
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, undefined);
+
+    expect(rotateFn).not.toHaveBeenCalled();
+  });
+
+  it('createSnapshot() does NOT call rotate() when blockHeight > irreversibleHeight', async () => {
+    const { ds } = mkDS();
+    const rotateFn = jest.fn();
+    const fileManager = mkFileManager(rotateFn);
+    const adapter = new SqliteAdapter(ds as any, fileManager);
+
+    const agg: any = new TestAgg('agg1', 1, 20);
+    agg.toSnapshot = () => '{}';
+
+    // snapshot at blockHeight=20, irreversible=10 → no rotation
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, 10);
+
+    expect(rotateFn).not.toHaveBeenCalled();
+  });
+
+  it('createSnapshot() does NOT call rotate() when fileManager is null', async () => {
+    const { ds } = mkDS();
+    const adapter = new SqliteAdapter(ds as any, null);
+
+    const agg: any = new TestAgg('agg1', 1, 5);
+    agg.toSnapshot = () => '{}';
+
+    // Should complete without error
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, 5);
+  });
+
+  it('after rotate(), this.dataSource is replaced with the new DataSource', async () => {
+    const { ds } = mkDS();
+    const newDs = { ...mkDS().ds, _new: true } as any;
+    const rotateFn = jest.fn().mockResolvedValue({ newDataSource: newDs });
+    const fileManager = mkFileManager(rotateFn);
+    const adapter = new SqliteAdapter(ds as any, fileManager);
+
+    const agg: any = new TestAgg('agg1', 1, 5);
+    agg.toSnapshot = () => '{}';
+
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, 10);
+
+    expect((adapter as any).dataSource).toBe(newDs);
+  });
+
+  it('lastSeenId is NOT modified after rotation [P3]', async () => {
+    const { ds } = mkDS();
+    const rotateFn = jest.fn().mockResolvedValue({ newDataSource: ds });
+    const fileManager = mkFileManager(rotateFn);
+    const adapter = new SqliteAdapter(ds as any, fileManager);
+    // Simulate a non-zero watermark.
+    (adapter as any).lastSeenId = 150n;
+
+    const agg: any = new TestAgg('agg1', 1, 5);
+    agg.toSnapshot = () => '{}';
+
+    await adapter.createSnapshot(agg, { minKeep: 2, keepWindow: 0, allowPruning: false }, 10);
+
+    // Watermark must be preserved exactly.
+    expect((adapter as any).lastSeenId).toBe(150n);
+  });
+});
+
+// ─────────────────────────── MULTI-FILE READS ────────────────────────────────
+

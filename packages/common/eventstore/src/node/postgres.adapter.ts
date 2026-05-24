@@ -409,7 +409,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
 
   // ─────────────────────────────── SNAPSHOTS / READ PATH ───────────────────────────────
 
-  public async createSnapshot(aggregate: T, opts: SnapshotOptions): Promise<void> {
+  public async createSnapshot(aggregate: T, opts: SnapshotOptions, _irreversibleHeight?: number): Promise<void> {
     validateAggregateId(aggregate.aggregateId);
     const row = await toSnapshotDataModel(aggregate, 'postgres');
     await this.dataSource.query(
@@ -420,7 +420,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     );
 
     // Prune only if the aggregate explicitly allows pruning.
-    const allow = (aggregate as any).allowPruning === true;
+    const allow = opts.allowPruning === true;
     if (allow) {
       await this.pruneOldSnapshots(row.aggregateId, row.blockHeight, opts);
     }

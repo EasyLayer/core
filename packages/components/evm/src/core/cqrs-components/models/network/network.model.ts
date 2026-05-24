@@ -34,7 +34,7 @@ export class Network extends AggregateRoot {
     maxSize: number;
     aggregateId: string;
     blockHeight: number;
-    options?: { snapshotsEnabled?: boolean; allowPruning?: boolean; snapshotInterval?: number };
+    options?: { snapshotsEnabled?: boolean; snapshotInterval?: number };
   }) {
     super(aggregateId, blockHeight, options);
     this.__maxSize = maxSize;

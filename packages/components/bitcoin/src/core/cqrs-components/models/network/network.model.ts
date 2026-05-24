@@ -18,7 +18,6 @@ import type { LightBlock } from '../interfaces';
  * - Circular buffer storage with O(1) height-based lookups
  * - Stores ~32-128KB per LightBlock (200 bytes base + tx_count × 64 bytes per txid)
  * - Hash-based indexing for fast block retrieval
- * - Automatic pruning when maxSize exceeded
  *
  * Performance:
  * - Block lookup by height: O(1) constant time
@@ -47,7 +46,6 @@ export class Network extends AggregateRoot {
     blockHeight: number;
     options?: {
       snapshotsEnabled?: boolean;
-      allowPruning?: boolean;
       snapshotInterval?: number;
     };
   }) {

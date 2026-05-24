@@ -6,6 +6,29 @@ import type { DataSource } from 'typeorm';
 import type { Logger } from '@nestjs/common';
 import type { DriverType } from '../core';
 
+/**
+ * Apply standard SQLite PRAGMAs for a write-heavy single-process eventstore.
+ * Called once after DataSource.initialize() — both on startup and after file rotation.
+ */
+export async function applyDefaultSqlitePragmas(ds: DataSource): Promise<void> {
+  const qr = ds.createQueryRunner();
+  await qr.connect();
+  try {
+    await qr.query(`PRAGMA journal_mode = WAL`);
+    await qr.query(`PRAGMA synchronous = NORMAL`);
+    await qr.query(`PRAGMA busy_timeout = 5000`);
+    await qr.query(`PRAGMA temp_store = MEMORY`);
+    await qr.query(`PRAGMA cache_size = -524288`); // ~512 MiB
+    await qr.query(`PRAGMA wal_autocheckpoint = 1000`);
+    await qr.query(`PRAGMA mmap_size = 536870912`); // 512 MiB
+    await qr.query(`PRAGMA locking_mode = EXCLUSIVE`);
+    await qr.query(`PRAGMA foreign_keys = OFF`);
+    await qr.query(`PRAGMA optimize`);
+  } finally {
+    await qr.release();
+  }
+}
+
 export async function ensurePgCheck(ds: DataSource, table: string, constraint: string, expr: string) {
   const existsSql = `
     SELECT 1

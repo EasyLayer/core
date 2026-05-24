@@ -12,6 +12,25 @@ import { EventStoreReadService } from './eventstore-read.service';
 export interface EventStoreConfiguration {
   /** Hard cap per transport frame (e.g., gRPC/HTTP limit). */
   transportMaxFrameBytes?: number;
+  /**
+   * Global prune flag — set once at module init from crawler config.
+   * All models share the same SQLite files, so pruning must be all-or-nothing.
+   * Default: false.
+   */
+  allowPruning?: boolean;
+}
+
+/**
+ * Options for EventStoreWriteService.save().
+ */
+export interface SaveOptions {
+  /**
+   * The highest block height that is considered irreversible (finalized) by the crawler.
+   * When provided, and a snapshot exists at a height <= irreversibleHeight, the SQLite
+   * adapter will rotate the active file (directory mode only).
+   * Postgres and browser adapters ignore this value.
+   */
+  irreversibleHeight?: number;
 }
 
 @Injectable()
@@ -23,6 +42,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   // Default 10 MB — must match transport-sdk maxWireBytes and SDK client maxWireBytes.
   // Bitcoin block events can reach 2–4 MB serialized; 1 MB caused permanent outbox stall.
   private transportMaxFrameBytes = 10 * 1024 * 1024;
+  private allowPruning = false;
 
   private draining: Promise<{ completed: boolean }> | null = null;
 
@@ -38,6 +58,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     config: any
   ) {
     if (config?.transportMaxFrameBytes !== undefined) this.transportMaxFrameBytes = config.transportMaxFrameBytes;
+    if (config?.allowPruning !== undefined) this.allowPruning = config.allowPruning;
   }
 
   async onModuleInit(): Promise<void> {
@@ -81,7 +102,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
    * Persist → snapshot → optional remote publish (RAW fast-path if safe; otherwise strict outbox) → ACK.
    * Aggregate writes are always atomic. Outbox writes are included in the same transaction only when remote transport is configured.
    */
-  public async save(models: T | T[]): Promise<void> {
+  public async save(models: T | T[], options: SaveOptions = {}): Promise<void> {
     const aggregates = Array.isArray(models) ? models : [models];
 
     const writeOutbox = this.hasRemoteTransport();
@@ -99,7 +120,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     for (const a of aggregates) {
       if (a.aggregateId) {
         this.eventStoreReadService.cache.set(a.aggregateId, a);
-        await this.maybeCreateSnapshot(a);
+        await this.maybeCreateSnapshot(a, options.irreversibleHeight);
       }
     }
 
@@ -283,12 +304,16 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   // ───────────────────────────── READ API (cached) ─────────────────────────────
 
   /** Create a snapshot for a single aggregate if it says it’s time. (kept) */
-  public async maybeCreateSnapshot(aggregate: T): Promise<void> {
+  public async maybeCreateSnapshot(aggregate: T, irreversibleHeight?: number): Promise<void> {
     if (!aggregate.canMakeSnapshot()) return;
 
     const { minKeep, keepWindow } = aggregate.getSnapshotRetention();
     try {
-      await this.adapter.createSnapshot(aggregate, { minKeep, keepWindow });
+      await this.adapter.createSnapshot(
+        aggregate,
+        { minKeep, keepWindow, allowPruning: this.allowPruning },
+        irreversibleHeight
+      );
       // Snapshot successfully created → reset the counter on the aggregate
       aggregate.resetSnapshotCounter();
     } catch (err: any) {

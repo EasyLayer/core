@@ -287,7 +287,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
     const { minKeep, keepWindow } = aggregate.getSnapshotRetention();
     try {
-      await this.adapter.createSnapshot(aggregate, { minKeep, keepWindow });
+      await this.adapter.createSnapshot(aggregate, { minKeep, keepWindow, allowPruning: false });
       // Snapshot successfully created → reset the counter on the aggregate
       aggregate.resetSnapshotCounter();
     } catch (err: any) {

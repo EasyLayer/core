@@ -7,6 +7,7 @@ import {
   BitcoinMempoolRefreshedEvent,
   BitcoinMempoolSyncProcessedEvent,
   BitcoinMempoolSynchronizedEvent,
+  BitcoinMempoolTransactionsConfirmedEvent,
 } from '../../events';
 import { createMempoolStateStore } from './mempool-state.store';
 import type { LightTransaction, LightVin, LightVout } from '../interfaces';
@@ -257,6 +258,38 @@ export class Mempool extends AggregateRoot {
   }
 
   /**
+   * Remove confirmed transactions from the mempool.
+   * Called from AddBlocksBatchCommandHandler after blocks are processed.
+   * This ensures confirmed txids are removed immediately rather than waiting
+   * for the next refresh cycle.
+   */
+  public async removeConfirmed({
+    requestId,
+    txids,
+    blockHeight,
+    logger,
+  }: {
+    requestId: string;
+    txids: string[];
+    blockHeight: number;
+    logger?: Logger;
+  }): Promise<void> {
+    if (!txids || txids.length === 0) return;
+
+    this.apply(
+      new BitcoinMempoolTransactionsConfirmedEvent(
+        { aggregateId: this.aggregateId, requestId, blockHeight },
+        { txids, blockHeight }
+      )
+    );
+
+    logger?.debug('Mempool confirmed transactions removed', {
+      module: 'mempool-model',
+      args: { count: txids.length, blockHeight },
+    });
+  }
+
+  /**
    * One sync tick.
    *
    * NOTE: No state mutation inside this command; only via event handlers.
@@ -363,7 +396,9 @@ export class Mempool extends AggregateRoot {
   private onBitcoinMempoolRefreshedEvent({ payload }: BitcoinMempoolRefreshedEvent) {
     const per = payload.aggregatedMetadata as ProviderSnapshot;
 
-    this.store.applySnapshot(per || {});
+    // ADDITIVE merge: add new txids and update metadata, do NOT wipe existing ones.
+    // Transactions are only removed when confirmed in a block via removeConfirmed().
+    this.store.mergeSnapshot(per || {});
 
     this.batchSizer.clear();
     this.prevDuration = undefined;
@@ -380,6 +415,14 @@ export class Mempool extends AggregateRoot {
 
   private onBitcoinMempoolSynchronizedEvent(_: BitcoinMempoolSynchronizedEvent) {
     // No-op: external consumer uses this to stop recursion for this fence.
+  }
+
+  private onBitcoinMempoolTransactionsConfirmedEvent({ payload }: BitcoinMempoolTransactionsConfirmedEvent) {
+    const { txids } = payload;
+    if (txids && txids.length > 0) {
+      this.store.removeTxids(txids);
+      this.lastUpdatedMs = Date.now();
+    }
   }
 
   // ====================================================================================

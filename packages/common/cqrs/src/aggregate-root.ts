@@ -8,9 +8,6 @@ export interface AggregateOptions {
   /** Enable or disable snapshot creation */
   snapshotsEnabled?: boolean;
 
-  /** Allow pruning of old events/snapshots */
-  allowPruning?: boolean;
-
   /** Interval between snapshots (default: 1000 versions) */
   snapshotInterval?: number;
 
@@ -176,9 +173,6 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
   private _snapshotMinKeep: number = Infinity;
   private _snapshotKeepWindow: number = 0;
 
-  // Pruning control parameter
-  private _allowPruning: boolean = false;
-
   constructor(aggregateId: string, lastBlockHeight: number, options?: AggregateOptions) {
     // Early validation: aggregateId is used directly as a SQL table name in all storage adapters.
     // Rejecting invalid values here surfaces the error at model creation time,
@@ -191,7 +185,6 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
     this._versionsFromSnapshot = 0;
 
     if (options?.snapshotsEnabled !== undefined) this._snapshotsEnabled = options.snapshotsEnabled;
-    if (options?.allowPruning !== undefined) this._allowPruning = options.allowPruning;
     if (options?.snapshotInterval !== undefined) this._snapshotInterval = options.snapshotInterval;
     if (options?.snapshotAdapters !== undefined) this._snapshotAdapters = options.snapshotAdapters;
     // per-aggregate retention (optional; service defaults apply if undefined)
@@ -219,24 +212,6 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
       minKeep: this._snapshotMinKeep,
       keepWindow: this._snapshotKeepWindow,
     };
-  }
-
-  /**
-   * Indicates whether old events can be pruned for this aggregate.
-   * When enabled, old events beyond the retention period can be safely deleted
-   * to save storage space, provided there are appropriate snapshots.
-   * When disabled, all events are preserved for complete audit trail.
-   *
-   * Also, indicates whether old snapshots should be automatically pruned when creating new ones.
-   * When enabled, only the latest snapshot is kept to save storage space.
-   * When disabled, all snapshots are preserved for historical access.
-   *
-   * IMPORTANT: Pruning should only be enabled for aggregates that:
-   * 1. Can safely reconstruct state from any point in event history
-   * 2. Don't require complete event audit trail for compliance
-   */
-  get allowPruning(): boolean {
-    return this._allowPruning;
   }
 
   /**
@@ -473,7 +448,6 @@ export abstract class AggregateRoot<E extends DomainEvent = DomainEvent> {
       '_snapshotInterval',
       '_snapshotMinKeep',
       '_snapshotKeepWindow',
-      '_allowPruning',
       // Adapter functions cannot survive JSON round-trip — exclude entirely:
       '_snapshotAdapters',
       INTERNAL_EVENTS.toString(),

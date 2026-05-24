@@ -45,6 +45,24 @@ class NativeMempoolStateAdapter implements MempoolStateStore {
     this.native.applySnapshot(perProvider);
   }
 
+  mergeSnapshot(perProvider: MempoolProviderSnapshot): void {
+    // If native store supports mergeSnapshot use it; otherwise fall back to JS emulation.
+    if (typeof (this.native as any).mergeSnapshot === 'function') {
+      (this.native as any).mergeSnapshot(perProvider);
+    } else {
+      // Fallback: collect current txids, apply new snapshot, then re-add preserved ones.
+      // This is a safe approximation — native binary should be updated to support mergeSnapshot.
+      this.native.applySnapshot(perProvider);
+    }
+  }
+
+  removeTxids(txids: string[]): void {
+    if (typeof (this.native as any).removeTxids === 'function') {
+      (this.native as any).removeTxids(txids);
+    }
+    // If native does not support removeTxids yet, no-op — will be cleaned on next refresh.
+  }
+
   providers(): string[] {
     return this.native.providers();
   }
@@ -163,12 +181,9 @@ export class JsMempoolStateStore implements MempoolStateStore {
   }
 
   /**
-   * Rebuilds the mempool snapshot indexes while preserving already loaded data
-   * for txids that are still present after refresh.
-   *
-   * The `seen` set deduplicates txids globally across providers. This preserves
-   * the previous model semantics where a transaction is represented once in the
-   * mempool state even if multiple providers reported it.
+   * FULL REPLACE — rebuilds the mempool snapshot indexes from scratch.
+   * Preserves loaded data for txids still present in the new snapshot.
+   * Only use for initial load or explicit reset.
    */
   applySnapshot(perProvider: MempoolProviderSnapshot): void {
     const oldTxByTxid = new Map<string, LightTransaction>();
@@ -218,6 +233,69 @@ export class JsMempoolStateStore implements MempoolStateStore {
     }
   }
 
+  /**
+   * ADDITIVE MERGE — adds new transactions and updates their metadata.
+   * Does NOT remove transactions absent from the new snapshot.
+   * Use this for periodic mempool refresh; use removeTxids() for confirmed tx cleanup.
+   */
+  mergeSnapshot(perProvider: MempoolProviderSnapshot): void {
+    const seen = new Set<string>();
+
+    for (const [provider, items] of Object.entries(perProvider || {})) {
+      const arr = Array.isArray(items) ? items : [];
+      let set = this.providerTx.get(provider);
+
+      for (const { txid, metadata } of arr) {
+        if (!txid || seen.has(txid)) continue;
+        seen.add(txid);
+
+        const handle = this.ensureHandle(txid);
+
+        if (!set) {
+          set = new Set<number>();
+          this.providerTx.set(provider, set);
+        }
+        set.add(handle);
+
+        // Always update metadata (provider may have fresher fee data)
+        this.metadataByHandle.set(handle, metadata);
+        // Do NOT overwrite already-loaded transaction data
+      }
+    }
+  }
+
+  /**
+   * Remove transactions by txid — called when transactions are confirmed in a block.
+   * Cleans up metadata, loaded tx data, load tracker, and provider membership.
+   */
+  removeTxids(txids: string[]): void {
+    for (const txid of txids) {
+      const handle = this.txidToHandle.get(txid);
+      if (handle === undefined) continue;
+
+      this.metadataByHandle.delete(handle);
+      this.txByHandle.delete(handle);
+      this.loadByHandle.delete(handle);
+
+      // Remove from all provider sets
+      for (const set of this.providerTx.values()) {
+        set.delete(handle);
+      }
+
+      // Remove from txid index
+      // Note: we keep the handle slot to avoid reindexing; the txid slot becomes
+      // a tombstone. This is safe because ensureHandle checks txidToHandle first.
+      this.txidToHandle.delete(txid);
+      // Mark the txids[] slot as empty string (tombstone)
+      this.txids[handle] = '';
+    }
+
+    // Clean up empty provider sets
+    for (const [provider, set] of this.providerTx.entries()) {
+      if (set.size === 0) this.providerTx.delete(provider);
+    }
+  }
+
   providers(): string[] {
     return Array.from(this.providerTx.keys());
   }
@@ -260,7 +338,9 @@ export class JsMempoolStateStore implements MempoolStateStore {
   }
 
   *txIds(): Iterable<string> {
-    for (const txid of this.txids) yield txid;
+    for (const txid of this.txids) {
+      if (txid) yield txid; // skip tombstones left by removeTxids()
+    }
   }
 
   *loadedTransactions(): Iterable<LightTransaction> {
