@@ -188,8 +188,33 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
       // Step 1: publish. If transport is unavailable, outbox rows are retained and drain will retry.
       let published = false;
       try {
+        const publishStartedAt = Date.now();
+        this.logger.verbose('Fast-path outbox publish started', {
+          module: 'eventstore',
+          args: {
+            action: 'publishWithCorrectFlow',
+            eventCount: persisted.rawEvents.length,
+            insertedOutboxIds: persisted.insertedOutboxIds.length,
+            firstId: persisted.firstId,
+            lastId: persisted.lastId,
+            firstRequestId: persisted.rawEvents[0]?.requestId,
+            lastRequestId: persisted.rawEvents[persisted.rawEvents.length - 1]?.requestId,
+            firstBlockHeight: persisted.rawEvents[0]?.blockHeight,
+            lastBlockHeight: persisted.rawEvents[persisted.rawEvents.length - 1]?.blockHeight,
+          },
+        });
         const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(persisted.rawEvents);
         assertFullOutboxAck(ack, persisted.rawEvents.length);
+        this.logger.verbose('Fast-path outbox publish ACK received', {
+          module: 'eventstore',
+          args: {
+            action: 'publishWithCorrectFlow',
+            eventCount: persisted.rawEvents.length,
+            ackMs: Date.now() - publishStartedAt,
+            firstId: persisted.firstId,
+            lastId: persisted.lastId,
+          },
+        });
         published = true;
       } catch (e) {
         this.logger.verbose('Fast-path publish failed, outbox retained for drain retry', {
@@ -203,7 +228,18 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
         // Step 2: delete outbox rows and advance watermark. Only reached on successful publish.
         // If delete throws, rows stay in outbox and drain will redeliver (at-least-once) — acceptable.
         try {
+          const deleteStartedAt = Date.now();
           await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
+          this.logger.verbose('Fast-path outbox rows deleted after ACK', {
+            module: 'eventstore',
+            args: {
+              action: 'publishWithCorrectFlow',
+              deletedOutboxIds: persisted.insertedOutboxIds.length,
+              deleteMs: Date.now() - deleteStartedAt,
+              firstId: persisted.firstId,
+              lastId: persisted.lastId,
+            },
+          });
           // BUG-6 fix: advance watermark so next hasPendingAfterId() skips
           // already-delivered ids, making fast-path reachable on subsequent saves.
           this.adapter.advanceWatermark(persisted.lastId);
@@ -256,8 +292,24 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     while (true) {
       try {
         const sent = await this.adapter.fetchDeliverAckChunk(this.transportMaxFrameBytes, async (events) => {
+          const drainStartedAt = Date.now();
+          this.logger.verbose('Outbox drain chunk publish started', {
+            module: 'eventstore',
+            args: {
+              action: 'drainOutboxCompletely',
+              eventCount: events.length,
+              firstRequestId: events[0]?.requestId,
+              lastRequestId: events[events.length - 1]?.requestId,
+              firstBlockHeight: events[0]?.blockHeight,
+              lastBlockHeight: events[events.length - 1]?.blockHeight,
+            },
+          });
           const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(events);
           assertFullOutboxAck(ack, events.length);
+          this.logger.verbose('Outbox drain chunk ACK received', {
+            module: 'eventstore',
+            args: { action: 'drainOutboxCompletely', eventCount: events.length, ackMs: Date.now() - drainStartedAt },
+          });
           return ack;
         });
         if (sent === 0) return { completed: true };

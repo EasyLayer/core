@@ -27,7 +27,8 @@ describe('BlocksQueueModule', () => {
     queueIteratorBlocksBatchSize: 2,
     preloadCount: 1 * 1024 * 1024,
     blockSize: 1 * 1024 * 1024,
-    blockTimeMs: 20000
+    blockTimeMs: 20000,
+    verifyMerkleRoot: false
   };
 
   beforeEach(async () => {

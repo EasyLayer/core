@@ -141,27 +141,6 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
       .filter((item): item is NonNullable<typeof item> => item !== null);
 
     if (failedItems.length === 0) return;
-
-    const methodCounts = calls.reduce<Record<string, number>>((acc, call) => {
-      acc[call.method] = (acc[call.method] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    // Keep this transport-level diagnostic intentionally credential-free. It is
-    // enabled only when EASYLAYER_RPC_DIAGNOSTIC_LOGS=1 because item-level
-    // errors can be noisy for optional calls such as mempool/tx lookups.
-    // console.warn(
-    //   '[EasyLayer RPC diagnostic] JSON-RPC batch returned item-level errors or missing responses',
-    //   JSON.stringify({
-    //     provider: this.uniqName,
-    //     url: this.displayUrl,
-    //     totalCalls: calls.length,
-    //     failedCount: failedItems.length,
-    //     methodCounts,
-    //     failedItems: failedItems.slice(0, 20),
-    //     failedItemsTruncated: failedItems.length > 20,
-    //   })
-    // );
   }
 
   async connect(): Promise<void> {

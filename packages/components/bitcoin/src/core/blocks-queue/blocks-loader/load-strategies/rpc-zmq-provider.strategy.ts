@@ -311,12 +311,40 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
-        const heights = infos.map((i) => i.height);
-        const fetched = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+        const rawFetchStartedAt = Date.now();
+        const fetched = await this.blockchainProvider.getManyBlocksRawByKnownHashes(infos);
+        const rawFetchMs = Date.now() - rawFetchStartedAt;
         if (!Array.isArray(fetched)) {
-          throw new Error('getManyBlocksRawByHeights must return an array of raw blocks');
+          throw new Error('getManyBlocksRawByKnownHashes must return an array of raw blocks');
         }
-        return fetched.filter(Boolean) as RawBlock[];
+
+        const missing = fetched
+          .map((block, index) => (block ? null : infos[index]))
+          .filter((item): item is BlockInfo => item != null);
+
+        if (missing.length > 0) {
+          throw new Error(
+            `RPC+ZMQ raw fetch returned missing blocks for known hashes: ${missing
+              .map((item) => `${item.height}:${item.hash}`)
+              .join(', ')}`
+          );
+        }
+
+        const blocks = fetched as RawBlock[];
+        this.logger.verbose('Loaded RPC+ZMQ raw blocks by known hashes', {
+          module: this.moduleName,
+          args: {
+            phase: 'rpc_zmq_raw_fetch_by_known_hash',
+            phaseDurationMs: rawFetchMs,
+            requestedBlocks: infos.length,
+            loadedBlocks: blocks.length,
+            startHeight: infos[0]?.height,
+            endHeight: infos[infos.length - 1]?.height,
+            predictedReplyBytes: infos.reduce((sum, item) => sum + Math.floor(item.size * 2.1), 0),
+            rawBytes: blocks.reduce((sum, block) => sum + block.size, 0),
+          },
+        });
+        return blocks;
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
