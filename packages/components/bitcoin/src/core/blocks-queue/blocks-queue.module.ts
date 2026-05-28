@@ -9,7 +9,7 @@ import { MempoolLoaderService } from './mempool-loader.service';
 export interface BlocksQueueModuleOptions {
   blocksCommandExecutor: Type<BlocksCommandExecutor>;
   mempoolCommandExecutor: Type<MempoolCommandExecutor>;
-  basePreloadCount: number;
+  preloadCount: number;
   maxBlockHeight: number;
   maxQueueSize: number;
   queueLoaderStrategyName: string;
@@ -17,6 +17,7 @@ export interface BlocksQueueModuleOptions {
   queueIteratorBlocksBatchSize: number;
   blockSize: number;
   blockTimeMs: number;
+  verifyMerkleRoot?: boolean;
 }
 
 @Module({})

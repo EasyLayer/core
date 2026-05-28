@@ -138,7 +138,7 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
   private createStrategies(queue: BlocksQueue): void {
     const strategyOptions = {
       maxRpcReplyBytes: this.config.queueLoaderRequestBlocksBatchSize,
-      basePreloadCount: this.config.basePreloadCount,
+      preloadCount: this.config.preloadCount,
     };
 
     this._strategies.set(

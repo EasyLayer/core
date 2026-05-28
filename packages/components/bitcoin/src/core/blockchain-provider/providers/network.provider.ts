@@ -103,33 +103,36 @@ export class NetworkProvider extends BaseProvider {
     heights: number[]
   ): Promise<Array<{ hash: string; height: number; size: number; bytes: Buffer } | null>> {
     const hashes = await this.getManyBlockHashesByHeights(heights);
-    const hashToHeight = new Map<string, number>();
-    hashes.forEach((h, i) => {
-      if (h) hashToHeight.set(h, heights[i]!);
-    });
+    return this.getManyBlocksRawByKnownHashes(
+      hashes.map((hash, index) => (hash ? { hash, height: heights[index]! } : null))
+    );
+  }
 
-    const validHashes = hashes.filter((h): h is string => !!h);
-    if (validHashes.length === 0) return new Array(heights.length).fill(null);
+  async getManyBlocksRawByKnownHashes(
+    infos: Array<{ hash: string; height: number } | null>
+  ): Promise<Array<{ hash: string; height: number; size: number; bytes: Buffer } | null>> {
+    const validInfos = infos.filter((item): item is { hash: string; height: number } => !!item?.hash);
+    if (validInfos.length === 0) return new Array(infos.length).fill(null);
 
-    const buffers = await this.transport.requestHexBlocks(validHashes);
+    const buffers = await this.transport.requestHexBlocks(validInfos.map((item) => item.hash));
 
     const hashToResult = new Map<string, { hash: string; height: number; size: number; bytes: Buffer } | null>();
-    validHashes.forEach((hash, idx) => {
+    validInfos.forEach((info, idx) => {
       const buf = buffers[idx];
       if (!buf) {
-        hashToResult.set(hash, null);
+        hashToResult.set(info.hash, null);
         return;
       }
       const bytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as Uint8Array);
-      hashToResult.set(hash, {
-        hash,
-        height: hashToHeight.get(hash)!,
+      hashToResult.set(info.hash, {
+        hash: info.hash,
+        height: info.height,
         size: bytes.length,
         bytes,
       });
     });
 
-    return hashes.map((hash) => (hash ? hashToResult.get(hash) ?? null : null));
+    return infos.map((info) => (info?.hash ? hashToResult.get(info.hash) ?? null : null));
   }
 
   async getManyBlocksHexByHeights(heights: number[]): Promise<(UniversalBlock | null)[]> {

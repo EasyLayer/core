@@ -3,21 +3,11 @@ import chalk from 'chalk';
 import * as fs from 'node:fs';
 import type { LoggerOptions } from 'bunyan';
 import { nameFromLevel } from 'bunyan';
-import type { LogLevel, RootLoggerOptions } from '../core/types';
+import type { LogLevel, RootLoggerOptions, RuntimeLogMetricsOptions } from '../core/types';
 import { sanitizeLogValue } from '../core/sanitize';
+import { nextRuntimeLogMetricsSnapshot, resolveRuntimeLogMetricsOptions } from '../core/runtime-metrics';
 
 export type BunyanInstance = bunyan;
-
-function memNow() {
-  // @ts-ignore
-  if (typeof process === 'undefined' || typeof process.memoryUsage !== 'function') return undefined;
-  const mu = process.memoryUsage();
-  const toMB = (b: number | undefined) => Math.round(((b || 0) / 1048576) * 10) / 10;
-  return {
-    rssMB: toMB(mu.rss),
-    heapUsedMB: toMB(mu.heapUsed),
-  };
-}
 
 function replacer(_k: string, v: any) {
   return typeof v === 'bigint' ? String(v) : v;
@@ -63,23 +53,26 @@ class BunyanStream {
     const { name, time, level, msg, args, serviceName, methodName, component } = m;
     const ts = time ? time.toISOString() : new Date().toISOString();
 
-    const mem = level === bunyan.INFO ? memNow() : undefined;
+    const levelName = ((nameFromLevel as any)[level] || 'info') as LogLevel;
+    const runtime = nextRuntimeLogMetricsSnapshot(levelName, state.runtimeMetrics);
+    const { perf, mem } = runtime;
 
     if (!prod) {
       const c = colorFor(level);
-      const levelName = (nameFromLevel as any)[level]?.toUpperCase() || String(level);
+      const levelLabel = (nameFromLevel as any)[level]?.toUpperCase() || String(level);
       const comp = toStr(component ?? name);
       const svc = serviceName ? toStr(serviceName) : '';
       const meth = methodName ? `.${toStr(methodName)}()` : '';
       const meta = (() => {
-        if (args && mem) return ` ${toStr({ ...args, mem })}`;
+        const runtimeMeta = { ...(perf ? { perf } : {}), ...(mem ? { mem } : {}) };
+        if (args && Object.keys(runtimeMeta).length > 0) return ` ${toStr({ ...args, ...runtimeMeta })}`;
         if (args) return ` ${toStr(args)}`;
-        if (mem) return ` ${toStr({ mem })}`;
+        if (Object.keys(runtimeMeta).length > 0) return ` ${toStr(runtimeMeta)}`;
         return '';
       })();
 
       // eslint-disable-next-line no-console
-      console.log(`${c(`[${levelName}]`)} ${ts} ${comp} ${svc}${meth} ${toStr(msg)}${meta}`);
+      console.log(`${c(`[${levelLabel}]`)} ${ts} ${comp} ${svc}${meth} ${toStr(msg)}${meta}`);
       return;
     }
 
@@ -87,6 +80,7 @@ class BunyanStream {
       JSON.stringify(
         {
           ...m,
+          ...(perf ? { perf } : {}),
           ...(mem ? { mem } : {}),
           time: ts,
           level: (nameFromLevel as any)[level],
@@ -121,8 +115,8 @@ const lvlMap: Record<LogLevel, bunyan.LogLevel> = {
 };
 
 // filePath is stored in state, not in process.env, to avoid global side effects.
-type State = { root?: bunyan; enabled: boolean; filePath?: string };
-const state: State = { root: undefined, enabled: true };
+type State = { root?: bunyan; enabled: boolean; filePath?: string; runtimeMetrics: RuntimeLogMetricsOptions };
+const state: State = { root: undefined, enabled: true, runtimeMetrics: resolveRuntimeLogMetricsOptions() };
 
 export function configureRootBunyan(opts: RootLoggerOptions) {
   state.enabled = opts.enabled !== false;
@@ -134,6 +128,7 @@ export function configureRootBunyan(opts: RootLoggerOptions) {
   // Store filePath in state instead of mutating process.env.
   // process.env.LOGS_FILE is still supported as an env-var fallback (read in BunyanStream.write).
   if (opts.filePath) state.filePath = opts.filePath;
+  state.runtimeMetrics = resolveRuntimeLogMetricsOptions(opts.runtimeMetrics);
 
   const options: LoggerOptions = {
     name: opts.name || 'app',

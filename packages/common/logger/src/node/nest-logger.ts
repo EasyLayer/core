@@ -24,6 +24,7 @@ export class NestLogger implements LoggerService {
       level: opts.level,
       enabled: opts.enabled,
       filePath: opts.filePath,
+      runtimeMetrics: opts.runtimeMetrics,
     });
     getGlobalContext();
   }

@@ -9,6 +9,28 @@ interface IndexedRequest<TReq = { method: string; params: any[] }> {
   ref: TReq;
 }
 
+export interface RateLimiterFailedBatch {
+  batchIndex: number;
+  method: string;
+  size: number;
+  error: unknown;
+}
+
+export class RateLimiterBatchError extends Error {
+  constructor(public readonly failedBatches: RateLimiterFailedBatch[]) {
+    super(
+      `RateLimiter failed ${failedBatches.length} scheduled batch(es): ` +
+        failedBatches
+          .map((failure) => {
+            const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
+            return `#${failure.batchIndex} method=${failure.method} size=${failure.size}: ${message}`;
+          })
+          .join('; ')
+    );
+    this.name = 'RateLimiterBatchError';
+  }
+}
+
 // ── Internal Scheduler ────────────────────────────────────────────────────────
 
 /**
@@ -132,10 +154,11 @@ class Scheduler {
  *
  * Identical behavior:
  *   - Groups requests by method, splits into maxBatchSize chunks
- *   - Schedules each chunk through the Scheduler (concurrency + pacing + reservoir)
+ *   - Queues all chunks into the Scheduler so maxConcurrentRequests and pacing actually apply
+ *   - Waits for all scheduled chunks with allSettled before surfacing transport-level failures
  *   - Preserves exact output order matching input order
  *   - Passes request objects by reference (no cloning)
- *   - Re-throws transport-level errors; item-level nulls handled inside batchRpcCall
+ *   - Re-throws transport-level batch errors; item-level nulls handled inside batchRpcCall
  *
  * No eval, no Redis, no external runtime dependencies.
  */
@@ -196,22 +219,44 @@ export class RateLimiter {
 
     const results: (T | null)[] = new Array(requests.length).fill(null);
 
-    for (const batch of batches) {
-      try {
+    const scheduledBatches = batches.map((batch, batchIndex) =>
+      this.limiter.schedule(async () => {
         const plainRequests = batch.requests.map((ir) => ir.ref);
-        const batchResults = await this.limiter.schedule(() => batchRpcCall(plainRequests));
+        const batchResults = await batchRpcCall(plainRequests);
 
-        if (!Array.isArray(batchResults)) continue;
+        if (!Array.isArray(batchResults)) {
+          return { batchIndex, method: batch.method, size: batch.requests.length };
+        }
 
         for (let i = 0; i < batch.requests.length; i++) {
           const ir = batch.requests[i]!;
           results[ir.originalIndex] = i < batchResults.length ? (batchResults[i] as T | null) : null;
         }
-      } catch (err) {
-        // Re-throw transport-level errors so provider failover logic triggers.
-        // Item-level RPC errors are returned as null inside batchRpcCall.
-        throw err;
-      }
+
+        return { batchIndex, method: batch.method, size: batch.requests.length };
+      })
+    );
+
+    const settled = await Promise.allSettled(scheduledBatches);
+    const failedBatches: RateLimiterFailedBatch[] = [];
+
+    for (let batchIndex = 0; batchIndex < settled.length; batchIndex++) {
+      const result = settled[batchIndex]!;
+      if (result.status === 'fulfilled') continue;
+
+      const batch = batches[batchIndex]!;
+      failedBatches.push({
+        batchIndex,
+        method: batch.method,
+        size: batch.requests.length,
+        error: result.reason,
+      });
+    }
+
+    if (failedBatches.length > 0) {
+      // Transport-level batch failures are not converted into partial null results.
+      // Item-level RPC errors should already be represented by null entries from batchRpcCall.
+      throw new RateLimiterBatchError(failedBatches);
     }
 
     return results;

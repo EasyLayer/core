@@ -56,6 +56,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       getManyBlocksStatsByHeights: jest.fn(),
       getManyBlocksByHeights: jest.fn(),
       getManyBlocksRawByHeights: jest.fn(),
+      getManyBlocksRawByKnownHashes: jest.fn(),
       hasNetworkProvidersAvailable: jest.fn().mockReturnValue(false),
       getActiveNetworkProviderName: jest.fn(),
       getNetworkProviderByName: jest.fn(),
@@ -64,7 +65,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
 
     strategy = new RpcZmqProviderStrategy(mockLogger, mockProvider, queue, {
       maxRpcReplyBytes,
-      basePreloadCount,
+      preloadCount: basePreloadCount,
     });
   });
 

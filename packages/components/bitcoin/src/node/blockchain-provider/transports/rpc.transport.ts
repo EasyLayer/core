@@ -113,6 +113,57 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     return this._id++;
   }
 
+  private shouldLogRpcDiagnostics(): boolean {
+    return typeof process !== 'undefined' && process.env['EASYLAYER_RPC_DIAGNOSTIC_LOGS'] === '1';
+  }
+
+  private logRpcBatchDiagnostics(
+    calls: Array<{ method: string; params: any[] }>,
+    batch: Array<{ id: number; method: string; params: any[] }>,
+    responseMap: Map<number, any>
+  ): void {
+    if (!this.shouldLogRpcDiagnostics()) return;
+
+    const failedItems = batch
+      .map((req, index) => {
+        const res = responseMap.get(req.id);
+        if (res && !res.error) return null;
+        return {
+          index,
+          id: req.id,
+          method: req.method,
+          paramsPreview: req.params.slice(0, 2),
+          hasResponse: !!res,
+          errorCode: res?.error?.code,
+          errorMessage: res?.error?.message,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    if (failedItems.length === 0) return;
+
+    const methodCounts = calls.reduce<Record<string, number>>((acc, call) => {
+      acc[call.method] = (acc[call.method] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    // Keep this transport-level diagnostic intentionally credential-free. It is
+    // enabled only when EASYLAYER_RPC_DIAGNOSTIC_LOGS=1 because item-level
+    // errors can be noisy for optional calls such as mempool/tx lookups.
+    // console.warn(
+    //   '[EasyLayer RPC diagnostic] JSON-RPC batch returned item-level errors or missing responses',
+    //   JSON.stringify({
+    //     provider: this.uniqName,
+    //     url: this.displayUrl,
+    //     totalCalls: calls.length,
+    //     failedCount: failedItems.length,
+    //     methodCounts,
+    //     failedItems: failedItems.slice(0, 20),
+    //     failedItemsTruncated: failedItems.length > 20,
+    //   })
+    // );
+  }
+
   async connect(): Promise<void> {
     return this.executeWithErrorHandling(async () => {
       // Verify RPC connectivity
@@ -388,6 +439,8 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         responseMap.set(res.id, res);
       }
     }
+
+    this.logRpcBatchDiagnostics(calls, batch, responseMap);
 
     // Map back to original order; per-item RPC errors return null (not thrown)
     return batch.map((req) => {

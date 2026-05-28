@@ -34,9 +34,9 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
 
   private _maxRpcReplyBytes: number = 10 * 1024 * 1024;
   private _preloadedItemsQueue: BlockInfo[] = [];
-  private _maxPreloadCount: number;
-  private _lastLoadAndEnqueueDuration = 0;
-  private _previousLoadAndEnqueueDuration = 0;
+  private readonly _basePreloadCount: number;
+  private readonly _maxPreloadCountCap: number;
+  private _currentPreloadCount: number;
 
   constructor(
     private readonly logger: Logger,
@@ -44,11 +44,13 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     private readonly queue: BlocksQueue,
     config: {
       maxRpcReplyBytes: number;
-      basePreloadCount: number;
+      preloadCount: number;
     }
   ) {
     this._maxRpcReplyBytes = config.maxRpcReplyBytes;
-    this._maxPreloadCount = config.basePreloadCount;
+    this._basePreloadCount = Math.max(1, Math.floor(config.preloadCount));
+    this._maxPreloadCountCap = Math.max(this._basePreloadCount, this._basePreloadCount * 4);
+    this._currentPreloadCount = this._basePreloadCount;
   }
 
   /**
@@ -93,49 +95,114 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
   // ===== INTERNALS =====
 
   /**
-   * Preload block metadata. Dynamically tunes _maxPreloadCount based on timing:
-   *   timingRatio > 1.2 → increase by 25% (loader slower → need bigger preload buffer)
-   *   timingRatio < 0.8 → decrease by 25%, min 1
-   *   0.8–1.2           → no change
+   * Preload block metadata for the next height window.
+   *
+   * Initial count is derived from the provider rate-limit maxBatchSize, so one
+   * preload normally maps to one JSON-RPC batch per metadata method. After each
+   * successful preload we tune the next count from the observed average block
+   * size and the raw RPC reply byte budget:
+   *   - large blocks reduce the next preload count toward 1-3 heights;
+   *   - small blocks can increase it, but only up to basePreloadCount * 4.
+   *
+   * This preserves the useful dynamic behavior without allowing preload to grow
+   * unbounded to values such as 100 and accidentally span many rate-limited
+   * HTTP JSON-RPC batches.
    */
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
-    const previousMaxPreloadCount = this._maxPreloadCount;
-
-    if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
-      const timingRatio = this._lastLoadAndEnqueueDuration / this._previousLoadAndEnqueueDuration;
-      if (timingRatio > 1.2) {
-        this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
-      } else if (timingRatio < 0.8) {
-        this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
-      }
-    }
-
-    if (this._maxPreloadCount !== previousMaxPreloadCount) {
-      this.logger.verbose('Adjusted RPC preload count based on previous load duration', {
-        module: this.moduleName,
-        args: {
-          previousMaxPreloadCount,
-          nextMaxPreloadCount: this._maxPreloadCount,
-          previousLoadAndEnqueueDuration: this._previousLoadAndEnqueueDuration,
-          lastLoadAndEnqueueDuration: this._lastLoadAndEnqueueDuration,
-        },
-      });
-    }
-
     const lastHeight = this.queue.lastHeight;
     const remaining = currentNetworkHeight - lastHeight;
-    const count = Math.min(this._maxPreloadCount, remaining);
+    const count = Math.min(this._currentPreloadCount, remaining);
     if (count <= 0) return;
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
+    const preloadStartedAt = Date.now();
     const blockInfos = await this.blockchainProvider.getManyBlocksStatsByHeights(heights);
+    const preloadDurationMs = Date.now() - preloadStartedAt;
+
+    if (blockInfos.length === 0) {
+      const message =
+        `RPC preload returned zero valid block stats for requested heights ${heights[0]}-${heights[heights.length - 1]} ` +
+        `(requested=${heights.length}, currentNetworkHeight=${currentNetworkHeight}, lastQueueHeight=${lastHeight}). ` +
+        `This usually means getblockhash/getblockstats returned only nulls/errors or the RPC provider rejected the batch. ` +
+        `Check preceding blockchain-provider/RPC transport diagnostics for null/error counts.`;
+
+      this.logger.warn(message, {
+        module: this.moduleName,
+        args: {
+          action: 'preloadBlocksInfo',
+          requestedHeights: heights.length,
+          firstHeight: heights[0],
+          lastHeight: heights[heights.length - 1],
+          currentNetworkHeight,
+          queueLastHeight: lastHeight,
+          currentPreloadCount: this._currentPreloadCount,
+          basePreloadCount: this._basePreloadCount,
+          maxPreloadCountCap: this._maxPreloadCountCap,
+          phaseDurationMs: preloadDurationMs,
+        },
+      });
+
+      throw new Error(message);
+    }
+
+    this.logger.debug('Preloaded RPC block stats for strategy', {
+      module: this.moduleName,
+      args: {
+        action: 'preloadBlocksInfo',
+        requestedHeights: heights.length,
+        validBlockInfos: blockInfos.length,
+        firstRequestedHeight: heights[0],
+        lastRequestedHeight: heights[heights.length - 1],
+        firstValidHeight: blockInfos[0]?.height,
+        lastValidHeight: blockInfos[blockInfos.length - 1]?.height,
+        phaseDurationMs: preloadDurationMs,
+        currentPreloadCount: this._currentPreloadCount,
+      },
+    });
+
+    this.adjustPreloadCountFromBlockInfos(blockInfos);
 
     for (const { blockhash, total_size, height } of blockInfos) {
       if (!blockhash || height == null) {
-        throw new Error('Block infos missing required hash and height');
+        throw new Error(
+          `Block infos missing required hash and height while preloading RPC blocks: ` +
+            `height=${String(height)}, blockhash=${String(blockhash)}`
+        );
       }
       const size = total_size != null ? total_size : this.queue.blockSize;
       this._preloadedItemsQueue.push({ hash: blockhash, size, height });
+    }
+  }
+
+  private adjustPreloadCountFromBlockInfos(blockInfos: Array<{ total_size?: number | null }>): void {
+    if (blockInfos.length === 0) return;
+
+    const OVERHEAD = 2.1;
+    const totalPredictedReplyBytes = blockInfos.reduce((sum, info) => {
+      const rawSize = info.total_size != null ? info.total_size : this.queue.blockSize;
+      return sum + Math.max(1, Math.floor(rawSize * OVERHEAD));
+    }, 0);
+    const averagePredictedReplyBytes = Math.max(1, totalPredictedReplyBytes / blockInfos.length);
+    const nextPreloadCount = Math.max(
+      1,
+      Math.min(this._maxPreloadCountCap, Math.floor(this._maxRpcReplyBytes / averagePredictedReplyBytes))
+    );
+
+    if (nextPreloadCount !== this._currentPreloadCount) {
+      const previousPreloadCount = this._currentPreloadCount;
+      this._currentPreloadCount = nextPreloadCount;
+      this.logger.verbose('Adjusted RPC preload count from observed block sizes', {
+        module: this.moduleName,
+        args: {
+          previousPreloadCount,
+          nextPreloadCount,
+          basePreloadCount: this._basePreloadCount,
+          maxPreloadCountCap: this._maxPreloadCountCap,
+          maxRpcReplyBytes: this._maxRpcReplyBytes,
+          averagePredictedReplyBytes: Math.round(averagePredictedReplyBytes),
+          observedBlockInfos: blockInfos.length,
+        },
+      });
     }
   }
 
@@ -182,23 +249,59 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
       args: { totalBlocks: blocks.length, totalInfosPulled: infos.length },
     });
 
+    const loadedBlocks = blocks.length;
     await this.enqueueBlocks(blocks);
     blocks.length = 0;
 
-    this._previousLoadAndEnqueueDuration = this._lastLoadAndEnqueueDuration;
-    this._lastLoadAndEnqueueDuration = Date.now() - startTime;
+    const loadAndEnqueueDuration = Date.now() - startTime;
+    this.logger.verbose('RPC load/enqueue batch completed', {
+      module: this.moduleName,
+      args: {
+        phase: 'rpc_load_and_enqueue',
+        phaseDurationMs: loadAndEnqueueDuration,
+        pulledInfos: infos.length,
+        loadedBlocks,
+      },
+    });
   }
 
   private async loadBlocks(infos: BlockInfo[], maxRetries: number): Promise<RawBlock[]> {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
-        const heights = infos.map((i) => i.height);
-        const raw = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+        const rawFetchStartedAt = Date.now();
+        const raw = await this.blockchainProvider.getManyBlocksRawByKnownHashes(infos);
+        const rawFetchMs = Date.now() - rawFetchStartedAt;
         if (!Array.isArray(raw)) {
-          throw new Error('getManyBlocksRawByHeights must return an array of raw blocks');
+          throw new Error('getManyBlocksRawByKnownHashes must return an array of raw blocks');
         }
-        return raw.filter(Boolean) as RawBlock[];
+        const missing = raw
+          .map((block, index) => (block ? null : infos[index]))
+          .filter((item): item is BlockInfo => item != null);
+
+        if (missing.length > 0) {
+          throw new Error(
+            `RPC raw fetch returned missing blocks for known hashes: ${missing
+              .map((item) => `${item.height}:${item.hash}`)
+              .join(', ')}`
+          );
+        }
+
+        const blocks = raw as RawBlock[];
+        this.logger.verbose('Loaded RPC raw blocks by known hashes', {
+          module: this.moduleName,
+          args: {
+            phase: 'rpc_raw_fetch_by_known_hash',
+            phaseDurationMs: rawFetchMs,
+            requestedBlocks: infos.length,
+            loadedBlocks: blocks.length,
+            startHeight: infos[0]?.height,
+            endHeight: infos[infos.length - 1]?.height,
+            predictedReplyBytes: infos.reduce((sum, item) => sum + Math.floor(item.size * 2.1), 0),
+            rawBytes: blocks.reduce((sum, block) => sum + block.size, 0),
+          },
+        });
+        return blocks;
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {
