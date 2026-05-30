@@ -25,9 +25,10 @@ describe('BlocksQueueModule', () => {
     maxQueueSize: 1024,
     queueLoaderStrategyName: 'pull',
     queueIteratorBlocksBatchSize: 2,
-    basePreloadCount: 1 * 1024 * 1024,
+    preloadCount: 1 * 1024 * 1024,
     blockSize: 1 * 1024 * 1024,
-    blockTimeMs: 20000
+    blockTimeMs: 20000,
+    verifyMerkleRoot: false
   };
 
   beforeEach(async () => {

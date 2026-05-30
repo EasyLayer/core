@@ -30,7 +30,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
   let mockLogger: jest.Mocked<any>;
   let mockProvider: jest.Mocked<BlockchainProviderService>;
   let queue: BlocksQueue;
-  const basePreloadCount = 4;
+  const preloadCount = 4;
   const defaultBlockSize = 1000;
   const maxRpcReplyBytes = 10_000;
 
@@ -56,11 +56,12 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       getManyBlocksStatsByHeights: jest.fn(),
       getManyBlocksByHeights: jest.fn(),
       getManyBlocksRawByHeights: jest.fn(),
+      getManyBlocksRawByKnownHashes: jest.fn(),
     } as any;
 
     strategy = new RpcProviderStrategy(mockLogger, mockProvider, queue, {
       maxRpcReplyBytes,
-      basePreloadCount,
+      preloadCount,
     });
   });
 
@@ -71,56 +72,64 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
   // ===== preloadBlocksInfo =====
 
   describe('preloadBlocksInfo()', () => {
-    it('increases maxPreloadCount when timing ratio > 1.2', async () => {
-      (strategy as any)._lastLoadAndEnqueueDuration = 1250;
-      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
+    it('reduces next preload count when observed blocks are large for the raw RPC reply budget', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'hash1', total_size: 1000, height: 1 },
+        { blockhash: 'hash1', total_size: 2000, height: 1 },
+        { blockhash: 'hash2', total_size: 2000, height: 2 },
+        { blockhash: 'hash3', total_size: 2000, height: 3 },
+        { blockhash: 'hash4', total_size: 2000, height: 4 },
       ]);
 
-      const before = (strategy as any)._maxPreloadCount;
-      await (strategy as any).preloadBlocksInfo(1);
-      expect((strategy as any)._maxPreloadCount).toBe(Math.round(before * 1.25));
+      await (strategy as any).preloadBlocksInfo(10);
+
+      // 10_000 / (2_000 * 2.1) ~= 2. Since this is below the
+      // provider batch size, metadata preload should switch off and the
+      // strategy should use direct raw fetch by height.
+      expect((strategy as any)._directRawMode).toBe(true);
+      expect((strategy as any)._directRawFetchCount).toBe(2);
+      expect((strategy as any)._preloadedItemsQueue).toHaveLength(0);
     });
 
-    it('decreases maxPreloadCount when timing ratio < 0.8', async () => {
-      (strategy as any)._lastLoadAndEnqueueDuration = 700;
-      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
+    it('increases next preload count for small blocks but keeps it bounded', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'hash1', total_size: 1000, height: 1 },
+        { blockhash: 'hash1', total_size: 100, height: 1 },
+        { blockhash: 'hash2', total_size: 100, height: 2 },
+        { blockhash: 'hash3', total_size: 100, height: 3 },
+        { blockhash: 'hash4', total_size: 100, height: 4 },
       ]);
 
-      const before = (strategy as any)._maxPreloadCount;
-      await (strategy as any).preloadBlocksInfo(1);
-      expect((strategy as any)._maxPreloadCount).toBe(Math.max(1, Math.round(before * 0.75)));
+      await (strategy as any).preloadBlocksInfo(100);
+
+      // 10_000 / (100 * 2.1) would be ~47, but the cap is base*4 = 16.
+      expect((strategy as any)._currentPreloadCount).toBe(16);
     });
 
-    it('does not change maxPreloadCount when timing is stable', async () => {
-      (strategy as any)._lastLoadAndEnqueueDuration = 1000;
-      (strategy as any)._previousLoadAndEnqueueDuration = 1000;
+    it('does not exceed the current preload count when selecting heights for the next preload request', async () => {
       (queue as any)._lastHeight = 0;
+      (strategy as any)._currentPreloadCount = 2;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'hash1', total_size: 1000, height: 1 },
+        { blockhash: 'h1', total_size: 1000, height: 1 },
+        { blockhash: 'h2', total_size: 1000, height: 2 },
       ]);
 
-      const before = (strategy as any)._maxPreloadCount;
-      await (strategy as any).preloadBlocksInfo(1);
-      expect((strategy as any)._maxPreloadCount).toBe(before);
+      await (strategy as any).preloadBlocksInfo(10);
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2]);
     });
 
     it('uses total_size when available', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'hash1', total_size: 2500, height: 1 },
+        { blockhash: 'hash1', total_size: 1000, height: 1 },
       ]);
 
       await (strategy as any).preloadBlocksInfo(1);
 
       const items = (strategy as any)._preloadedItemsQueue;
+      expect((strategy as any)._directRawMode).toBe(false);
       expect(items).toHaveLength(1);
-      expect(items[0]).toEqual({ hash: 'hash1', size: 2500, height: 1 });
+      expect(items[0]).toEqual({ hash: 'hash1', size: 1000, height: 1 });
     });
 
     it('falls back to queue.blockSize when total_size is null', async () => {
@@ -159,17 +168,6 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       expect(mockProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
     });
 
-    it('limits request count to maxPreloadCount', async () => {
-      (queue as any)._lastHeight = 0;
-      (strategy as any)._maxPreloadCount = 2;
-      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
-        { blockhash: 'h1', total_size: 1000, height: 1 },
-        { blockhash: 'h2', total_size: 1000, height: 2 },
-      ]);
-
-      await (strategy as any).preloadBlocksInfo(10);
-      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2]);
-    });
   });
 
   // ===== loadBlocks =====
@@ -182,32 +180,48 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
 
     it('fetches blocks on first try', async () => {
       const blocks = [createTestBlock(1, 'hash1', 1000), createTestBlock(2, 'hash2', 1500)];
-      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       const result = await (strategy as any).loadBlocks(infos, 3);
-      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledWith([1, 2]);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledWith(infos);
       expect(result).toHaveLength(2);
       expect(result[0].hash).toBe('hash1');
       expect(result[1].hash).toBe('hash2');
     });
 
     it('retries on failure and eventually succeeds', async () => {
-      const rawBlocks = [{ hash: 'hash1', height: 1, size: 1000, bytes: Buffer.alloc(1000) }];
-      mockProvider.getManyBlocksRawByHeights
+      const rawBlocks = [
+        { hash: 'hash1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+        { hash: 'hash2', height: 2, size: 1500, bytes: Buffer.alloc(1500) },
+      ];
+      mockProvider.getManyBlocksRawByKnownHashes
         .mockRejectedValueOnce(new Error('Network error'))
         .mockResolvedValue(rawBlocks);
 
       const result = await (strategy as any).loadBlocks(infos, 3);
-      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(2);
-      expect(result).toHaveLength(1);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledTimes(2);
+      expect(result).toHaveLength(2);
       expect(result[0].hash).toBe('hash1');
+      expect(result[1].hash).toBe('hash2');
+    });
+
+    it('throws when raw fetch returns fewer blocks than requested known hashes', async () => {
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue([
+        { hash: 'hash1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+        null,
+      ] as any);
+
+      await expect((strategy as any).loadBlocks(infos, 1)).rejects.toThrow(
+        'RPC raw fetch returned missing blocks for known hashes: 2:hash2'
+      );
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledTimes(1);
     });
 
     it('throws after max retries and logs verbose with action field', async () => {
-      mockProvider.getManyBlocksRawByHeights.mockRejectedValue(new Error('Persistent error'));
+      mockProvider.getManyBlocksRawByKnownHashes.mockRejectedValue(new Error('Persistent error'));
 
       await expect((strategy as any).loadBlocks(infos, 2)).rejects.toThrow('Persistent error');
-      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(2);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledTimes(2);
       expect(mockLogger.verbose).toHaveBeenCalledWith(
         'Exceeded max retries for fetching blocks batch',
         expect.objectContaining({
@@ -265,7 +279,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
         { hash: 'hash2', size: 2000, height: 2 },
       ];
       const blocks = [createTestBlock(1, 'hash1', 2000), createTestBlock(2, 'hash2', 2000)];
-      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(2);
@@ -281,7 +295,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
         { hash: 'hash3', size: 2000, height: 3 },
       ];
       const blocks = [createTestBlock(1, 'hash1', 2000), createTestBlock(2, 'hash2', 2000)];
-      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(2);
@@ -293,7 +307,7 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       (queue as any)._lastHeight = 0;
       (strategy as any)._preloadedItemsQueue = [{ hash: 'bigblock', size: 6000, height: 1 }];
       const blocks = [createTestBlock(1, 'bigblock', 6000)];
-      mockProvider.getManyBlocksRawByHeights.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue(blocks.map(b => ({ hash: b.hash, height: b.height, size: b.size, bytes: Buffer.alloc(b.size) })));
 
       await (strategy as any).loadAndEnqueueBlocks();
       expect(queue.length).toBe(1);
@@ -330,12 +344,124 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       expect(mockProvider.getManyBlocksStatsByHeights).not.toHaveBeenCalled();
     });
 
+    it('switches to direct raw height fetch after observing heavy blocks', async () => {
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 2000, height: 1 },
+        { blockhash: 'h2', total_size: 2000, height: 2 },
+        { blockhash: 'h3', total_size: 2000, height: 3 },
+        { blockhash: 'h4', total_size: 2000, height: 4 },
+      ]);
+      mockProvider.getManyBlocksRawByHeights
+        .mockResolvedValueOnce([
+          { hash: 'h1', height: 1, size: 2000, bytes: Buffer.alloc(2000) },
+          { hash: 'h2', height: 2, size: 2000, bytes: Buffer.alloc(2000) },
+        ])
+        .mockResolvedValueOnce([
+          { hash: 'h3', height: 3, size: 2000, bytes: Buffer.alloc(2000) },
+          { hash: 'h4', height: 4, size: 2000, bytes: Buffer.alloc(2000) },
+        ]);
+
+      await strategy.load(4);
+
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).not.toHaveBeenCalled();
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(1, [1, 2]);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(2, [3, 4]);
+      expect((strategy as any)._directRawMode).toBe(true);
+      expect(queue.lastHeight).toBe(4);
+    });
+
+    it('keeps direct raw mode across heavy-ish windows instead of oscillating back to metadata preload', async () => {
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 2000, height: 1 },
+        { blockhash: 'h2', total_size: 2000, height: 2 },
+        { blockhash: 'h3', total_size: 2000, height: 3 },
+        { blockhash: 'h4', total_size: 2000, height: 4 },
+      ]);
+      mockProvider.getManyBlocksRawByHeights
+        .mockResolvedValueOnce([
+          { hash: 'h1', height: 1, size: 1100, bytes: Buffer.alloc(1100) },
+          { hash: 'h2', height: 2, size: 1100, bytes: Buffer.alloc(1100) },
+        ])
+        .mockResolvedValueOnce([
+          { hash: 'h3', height: 3, size: 1100, bytes: Buffer.alloc(1100) },
+          { hash: 'h4', height: 4, size: 1100, bytes: Buffer.alloc(1100) },
+        ]);
+
+      await strategy.load(4);
+
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).not.toHaveBeenCalled();
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(1, [1, 2]);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(2, [3, 4]);
+      expect((strategy as any)._directRawMode).toBe(true);
+      expect((strategy as any)._directRawFetchCount).toBe(4);
+      expect(queue.lastHeight).toBe(4);
+    });
+
+    it('re-enables metadata preload only when raw blocks are small enough for a much larger window', async () => {
+      (strategy as any)._directRawMode = true;
+      (strategy as any)._directRawFetchCount = 2;
+
+      (strategy as any).adjustDirectRawFetchCountFromBlocks([
+        { hash: 'h1', height: 1, size: 100, bytes: Buffer.alloc(100) },
+        { hash: 'h2', height: 2, size: 100, bytes: Buffer.alloc(100) },
+      ]);
+
+      expect((strategy as any)._directRawMode).toBe(false);
+      expect((strategy as any)._currentPreloadCount).toBe(16);
+      expect((strategy as any)._directRawFetchCount).toBe(16);
+    });
+
+
+    it('caps direct raw height window by queue maxBlockHeight', async () => {
+      queue.maxBlockHeight = 1;
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._directRawMode = true;
+      (strategy as any)._directRawFetchCount = 9;
+
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue([
+        { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+      ]);
+
+      await strategy.load(951698);
+
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledWith([1]);
+      expect(queue.lastHeight).toBe(1);
+    });
+
+    it('caps metadata preload heights by queue maxBlockHeight', async () => {
+      queue.maxBlockHeight = 3;
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._currentPreloadCount = 100;
+
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 1000, height: 1 },
+        { blockhash: 'h2', total_size: 1000, height: 2 },
+        { blockhash: 'h3', total_size: 1000, height: 3 },
+      ]);
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue([
+        { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+        { hash: 'h2', height: 2, size: 1000, bytes: Buffer.alloc(1000) },
+        { hash: 'h3', height: 3, size: 1000, bytes: Buffer.alloc(1000) },
+      ]);
+
+      await strategy.load(951698);
+
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2, 3]);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledTimes(1);
+      expect(queue.lastHeight).toBe(3);
+    });
+
     it('returns after catch-up (no subscription — caller timer handles next poll)', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
         { blockhash: 'h1', total_size: 1000, height: 1 },
       ]);
-      mockProvider.getManyBlocksRawByHeights.mockResolvedValue([
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue([
         { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
       ]);
 

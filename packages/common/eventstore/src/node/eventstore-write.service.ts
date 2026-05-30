@@ -1,8 +1,9 @@
 import { Injectable, OnModuleDestroy, OnModuleInit, Logger } from '@nestjs/common';
 import { ExponentialTimer, exponentialIntervalAsync } from '@easylayer/common/exponential-interval-async';
 import type { AggregateRoot } from '@easylayer/common/cqrs';
-import { PublisherProvider, WireEventRecord } from '@easylayer/common/cqrs-transport';
+import { PublisherProvider } from '@easylayer/common/cqrs-transport';
 import { assertFullOutboxAck, type BaseAdapter } from '../core/base-adapter';
+import { OutboxDeliveryCoordinator, type OutboxDeliveryRunContext } from '../core/outbox-delivery-coordinator';
 import { EventStoreReadService } from './eventstore-read.service';
 
 /**
@@ -44,11 +45,26 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   private transportMaxFrameBytes = 10 * 1024 * 1024;
   private allowPruning = false;
 
+  private readonly outboxDelivery = new OutboxDeliveryCoordinator((event) => {
+    const args: Record<string, unknown> = {
+      flowId: event.flowId,
+      source: event.source,
+      phase: event.phase,
+    };
+    if (event.queueWaitMs !== undefined) args.queueWaitMs = event.queueWaitMs;
+    if (event.durationMs !== undefined) args.durationMs = event.durationMs;
+    if (event.error !== undefined) args.error = (event.error as any)?.message ?? String(event.error);
+
+    this.logger.verbose('Outbox delivery flow state changed', {
+      module: 'eventstore',
+      args,
+    });
+  });
+
   private draining: Promise<{ completed: boolean }> | null = null;
 
-  // True while the drain is in exponential retry after a transport failure.
-  // When set, publishWithCorrectFlow skips the fast-path and delegates to
-  // runDrainOnce() instead of attempting a direct publish that is likely to fail.
+  // True while the serialized outbox drain is in exponential retry after a transport failure.
+  // The outbox table remains the only remote delivery source; this flag only records retry state.
   private drainFailing = false;
 
   constructor(
@@ -70,7 +86,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     }
 
     this.logger.verbose('Startup outbox drain started', { module: 'eventstore' });
-    await this.runDrainOnce();
+    await this.runDrainOnce('startup-drain');
   }
 
   onModuleDestroy(): void {
@@ -82,14 +98,18 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     return this.publisherProvider.publisher.hasRemoteTransport();
   }
 
-  private async runDrainOnce(): Promise<{ completed: boolean }> {
+  private async runDrainOnce(source = 'drain'): Promise<{ completed: boolean }> {
+    return await this.outboxDelivery.run(source, (ctx) => this.runDrainOnceUnlocked(ctx));
+  }
+
+  private async runDrainOnceUnlocked(ctx: OutboxDeliveryRunContext): Promise<{ completed: boolean }> {
     if (this.draining) {
       return await this.draining;
     }
 
     this.draining = (async () => {
       try {
-        return await this.drainOutboxCompletely();
+        return await this.drainOutboxCompletelyUnlocked(ctx);
       } finally {
         this.draining = null;
       }
@@ -99,7 +119,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   }
 
   /**
-   * Persist → snapshot → optional remote publish (RAW fast-path if safe; otherwise strict outbox) → ACK.
+   * Persist aggregate events + outbox rows, then drain the outbox table as the only remote delivery source.
    * Aggregate writes are always atomic. Outbox writes are included in the same transaction only when remote transport is configured.
    */
   public async save(models: T | T[], options: SaveOptions = {}): Promise<void> {
@@ -125,13 +145,11 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     }
 
     if (writeOutbox) {
-      // Deliver to the external transport using the correct outbox flow first.
-      // Local system event emission can trigger follow-up saves (for example the
-      // crawler loading the next block). Emitting before the current outbox row is
-      // ACKed/deleted creates self-induced concurrency: the next save may see the
-      // previous row as pending and force strict drain/retry, which can duplicate
-      // live remote delivery.
-      await this.publishWithCorrectFlow(persisted);
+      // Remote delivery has exactly one source of truth: the persisted outbox table.
+      // Do not publish persisted.rawEvents directly from memory. A concurrent save can
+      // drain those same rows from the outbox before this save reaches delivery, and
+      // a memory fast-path would then redeliver the same WireEventRecords.
+      await this.runDrainOnce('save-drain');
     }
 
     // Local system events are part of the current committed save and must be
@@ -139,82 +157,6 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     // not re-emit old outbox rows locally. When no remote transport is configured,
     // adapters do not write outbox rows at all and local processing continues here.
     this.publisherProvider.publisher.publishSystemEventsLocally(persisted.rawEvents);
-  }
-
-  /**
-   * 1) If backlog exists before our first inserted row → strict drain (respect order).
-   * 2) If anything appeared after current watermark (concurrency) → strict drain.
-   * 3) Otherwise → RAW fast-path publish from memory, then ACK delete just inserted ids.
-   */
-  private async publishWithCorrectFlow(persisted: {
-    insertedOutboxIds: string[];
-    firstTs: number;
-    firstId: string;
-    lastTs: number;
-    lastId: string;
-    rawEvents: WireEventRecord[];
-  }): Promise<void> {
-    const backlogBefore = await this.adapter.hasBacklogBefore(persisted.firstTs, persisted.firstId);
-    if (backlogBefore) {
-      this.logger.verbose('Outbox backlog detected, falling back to strict drain', {
-        module: 'eventstore',
-        args: { firstId: persisted.firstId },
-      });
-      await this.runDrainOnce();
-      return;
-    }
-
-    // If the drain is currently in retry (transport was recently unavailable),
-    // skip the fast-path to avoid repeated failing publish attempts on every save().
-    // The retry timer will clear drainFailing once a drain succeeds.
-    if (this.drainFailing) {
-      this.logger.verbose('Drain is in retry state, skipping fast-path publish', {
-        module: 'eventstore',
-      });
-      await this.runDrainOnce();
-      return;
-    }
-
-    const anyPending = await this.adapter.hasPendingAfterId(persisted.lastId);
-    if (anyPending) {
-      this.logger.verbose('Pending rows after watermark detected, falling back to strict drain', {
-        module: 'eventstore',
-      });
-      await this.runDrainOnce();
-      return;
-    }
-
-    if (persisted.rawEvents.length > 0) {
-      // Step 1: publish. If transport is unavailable, outbox rows are retained and drain will retry.
-      let published = false;
-      try {
-        const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(persisted.rawEvents);
-        assertFullOutboxAck(ack, persisted.rawEvents.length);
-        published = true;
-      } catch (e) {
-        this.logger.verbose('Fast-path publish failed, outbox retained for drain retry', {
-          module: 'eventstore',
-          args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
-        });
-        this.startRetryTimerIfNeeded();
-      }
-
-      if (published) {
-        // Step 2: delete outbox rows and advance watermark. Only reached on successful publish.
-        // If delete throws, rows stay in outbox and drain will redeliver (at-least-once) — acceptable.
-        try {
-          await this.adapter.deleteOutboxByIds(persisted.insertedOutboxIds);
-          // BUG-6 fix: advance watermark so next hasPendingAfterId() skips
-          // already-delivered ids, making fast-path reachable on subsequent saves.
-          this.adapter.advanceWatermark(persisted.lastId);
-        } catch (e) {
-          this.logger.verbose('Fast-path outbox ACK delete failed, drain will redeliver', {
-            module: 'eventstore',
-            args: { action: 'publishWithCorrectFlow', error: (e as any)?.message },
-          });
-        }
-      }
-    }
   }
 
   // ───────────────────────────── ROLLBACK / REHYDRATE ─────────────────────────────
@@ -250,21 +192,45 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
    * Drains the outbox in multiple chunks. ACK policy: one ACK per chunk.
    * Chunk sizing and EMA hints are adapter-owned; service gives only the transport cap.
    */
-  private async drainOutboxCompletely(): Promise<{ completed: boolean }> {
+  private async drainOutboxCompletelyUnlocked(ctx: OutboxDeliveryRunContext): Promise<{ completed: boolean }> {
     if (!this.hasRemoteTransport()) return { completed: true };
 
     while (true) {
       try {
         const sent = await this.adapter.fetchDeliverAckChunk(this.transportMaxFrameBytes, async (events) => {
+          const drainStartedAt = Date.now();
+          this.logger.verbose('Outbox drain chunk publish started', {
+            module: 'eventstore',
+            args: {
+              action: 'drainOutboxCompletely',
+              flowId: ctx.flowId,
+              source: ctx.source,
+              eventCount: events.length,
+              firstRequestId: events[0]?.requestId,
+              lastRequestId: events[events.length - 1]?.requestId,
+              firstBlockHeight: events[0]?.blockHeight,
+              lastBlockHeight: events[events.length - 1]?.blockHeight,
+            },
+          });
           const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(events);
           assertFullOutboxAck(ack, events.length);
+          this.logger.verbose('Outbox drain chunk ACK received', {
+            module: 'eventstore',
+            args: {
+              action: 'drainOutboxCompletely',
+              flowId: ctx.flowId,
+              source: ctx.source,
+              eventCount: events.length,
+              ackMs: Date.now() - drainStartedAt,
+            },
+          });
           return ack;
         });
         if (sent === 0) return { completed: true };
       } catch (e) {
         this.logger.verbose('Outbox drain chunk failed', {
           module: 'eventstore',
-          args: { action: 'drainOutboxCompletely', error: (e as any)?.message },
+          args: { action: 'drainOutboxCompletely', flowId: ctx.flowId, source: ctx.source, error: (e as any)?.message },
         });
         this.startRetryTimerIfNeeded();
         return { completed: false };
@@ -282,7 +248,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     this.retryTimer = exponentialIntervalAsync(
       async (reset) => {
         try {
-          const result = await this.runDrainOnce();
+          const result = await this.runDrainOnce('retry-drain');
           if (!result.completed) return;
 
           reset();

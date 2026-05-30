@@ -38,9 +38,10 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
 
   private _maxRpcReplyBytes: number = 10 * 1024 * 1024;
   private _preloadedItemsQueue: BlockInfo[] = [];
-  private _maxPreloadCount: number;
+  private readonly _basePreloadCount: number;
+  private readonly _maxPreloadCountCap: number;
+  private _currentPreloadCount: number;
   private _lastLoadAndEnqueueDuration = 0;
-  private _previousLoadAndEnqueueDuration = 0;
 
   // Active ZMQ subscription (Phase 2), if any
   private _subscription?: Subscription;
@@ -51,11 +52,13 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     private readonly queue: BlocksQueue,
     config: {
       maxRpcReplyBytes: number;
-      basePreloadCount: number;
+      preloadCount: number;
     }
   ) {
     this._maxRpcReplyBytes = config.maxRpcReplyBytes;
-    this._maxPreloadCount = config.basePreloadCount;
+    this._basePreloadCount = Math.max(1, Math.floor(config.preloadCount));
+    this._maxPreloadCountCap = Math.max(this._basePreloadCount, this._basePreloadCount * 4);
+    this._currentPreloadCount = this._basePreloadCount;
   }
 
   /**
@@ -63,8 +66,10 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
    * Phase 2: ZMQ subscription if available, else return (timer polls).
    */
   public async load(currentNetworkHeight: number): Promise<void> {
+    const targetHeight = Math.min(currentNetworkHeight, this.queue.maxBlockHeight);
+
     // Phase 1: RPC batch catch-up
-    while (this.queue.lastHeight < currentNetworkHeight) {
+    while (this.queue.lastHeight < targetHeight) {
       if (this.queue.isMaxHeightReached) return;
 
       if (this.queue.isQueueFull) {
@@ -72,7 +77,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
       }
 
       if (this._preloadedItemsQueue.length === 0) {
-        await this.preloadBlocksInfo(currentNetworkHeight);
+        await this.preloadBlocksInfo(targetHeight);
 
         this.logger.debug('Preloaded block infos for RPC+ZMQ strategy', {
           module: this.moduleName,
@@ -200,42 +205,19 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
   // ===== PHASE 1: RPC batch catch-up =====
 
   /**
-   * Preload block metadata. Dynamically tunes _maxPreloadCount based on timing:
-   *   timingRatio > 1.2 → increase by 25%
-   *   timingRatio < 0.8 → decrease by 25%, min 1
-   *   0.8–1.2           → no change
+   * Preload block metadata for the next height window. Initial count is derived
+   * from provider rate-limit maxBatchSize. After each preload the next count is
+   * tuned from observed block sizes and bounded by basePreloadCount * 4.
    */
   private async preloadBlocksInfo(currentNetworkHeight: number): Promise<void> {
-    const previousMaxPreloadCount = this._maxPreloadCount;
-
-    if (this._previousLoadAndEnqueueDuration > 0 && this._lastLoadAndEnqueueDuration > 0) {
-      const timingRatio = this._lastLoadAndEnqueueDuration / this._previousLoadAndEnqueueDuration;
-      if (timingRatio > 1.2) {
-        this._maxPreloadCount = Math.round(this._maxPreloadCount * 1.25);
-      } else if (timingRatio < 0.8) {
-        this._maxPreloadCount = Math.max(1, Math.round(this._maxPreloadCount * 0.75));
-      }
-    }
-
-    if (this._maxPreloadCount !== previousMaxPreloadCount) {
-      this.logger.verbose('Adjusted RPC+ZMQ preload count based on previous load duration', {
-        module: this.moduleName,
-        args: {
-          previousMaxPreloadCount,
-          nextMaxPreloadCount: this._maxPreloadCount,
-          previousLoadAndEnqueueDuration: this._previousLoadAndEnqueueDuration,
-          lastLoadAndEnqueueDuration: this._lastLoadAndEnqueueDuration,
-        },
-      });
-    }
-
     const lastHeight = this.queue.lastHeight;
     const remaining = currentNetworkHeight - lastHeight;
-    const count = Math.min(this._maxPreloadCount, remaining);
+    const count = Math.min(this._currentPreloadCount, remaining);
     if (count <= 0) return;
 
     const heights = Array.from({ length: count }, (_, i) => lastHeight + 1 + i);
     const blockInfos = await this.blockchainProvider.getManyBlocksStatsByHeights(heights);
+    this.adjustPreloadCountFromBlockInfos(blockInfos);
 
     for (const { blockhash, total_size, height } of blockInfos) {
       if (!blockhash || height == null) {
@@ -243,6 +225,38 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
       }
       const size = total_size != null ? total_size : this.queue.blockSize;
       this._preloadedItemsQueue.push({ hash: blockhash, size, height });
+    }
+  }
+
+  private adjustPreloadCountFromBlockInfos(blockInfos: Array<{ total_size?: number | null }>): void {
+    if (blockInfos.length === 0) return;
+
+    const OVERHEAD = 2.1;
+    const totalPredictedReplyBytes = blockInfos.reduce((sum, info) => {
+      const rawSize = info.total_size != null ? info.total_size : this.queue.blockSize;
+      return sum + Math.max(1, Math.floor(rawSize * OVERHEAD));
+    }, 0);
+    const averagePredictedReplyBytes = Math.max(1, totalPredictedReplyBytes / blockInfos.length);
+    const nextPreloadCount = Math.max(
+      1,
+      Math.min(this._maxPreloadCountCap, Math.floor(this._maxRpcReplyBytes / averagePredictedReplyBytes))
+    );
+
+    if (nextPreloadCount !== this._currentPreloadCount) {
+      const previousPreloadCount = this._currentPreloadCount;
+      this._currentPreloadCount = nextPreloadCount;
+      this.logger.verbose('Adjusted RPC+ZMQ preload count from observed block sizes', {
+        module: this.moduleName,
+        args: {
+          previousPreloadCount,
+          nextPreloadCount,
+          basePreloadCount: this._basePreloadCount,
+          maxPreloadCountCap: this._maxPreloadCountCap,
+          maxRpcReplyBytes: this._maxRpcReplyBytes,
+          averagePredictedReplyBytes: Math.round(averagePredictedReplyBytes),
+          observedBlockInfos: blockInfos.length,
+        },
+      });
     }
   }
 
@@ -292,7 +306,6 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     await this.enqueueBlocks(blocks);
     blocks.length = 0;
 
-    this._previousLoadAndEnqueueDuration = this._lastLoadAndEnqueueDuration;
     this._lastLoadAndEnqueueDuration = Date.now() - startTime;
   }
 
@@ -300,12 +313,40 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
-        const heights = infos.map((i) => i.height);
-        const fetched = await this.blockchainProvider.getManyBlocksRawByHeights(heights);
+        const rawFetchStartedAt = Date.now();
+        const fetched = await this.blockchainProvider.getManyBlocksRawByKnownHashes(infos);
+        const rawFetchMs = Date.now() - rawFetchStartedAt;
         if (!Array.isArray(fetched)) {
-          throw new Error('getManyBlocksRawByHeights must return an array of raw blocks');
+          throw new Error('getManyBlocksRawByKnownHashes must return an array of raw blocks');
         }
-        return fetched.filter(Boolean) as RawBlock[];
+
+        const missing = fetched
+          .map((block, index) => (block ? null : infos[index]))
+          .filter((item): item is BlockInfo => item != null);
+
+        if (missing.length > 0) {
+          throw new Error(
+            `RPC+ZMQ raw fetch returned missing blocks for known hashes: ${missing
+              .map((item) => `${item.height}:${item.hash}`)
+              .join(', ')}`
+          );
+        }
+
+        const blocks = fetched as RawBlock[];
+        this.logger.verbose('Loaded RPC+ZMQ raw blocks by known hashes', {
+          module: this.moduleName,
+          args: {
+            phase: 'rpc_zmq_raw_fetch_by_known_hash',
+            phaseDurationMs: rawFetchMs,
+            requestedBlocks: infos.length,
+            loadedBlocks: blocks.length,
+            startHeight: infos[0]?.height,
+            endHeight: infos[infos.length - 1]?.height,
+            predictedReplyBytes: infos.reduce((sum, item) => sum + Math.floor(item.size * 2.1), 0),
+            rawBytes: blocks.reduce((sum, block) => sum + block.size, 0),
+          },
+        });
+        return blocks;
       } catch (error) {
         attempt++;
         if (attempt >= maxRetries) {

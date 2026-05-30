@@ -1,3 +1,16 @@
+## [1.3.6](https://github.com/EasyLayer/core/compare/v1.3.5...v1.3.6) (2026-05-30)
+
+
+### Bug Fixes
+
+* fixed bitcoin rpc loading strategy; added some verbose logs for better tracing; ([1588377](https://github.com/EasyLayer/core/commit/15883778068752e1b6814118d01b843739b377d2))
+* fixed eventstore duplication events issue; fixed bitcoin rpc load strategy preloader issue; ([7950859](https://github.com/EasyLayer/core/commit/795085976fd6ab9463a29f408a4783df285b877c))
+
+
+### Features
+
+* improved bitcoin pkg (rate limiter; rpc strategy, rpc calls); added timing into logger; ([2700a92](https://github.com/EasyLayer/core/commit/2700a9295c14af4b59e9315d62e4a13bebdce0fb))
+
 ## [1.3.5](https://github.com/EasyLayer/core/compare/v1.3.4...v1.3.5) (2026-05-24)
 
 

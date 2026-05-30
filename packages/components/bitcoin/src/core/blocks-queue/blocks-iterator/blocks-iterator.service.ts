@@ -17,6 +17,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
   private _timer: ExponentialTimer | null = null;
   private readonly _monitoringInterval: number;
   private readonly _startInterval: number = 1000;
+  private readonly _verifyMerkleRoot: boolean = false;
 
   constructor(
     @Inject('BlocksCommandExecutor')
@@ -25,6 +26,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
     private readonly config: any
   ) {
     this._blocksBatchSize = this.config.queueIteratorBlocksBatchSize;
+    this._verifyMerkleRoot = this.config.verifyMerkleRoot === true;
 
     // Calculate monitoring interval once in constructor
     // Half of block time, minimum 30 seconds
@@ -163,7 +165,9 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
 
     const blocks: Block[] = [];
     for (const raw of rawBatch) {
-      blocks.push(this.blockchainProvider.parseBlock(raw.bytes, raw.height));
+      blocks.push(
+        this.blockchainProvider.parseBlock(raw.bytes, raw.height, { verifyMerkleRoot: this._verifyMerkleRoot })
+      );
     }
 
     this.logger.verbose('Fetched batch for processing', {
@@ -172,6 +176,7 @@ export class BlocksQueueIteratorService implements OnModuleDestroy, OnModuleInit
         batchLength: blocks.length,
         maxBatchSize,
         totalBatchSize: blocks.reduce((sum, block) => sum + block.size, 0),
+        verifyMerkleRoot: this._verifyMerkleRoot,
       },
     });
 

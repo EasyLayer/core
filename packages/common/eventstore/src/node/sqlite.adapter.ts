@@ -90,7 +90,7 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
    *   1) per-aggregate event table (BLOB payload)
    *   2) outbox (BLOB payload) — with client-generated monotonic id
    *
-   * Returns the inserted outbox ids, and a raw (wire) array suitable for fast-path publish.
+   * Returns the inserted outbox ids and raw events for local system emission only. Remote delivery drains persisted outbox rows.
    * NOTE: firstTs/lastTs are returned for compatibility; adapter uses id-based checks internally.
    */
   public async persistAggregatesAndOutbox(

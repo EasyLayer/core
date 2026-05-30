@@ -241,13 +241,40 @@ export class BlockchainProviderService {
    * Called by the queue iterator after getBatchUpToSize.
    * Bitcoin path: wire bytes → parseBlockBytes → verifyMerkle → normalizeBlock.
    */
-  public parseBlock(bytes: Buffer, height: number): Block {
+  public parseBlock(bytes: Buffer, height: number, options: { verifyMerkleRoot?: boolean } = {}): Block {
+    const t0 = Date.now();
     const u8 = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length);
     const universal = UniversalTransformer.parseBlockBytes(u8, height, this.networkConfig);
-    if (!this.verifyBlockMerkleRoot(universal)) {
-      throw new Error(`Merkle root verification failed for block ${universal.hash} at height ${height}`);
+    const parseMs = Date.now() - t0;
+
+    let merkleMs = 0;
+    if (options.verifyMerkleRoot === true) {
+      const mt0 = Date.now();
+      if (!this.verifyBlockMerkleRoot(universal)) {
+        throw new Error(`Merkle root verification failed for block ${universal.hash} at height ${height}`);
+      }
+      merkleMs = Date.now() - mt0;
     }
-    return this.normalizer.normalizeBlock(universal);
+
+    const nt0 = Date.now();
+    const normalized = this.normalizer.normalizeBlock(universal);
+    const normalizeMs = Date.now() - nt0;
+
+    this.logger.verbose('Parsed raw block bytes', {
+      module: 'blockchain-provider',
+      args: {
+        phase: 'parse_raw_block',
+        height,
+        hash: normalized.hash,
+        size: normalized.size,
+        verifyMerkleRoot: options.verifyMerkleRoot === true,
+        parseMs,
+        merkleMs,
+        normalizeMs,
+      },
+    });
+
+    return normalized;
   }
 
   /**
@@ -408,6 +435,18 @@ export class BlockchainProviderService {
   }
 
   /**
+   * Get multiple blocks as raw bytes when height->hash was already preloaded.
+   * Avoids repeating getblockhash during RPC raw fetch after getblockstats preload.
+   */
+  public async getManyBlocksRawByKnownHashes(
+    infos: Array<{ hash: string; height: number } | null>
+  ): Promise<Array<{ hash: string; height: number; size: number; bytes: Buffer } | null>> {
+    return this.executeNetworkProviderMethod('getManyBlocksRawByKnownHashes', async (provider) => {
+      return provider.getManyBlocksRawByKnownHashes(infos);
+    });
+  }
+
+  /**
    * Get multiple blocks by hashes with configurable options
    * Node calls:
    *   - useHex=true:  RPC=2 (getblock[raw] + getblockheader for heights), P2P=1 (GetData; heights from local headers)
@@ -469,17 +508,46 @@ export class BlockchainProviderService {
    */
   public async getManyBlocksStatsByHeights(heights: string[] | number[]): Promise<BlockStats[]> {
     return this.executeNetworkProviderMethod('getManyBlocksStatsByHeights', async (provider) => {
-      const rawStats = await provider.getManyBlocksStatsByHeights(heights.map((item) => Number(item)));
+      const numericHeights = heights.map((item) => Number(item));
+      const startedAt = Date.now();
+      const rawStats = await provider.getManyBlocksStatsByHeights(numericHeights);
+      const durationMs = Date.now() - startedAt;
 
-      const nullCount = rawStats.filter((s: any) => s === null).length;
-      if (nullCount > 0) {
-        this.logger.verbose('Some block stats returned null from provider', {
-          module: 'blockchain-provider',
-          args: { action: 'getManyBlocksStatsByHeights', nullCount, total: rawStats.length },
-        });
+      const nullIndexes: number[] = [];
+      for (let index = 0; index < rawStats.length; index += 1) {
+        if (rawStats[index] === null) nullIndexes.push(index);
       }
 
       const validStats = rawStats.filter((stats: any): stats is UniversalBlockStats => stats !== null);
+      if (nullIndexes.length > 0 || validStats.length !== numericHeights.length) {
+        const firstHeight = numericHeights[0];
+        const lastHeight = numericHeights[numericHeights.length - 1];
+        const missingHeights = nullIndexes.slice(0, 20).map((index) => numericHeights[index]);
+        const message =
+          validStats.length === 0
+            ? 'All block stats returned null from active provider'
+            : 'Some block stats returned null from active provider';
+        const logMeta = {
+          module: 'blockchain-provider',
+          args: {
+            action: 'getManyBlocksStatsByHeights',
+            provider: provider.uniqName,
+            requestedCount: numericHeights.length,
+            rawResultCount: rawStats.length,
+            validCount: validStats.length,
+            nullCount: nullIndexes.length,
+            firstHeight,
+            lastHeight,
+            missingHeights,
+            missingHeightsTruncated: nullIndexes.length > missingHeights.length,
+            durationMs,
+          },
+        };
+
+        if (validStats.length === 0) this.logger.warn(message, logMeta);
+        else this.logger.verbose(message, logMeta);
+      }
+
       return this.normalizer.normalizeManyBlockStats(validStats);
     });
   }

@@ -6,3 +6,4 @@ export * from './outbox.model';
 export * from './snapshots.model';
 export * from './utils';
 export * from './aggregate-id';
+export * from './outbox-delivery-coordinator';

@@ -10,6 +10,7 @@ export class BlocksQueueService implements OnModuleInit {
   private readonly logger = new Logger(BlocksQueueService.name);
   private readonly moduleName = 'blocks-queue';
   private _queue!: BlocksQueue;
+  private readonly _verifyMerkleRoot: boolean;
 
   constructor(
     private readonly blocksQueueIterator: BlocksQueueIteratorService,
@@ -17,7 +18,9 @@ export class BlocksQueueService implements OnModuleInit {
     private readonly mempoolService: MempoolLoaderService,
     private readonly blockchainProvider: BlockchainProviderService,
     private readonly config: any
-  ) {}
+  ) {
+    this._verifyMerkleRoot = this.config.verifyMerkleRoot === true;
+  }
 
   onModuleInit() {
     this.logger.verbose('Blocks queue service initialized', {
@@ -107,6 +110,10 @@ export class BlocksQueueService implements OnModuleInit {
   public async getBlocksByHashes(hashes: string[]): Promise<Block[]> {
     const hashSet = new Set(hashes);
     const rawBlocks = await this._queue.findBlocks(hashSet);
-    return rawBlocks.filter(Boolean).map((raw) => this.blockchainProvider.parseBlock(raw.bytes, raw.height));
+    return rawBlocks
+      .filter(Boolean)
+      .map((raw) =>
+        this.blockchainProvider.parseBlock(raw.bytes, raw.height, { verifyMerkleRoot: this._verifyMerkleRoot })
+      );
   }
 }

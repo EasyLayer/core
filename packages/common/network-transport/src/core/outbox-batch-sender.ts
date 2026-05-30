@@ -73,6 +73,7 @@ export class OutboxBatchSender {
     await this.transport.waitForOnline();
 
     const correlationId = createCorrelationId();
+    const startedAt = Date.now();
     const message: Message<{ events: WireEventRecord[] }> = {
       action: Actions.OutboxStreamBatch,
       payload: { events },
@@ -80,12 +81,36 @@ export class OutboxBatchSender {
       timestamp: Date.now(),
     };
 
+    this.logger.verbose('Outbox batch send started', {
+      module: this.moduleName,
+      args: {
+        action: 'streamWireWithAck',
+        correlationId,
+        eventCount: events.length,
+        firstRequestId: events[0]?.requestId,
+        lastRequestId: events[events.length - 1]?.requestId,
+        firstBlockHeight: events[0]?.blockHeight,
+        lastBlockHeight: events[events.length - 1]?.blockHeight,
+      },
+    });
+
     await this.transport.send(message);
 
     // ACKs are correlated and transports buffer early ACKs by correlationId.
     // Waiting after send avoids leaving a pending waiter behind if send() fails.
     const ack = await this.transport.waitForAck(undefined, correlationId);
+    const ackMs = Date.now() - startedAt;
     assertFullAck(ack, events.length, correlationId);
+    this.logger.verbose('Outbox batch ACK received', {
+      module: this.moduleName,
+      args: {
+        action: 'streamWireWithAck',
+        correlationId,
+        eventCount: events.length,
+        ackMs,
+        okIndices: ack.okIndices?.length ?? 0,
+      },
+    });
     return { ...ack, correlationId: ack.correlationId ?? correlationId };
   }
 }

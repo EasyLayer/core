@@ -9,11 +9,21 @@ export interface LogMeta {
   batchRequestIds?: string[];
 }
 
+export interface RuntimeLogMetricsOptions {
+  enabled?: boolean;
+  includeSinceLastLogMs?: boolean;
+  includeUptimeMs?: boolean;
+  includeLogSeq?: boolean;
+  includeMemory?: boolean;
+  memoryLevels?: LogLevel[];
+}
+
 export interface RootLoggerOptions {
   name: string; // root logger name
   level?: LogLevel; // global level threshold
   enabled?: boolean; // turn off completely
   filePath?: string; // node-only: optional log file for production
+  runtimeMetrics?: RuntimeLogMetricsOptions; // optional global perf/memory enrichment
 }
 
 export interface FeatureLoggerOptions {

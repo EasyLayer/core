@@ -113,6 +113,36 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
     return this._id++;
   }
 
+  private shouldLogRpcDiagnostics(): boolean {
+    return typeof process !== 'undefined' && process.env['EASYLAYER_RPC_DIAGNOSTIC_LOGS'] === '1';
+  }
+
+  private logRpcBatchDiagnostics(
+    calls: Array<{ method: string; params: any[] }>,
+    batch: Array<{ id: number; method: string; params: any[] }>,
+    responseMap: Map<number, any>
+  ): void {
+    if (!this.shouldLogRpcDiagnostics()) return;
+
+    const failedItems = batch
+      .map((req, index) => {
+        const res = responseMap.get(req.id);
+        if (res && !res.error) return null;
+        return {
+          index,
+          id: req.id,
+          method: req.method,
+          paramsPreview: req.params.slice(0, 2),
+          hasResponse: !!res,
+          errorCode: res?.error?.code,
+          errorMessage: res?.error?.message,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    if (failedItems.length === 0) return;
+  }
+
   async connect(): Promise<void> {
     return this.executeWithErrorHandling(async () => {
       // Verify RPC connectivity
@@ -388,6 +418,8 @@ export class RPCTransport extends BaseTransport<RPCTransportOptions> {
         responseMap.set(res.id, res);
       }
     }
+
+    this.logRpcBatchDiagnostics(calls, batch, responseMap);
 
     // Map back to original order; per-item RPC errors return null (not thrown)
     return batch.map((req) => {
