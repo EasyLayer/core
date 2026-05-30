@@ -372,6 +372,90 @@ describe('RpcProviderStrategy (pure polling, no ZMQ)', () => {
       expect(queue.lastHeight).toBe(4);
     });
 
+    it('keeps direct raw mode across heavy-ish windows instead of oscillating back to metadata preload', async () => {
+      (queue as any)._lastHeight = 0;
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 2000, height: 1 },
+        { blockhash: 'h2', total_size: 2000, height: 2 },
+        { blockhash: 'h3', total_size: 2000, height: 3 },
+        { blockhash: 'h4', total_size: 2000, height: 4 },
+      ]);
+      mockProvider.getManyBlocksRawByHeights
+        .mockResolvedValueOnce([
+          { hash: 'h1', height: 1, size: 1100, bytes: Buffer.alloc(1100) },
+          { hash: 'h2', height: 2, size: 1100, bytes: Buffer.alloc(1100) },
+        ])
+        .mockResolvedValueOnce([
+          { hash: 'h3', height: 3, size: 1100, bytes: Buffer.alloc(1100) },
+          { hash: 'h4', height: 4, size: 1100, bytes: Buffer.alloc(1100) },
+        ]);
+
+      await strategy.load(4);
+
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).not.toHaveBeenCalled();
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(1, [1, 2]);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenNthCalledWith(2, [3, 4]);
+      expect((strategy as any)._directRawMode).toBe(true);
+      expect((strategy as any)._directRawFetchCount).toBe(4);
+      expect(queue.lastHeight).toBe(4);
+    });
+
+    it('re-enables metadata preload only when raw blocks are small enough for a much larger window', async () => {
+      (strategy as any)._directRawMode = true;
+      (strategy as any)._directRawFetchCount = 2;
+
+      (strategy as any).adjustDirectRawFetchCountFromBlocks([
+        { hash: 'h1', height: 1, size: 100, bytes: Buffer.alloc(100) },
+        { hash: 'h2', height: 2, size: 100, bytes: Buffer.alloc(100) },
+      ]);
+
+      expect((strategy as any)._directRawMode).toBe(false);
+      expect((strategy as any)._currentPreloadCount).toBe(16);
+      expect((strategy as any)._directRawFetchCount).toBe(16);
+    });
+
+
+    it('caps direct raw height window by queue maxBlockHeight', async () => {
+      queue.maxBlockHeight = 1;
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._directRawMode = true;
+      (strategy as any)._directRawFetchCount = 9;
+
+      mockProvider.getManyBlocksRawByHeights.mockResolvedValue([
+        { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+      ]);
+
+      await strategy.load(951698);
+
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledTimes(1);
+      expect(mockProvider.getManyBlocksRawByHeights).toHaveBeenCalledWith([1]);
+      expect(queue.lastHeight).toBe(1);
+    });
+
+    it('caps metadata preload heights by queue maxBlockHeight', async () => {
+      queue.maxBlockHeight = 3;
+      (queue as any)._lastHeight = 0;
+      (strategy as any)._currentPreloadCount = 100;
+
+      mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([
+        { blockhash: 'h1', total_size: 1000, height: 1 },
+        { blockhash: 'h2', total_size: 1000, height: 2 },
+        { blockhash: 'h3', total_size: 1000, height: 3 },
+      ]);
+      mockProvider.getManyBlocksRawByKnownHashes.mockResolvedValue([
+        { hash: 'h1', height: 1, size: 1000, bytes: Buffer.alloc(1000) },
+        { hash: 'h2', height: 2, size: 1000, bytes: Buffer.alloc(1000) },
+        { hash: 'h3', height: 3, size: 1000, bytes: Buffer.alloc(1000) },
+      ]);
+
+      await strategy.load(951698);
+
+      expect(mockProvider.getManyBlocksStatsByHeights).toHaveBeenCalledWith([1, 2, 3]);
+      expect(mockProvider.getManyBlocksRawByKnownHashes).toHaveBeenCalledTimes(1);
+      expect(queue.lastHeight).toBe(3);
+    });
+
     it('returns after catch-up (no subscription — caller timer handles next poll)', async () => {
       (queue as any)._lastHeight = 0;
       mockProvider.getManyBlocksStatsByHeights.mockResolvedValue([

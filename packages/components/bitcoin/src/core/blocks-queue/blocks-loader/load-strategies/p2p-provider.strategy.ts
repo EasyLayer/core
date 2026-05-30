@@ -34,17 +34,19 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
   ) {}
 
   public async load(currentNetworkHeight: number): Promise<void> {
-    if (this.queue.lastHeight < currentNetworkHeight) {
+    const targetHeight = Math.min(currentNetworkHeight, this.queue.maxBlockHeight);
+
+    if (this.queue.lastHeight < targetHeight) {
       this.logger.verbose('P2P strategy: starting catch-up', {
         module: this.moduleName,
         args: {
           from: this.queue.lastHeight + 1,
-          to: currentNetworkHeight,
-          blocksCount: currentNetworkHeight - this.queue.lastHeight,
+          to: targetHeight,
+          blocksCount: targetHeight - this.queue.lastHeight,
         },
       });
 
-      await this.performCatchup(currentNetworkHeight);
+      await this.performCatchup(targetHeight);
 
       this.logger.verbose('P2P strategy: catch-up complete', {
         module: this.moduleName,

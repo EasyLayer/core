@@ -66,8 +66,10 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
    * Phase 2: ZMQ subscription if available, else return (timer polls).
    */
   public async load(currentNetworkHeight: number): Promise<void> {
+    const targetHeight = Math.min(currentNetworkHeight, this.queue.maxBlockHeight);
+
     // Phase 1: RPC batch catch-up
-    while (this.queue.lastHeight < currentNetworkHeight) {
+    while (this.queue.lastHeight < targetHeight) {
       if (this.queue.isMaxHeightReached) return;
 
       if (this.queue.isQueueFull) {
@@ -75,7 +77,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
       }
 
       if (this._preloadedItemsQueue.length === 0) {
-        await this.preloadBlocksInfo(currentNetworkHeight);
+        await this.preloadBlocksInfo(targetHeight);
 
         this.logger.debug('Preloaded block infos for RPC+ZMQ strategy', {
           module: this.moduleName,

@@ -112,7 +112,8 @@ export class BlocksQueueLoaderService implements OnModuleDestroy, OnModuleInit {
             args: { strategy: this._currentStrategy?.name },
           });
 
-          await this._currentStrategy?.load(currentNetworkHeight);
+          const targetHeight = Math.min(currentNetworkHeight, queue.maxBlockHeight);
+          await this._currentStrategy?.load(targetHeight);
         } catch (error) {
           this.logger.verbose('Loading blocks on pause', {
             module: this.moduleName,

@@ -53,7 +53,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
    *   2) outbox (bytea payload) — with client-generated monotonic BIGINT id
    *
    * Returns the inserted outbox ids, first/last (id & timestamp) for compatibility,
-   * and a raw array suitable for fast-path publish (same bytes as in DB).
+   * and raw events for local system emission only. Remote delivery drains persisted outbox rows.
    */
   public async persistAggregatesAndOutbox(
     aggregates: T[],
@@ -401,7 +401,7 @@ export class PostgresAdapter<T extends AggregateRoot = AggregateRoot> extends Ba
     });
   }
 
-  /** advance watermark after successful fast-path publish+delete. */
+  /** Advance watermark after successful ACK delete. */
   public advanceWatermark(lastId: string): void {
     const id = BigInt(lastId);
     if (id > this.lastSeenId) this.lastSeenId = id;

@@ -43,6 +43,14 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
    */
   private _directRawMode = false;
   private _directRawFetchCount: number;
+  /**
+   * Hysteresis threshold for leaving direct-raw mode. Metadata preload should
+   * return only when the observed raw-block window can grow well beyond the
+   * provider max batch size. Otherwise large-block ranges can oscillate between
+   * one metadata preload and one direct-raw window, causing repeated extra
+   * getblockstats calls on every loader cycle.
+   */
+  private readonly _metadataReenablePreloadCount: number;
 
   constructor(
     private readonly logger: Logger,
@@ -58,6 +66,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     this._maxPreloadCountCap = Math.max(this._basePreloadCount, this._basePreloadCount * 4);
     this._currentPreloadCount = this._basePreloadCount;
     this._directRawFetchCount = this._basePreloadCount;
+    this._metadataReenablePreloadCount = Math.min(this._maxPreloadCountCap, this._basePreloadCount * 2);
   }
 
   /**
@@ -65,7 +74,9 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
    * The exponential timer handles re-invocation for continuous polling.
    */
   public async load(currentNetworkHeight: number): Promise<void> {
-    while (this.queue.lastHeight < currentNetworkHeight) {
+    const targetHeight = Math.min(currentNetworkHeight, this.queue.maxBlockHeight);
+
+    while (this.queue.lastHeight < targetHeight) {
       if (this.queue.isMaxHeightReached) return;
 
       if (this.queue.isQueueFull) {
@@ -74,11 +85,11 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
 
       if (this._preloadedItemsQueue.length === 0) {
         if (this._directRawMode) {
-          await this.loadRawHeightWindow(currentNetworkHeight);
+          await this.loadRawHeightWindow(targetHeight);
           continue;
         }
 
-        await this.preloadBlocksInfo(currentNetworkHeight);
+        await this.preloadBlocksInfo(targetHeight);
 
         this.logger.debug('Preloaded block infos for RPC strategy', {
           module: this.moduleName,
@@ -221,6 +232,7 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
           nextMode: 'direct-raw',
           directRawFetchCount: this._directRawFetchCount,
           basePreloadCount: this._basePreloadCount,
+          metadataReenablePreloadCount: this._metadataReenablePreloadCount,
           maxRpcReplyBytes: this._maxRpcReplyBytes,
           averagePredictedReplyBytes: Math.round(averagePredictedReplyBytes),
           observedBlockInfos: blockInfos.length,
@@ -272,16 +284,17 @@ export class RpcProviderStrategy implements BlocksLoadingStrategy {
     const averagePredictedReplyBytes = this.averagePredictedReplyBytesFromSizes(blocks.map((block) => block.size));
     const nextByBudget = this.nextCountForPredictedReplyBytes(averagePredictedReplyBytes);
 
-    if (nextByBudget >= this._basePreloadCount) {
+    if (nextByBudget >= this._metadataReenablePreloadCount) {
       const nextPreloadCount = Math.min(this._maxPreloadCountCap, nextByBudget);
       this._directRawMode = false;
       this._currentPreloadCount = nextPreloadCount;
       this._directRawFetchCount = nextPreloadCount;
-      this.logger.verbose('RPC metadata preload re-enabled after observing smaller raw blocks', {
+      this.logger.verbose('RPC metadata preload re-enabled after observing a large raw fetch window', {
         module: this.moduleName,
         args: {
           nextPreloadCount,
           basePreloadCount: this._basePreloadCount,
+          metadataReenablePreloadCount: this._metadataReenablePreloadCount,
           maxRpcReplyBytes: this._maxRpcReplyBytes,
           averagePredictedReplyBytes: Math.round(averagePredictedReplyBytes),
           observedBlocks: blocks.length,
