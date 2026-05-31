@@ -1,6 +1,6 @@
 {
   "name": "@easylayer/common",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "description": "Meta-package that routes subpath exports to per-subpackage builds.",
   "type": "commonjs",
   "main": "./index.js",

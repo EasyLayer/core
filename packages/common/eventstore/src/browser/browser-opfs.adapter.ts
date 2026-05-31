@@ -12,10 +12,52 @@ import type {
   SnapshotOptions,
   PersistAggregatesOptions,
 } from '../core';
-import { assertFullOutboxAck, BaseAdapter, validateAggregateId, type OutboxDeliveryAck } from '../core';
+import {
+  assertFullOutboxAck,
+  BaseAdapter,
+  validateAggregateId,
+  type OutboxDeliveryAck,
+  type OutboxDeliveryChunkInfo,
+  type OutboxDeliveryChunkObserver,
+} from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
+
+function summarizeOutboxRows(
+  rows: Array<{
+    id: string;
+    aggregateId: string;
+    eventType: string;
+    eventVersion: number;
+    requestId: string;
+    blockHeight: number | null;
+  }>
+): OutboxDeliveryChunkInfo {
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const distinctAggregateIds = Array.from(new Set(rows.map((r) => r.aggregateId))).slice(0, 10);
+  const distinctEventTypes = Array.from(new Set(rows.map((r) => r.eventType))).slice(0, 10);
+
+  return {
+    outboxIds: rows.map((r) => r.id),
+    eventCount: rows.length,
+    firstOutboxId: first?.id,
+    lastOutboxId: last?.id,
+    firstAggregateId: first?.aggregateId,
+    lastAggregateId: last?.aggregateId,
+    firstEventType: first?.eventType,
+    lastEventType: last?.eventType,
+    firstEventVersion: first?.eventVersion,
+    lastEventVersion: last?.eventVersion,
+    firstRequestId: first?.requestId,
+    lastRequestId: last?.requestId,
+    firstBlockHeight: first?.blockHeight ?? null,
+    lastBlockHeight: last?.blockHeight ?? null,
+    distinctAggregateIds,
+    distinctEventTypes,
+  };
+}
 
 function toBuffer(x: any): Buffer {
   if (Buffer.isBuffer(x)) return x;
@@ -320,7 +362,8 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
 
   public async fetchDeliverAckChunk(
     transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
+    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>,
+    observe?: OutboxDeliveryChunkObserver
   ): Promise<number> {
     return this.deliverLock.runExclusive(async () => {
       const want = Math.max(1, Math.floor(transportCapBytes / BrowserOpfsAdapter.AVG_EVENT_BYTES_GUESS));
@@ -371,6 +414,9 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
         running += add;
       }
 
+      const chunkInfo = summarizeOutboxRows(accepted);
+      observe?.({ phase: 'selected', chunk: chunkInfo, watermarkBefore: String(this.lastSeenId) });
+
       const events: WireEventRecord[] = new Array(accepted.length);
       for (let i = 0; i < accepted.length; i++) {
         const r = accepted[i]!;
@@ -390,6 +436,10 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
       const ack = await deliver(events);
       assertFullOutboxAck(ack, events.length);
 
+      const deleteStartedAt = Date.now();
+      const watermarkBefore = String(this.lastSeenId);
+      observe?.({ phase: 'delete-started', chunk: chunkInfo, watermarkBefore });
+
       await this.writeLock.runExclusive(async () => {
         const ids = accepted.map((r) => r.id);
         this.run('BEGIN');
@@ -404,6 +454,15 @@ export class BrowserOpfsAdapter<T extends AggregateRoot = AggregateRoot> extends
           // Advance watermark inside the lock that owns outbox state.
           // Only reached on successful COMMIT — ensures lastSeenId never advances past a failed delete.
           this.lastSeenId = nextId;
+          const watermarkAfter = String(this.lastSeenId);
+          observe?.({
+            phase: 'delete-committed',
+            chunk: chunkInfo,
+            deleteMs: Date.now() - deleteStartedAt,
+            watermarkBefore,
+            watermarkAfter,
+          });
+          observe?.({ phase: 'watermark-advanced', chunk: chunkInfo, watermarkBefore, watermarkAfter });
         } catch (e) {
           this.run('ROLLBACK');
           throw e;

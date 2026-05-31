@@ -62,6 +62,7 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
   });
 
   private draining: Promise<{ completed: boolean }> | null = null;
+  private readonly activeSaves = new Set<Promise<void>>();
 
   // True while the serialized outbox drain is in exponential retry after a transport failure.
   // The outbox table remains the only remote delivery source; this flag only records retry state.
@@ -89,9 +90,25 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
     await this.runDrainOnce('startup-drain');
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.retryTimer?.destroy();
     this.retryTimer = null;
+    this.logger.verbose('EventStore write service is waiting for active outbox delivery before shutdown', {
+      module: 'eventstore',
+      args: { action: 'onModuleDestroy' },
+    });
+    await this.waitForActiveSaves();
+    await this.outboxDelivery.waitForIdle();
+    this.logger.verbose('EventStore write service outbox delivery is idle, shutdown can continue', {
+      module: 'eventstore',
+      args: { action: 'onModuleDestroy' },
+    });
+  }
+
+  private async waitForActiveSaves(): Promise<void> {
+    while (this.activeSaves.size > 0) {
+      await Promise.allSettled(Array.from(this.activeSaves));
+    }
   }
 
   private hasRemoteTransport(): boolean {
@@ -123,6 +140,16 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
    * Aggregate writes are always atomic. Outbox writes are included in the same transaction only when remote transport is configured.
    */
   public async save(models: T | T[], options: SaveOptions = {}): Promise<void> {
+    const op = this.saveUnlocked(models, options);
+    this.activeSaves.add(op);
+    try {
+      await op;
+    } finally {
+      this.activeSaves.delete(op);
+    }
+  }
+
+  private async saveUnlocked(models: T | T[], options: SaveOptions = {}): Promise<void> {
     const aggregates = Array.isArray(models) ? models : [models];
 
     const writeOutbox = this.hasRemoteTransport();
@@ -188,6 +215,41 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
   // ───────────────────────────── OUTBOX DRAIN ─────────────────────────────
 
+  private logOutboxChunkDiagnostic(
+    phase: 'selected' | 'delete-started' | 'delete-committed' | 'watermark-advanced',
+    ctx: OutboxDeliveryRunContext,
+    event: { chunk: any; deleteMs?: number; watermarkBefore?: string; watermarkAfter?: string }
+  ): void {
+    this.logger.verbose('Outbox drain chunk state changed', {
+      module: 'eventstore',
+      args: {
+        action: 'drainOutboxCompletely',
+        flowId: ctx.flowId,
+        source: ctx.source,
+        phase,
+        eventCount: event.chunk.eventCount,
+        firstOutboxId: event.chunk.firstOutboxId,
+        lastOutboxId: event.chunk.lastOutboxId,
+        firstAggregateId: event.chunk.firstAggregateId,
+        lastAggregateId: event.chunk.lastAggregateId,
+        firstEventType: event.chunk.firstEventType,
+        lastEventType: event.chunk.lastEventType,
+        firstEventVersion: event.chunk.firstEventVersion,
+        lastEventVersion: event.chunk.lastEventVersion,
+        firstRequestId: event.chunk.firstRequestId,
+        lastRequestId: event.chunk.lastRequestId,
+        firstBlockHeight: event.chunk.firstBlockHeight,
+        lastBlockHeight: event.chunk.lastBlockHeight,
+        distinctAggregateIds: event.chunk.distinctAggregateIds,
+        distinctEventTypes: event.chunk.distinctEventTypes,
+        outboxIds: event.chunk.outboxIds,
+        deleteMs: event.deleteMs,
+        watermarkBefore: event.watermarkBefore,
+        watermarkAfter: event.watermarkAfter,
+      },
+    });
+  }
+
   /**
    * Drains the outbox in multiple chunks. ACK policy: one ACK per chunk.
    * Chunk sizing and EMA hints are adapter-owned; service gives only the transport cap.
@@ -197,35 +259,47 @@ export class EventStoreWriteService<T extends AggregateRoot = AggregateRoot> imp
 
     while (true) {
       try {
-        const sent = await this.adapter.fetchDeliverAckChunk(this.transportMaxFrameBytes, async (events) => {
-          const drainStartedAt = Date.now();
-          this.logger.verbose('Outbox drain chunk publish started', {
-            module: 'eventstore',
-            args: {
-              action: 'drainOutboxCompletely',
-              flowId: ctx.flowId,
-              source: ctx.source,
-              eventCount: events.length,
-              firstRequestId: events[0]?.requestId,
-              lastRequestId: events[events.length - 1]?.requestId,
-              firstBlockHeight: events[0]?.blockHeight,
-              lastBlockHeight: events[events.length - 1]?.blockHeight,
-            },
-          });
-          const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(events);
-          assertFullOutboxAck(ack, events.length);
-          this.logger.verbose('Outbox drain chunk ACK received', {
-            module: 'eventstore',
-            args: {
-              action: 'drainOutboxCompletely',
-              flowId: ctx.flowId,
-              source: ctx.source,
-              eventCount: events.length,
-              ackMs: Date.now() - drainStartedAt,
-            },
-          });
-          return ack;
-        });
+        const sent = await this.adapter.fetchDeliverAckChunk(
+          this.transportMaxFrameBytes,
+          async (events) => {
+            const drainStartedAt = Date.now();
+            this.logger.verbose('Outbox drain chunk publish started', {
+              module: 'eventstore',
+              args: {
+                action: 'drainOutboxCompletely',
+                flowId: ctx.flowId,
+                source: ctx.source,
+                eventCount: events.length,
+                firstModelName: events[0]?.modelName,
+                lastModelName: events[events.length - 1]?.modelName,
+                firstEventType: events[0]?.eventType,
+                lastEventType: events[events.length - 1]?.eventType,
+                firstEventVersion: events[0]?.eventVersion,
+                lastEventVersion: events[events.length - 1]?.eventVersion,
+                firstRequestId: events[0]?.requestId,
+                lastRequestId: events[events.length - 1]?.requestId,
+                firstBlockHeight: events[0]?.blockHeight,
+                lastBlockHeight: events[events.length - 1]?.blockHeight,
+              },
+            });
+            const ack = await this.publisherProvider.publisher.publishWireStreamBatchWithAck(events);
+            assertFullOutboxAck(ack, events.length);
+            this.logger.verbose('Outbox drain chunk ACK received', {
+              module: 'eventstore',
+              args: {
+                action: 'drainOutboxCompletely',
+                flowId: ctx.flowId,
+                source: ctx.source,
+                eventCount: events.length,
+                correlationId: ack.correlationId,
+                okIndices: ack.okIndices,
+                ackMs: Date.now() - drainStartedAt,
+              },
+            });
+            return ack;
+          },
+          (event) => this.logOutboxChunkDiagnostic(event.phase, ctx, event)
+        );
         if (sent === 0) return { completed: true };
       } catch (e) {
         this.logger.verbose('Outbox drain chunk failed', {
