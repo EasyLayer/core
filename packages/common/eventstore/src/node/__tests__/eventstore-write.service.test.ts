@@ -279,4 +279,106 @@ describe('EventStoreWriteService', () => {
 
     expect((svc as any).drainFailing).toBe(false);
   });
+
+  it('onModuleDestroy waits for in-flight save drain before shutdown completes', async () => {
+    const a1 = new TestAgg('a1', 10, 1, false);
+    const rawA = mkEvent('raw-a', 10);
+    const rowA = mkEvent('row-a', 10);
+    adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([rawA]));
+
+    let resolveAck!: (value: any) => void;
+    const ack = new Promise((resolve) => { resolveAck = resolve; });
+    adapter.fetchDeliverAckChunk
+      .mockImplementationOnce(async (_cap: number, cb: (evs:any[])=>Promise<any>) => {
+        await cb([rowA]);
+        return 1;
+      })
+      .mockResolvedValue(0);
+    pub.publisher.publishWireStreamBatchWithAck.mockImplementationOnce(() => ack);
+
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
+    const save = svc.save(a1 as any);
+    while (pub.publisher.publishWireStreamBatchWithAck.mock.calls.length < 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    let destroyResolved = false;
+    const destroy = svc.onModuleDestroy().then(() => { destroyResolved = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(destroyResolved).toBe(false);
+
+    resolveAck({ ok: true, okIndices: [0] });
+    await Promise.all([save, destroy]);
+    expect(destroyResolved).toBe(true);
+    expect(pub.publisher.publishSystemEventsLocally).toHaveBeenCalledWith([rawA]);
+  });
+
+  it('passes safe outbox chunk diagnostics observer to the adapter', async () => {
+    const a1 = new TestAgg('a1', 10, 1, false);
+    const rawA = mkEvent('raw-a', 10);
+    const rowA = mkEvent('row-a', 10);
+    adapter.persistAggregatesAndOutbox.mockResolvedValue(mkPersist([rawA]));
+    adapter.fetchDeliverAckChunk
+      .mockImplementationOnce(async (_cap: number, cb: (evs:any[])=>Promise<any>, observe?: any) => {
+        expect(typeof observe).toBe('function');
+        observe({
+          phase: 'selected',
+          chunk: {
+            outboxIds: ['101'],
+            eventCount: 1,
+            firstOutboxId: '101',
+            lastOutboxId: '101',
+            firstAggregateId: 'B',
+            lastAggregateId: 'B',
+            firstEventType: 'B',
+            lastEventType: 'B',
+            firstEventVersion: 15,
+            lastEventVersion: 15,
+            firstRequestId: rowA.requestId,
+            lastRequestId: rowA.requestId,
+            firstBlockHeight: rowA.blockHeight,
+            lastBlockHeight: rowA.blockHeight,
+            distinctAggregateIds: ['B'],
+            distinctEventTypes: ['B'],
+          },
+          watermarkBefore: '100',
+        });
+        await cb([rowA]);
+        observe({
+          phase: 'delete-committed',
+          chunk: {
+            outboxIds: ['101'],
+            eventCount: 1,
+            firstOutboxId: '101',
+            lastOutboxId: '101',
+            firstAggregateId: 'B',
+            lastAggregateId: 'B',
+            firstEventType: 'B',
+            lastEventType: 'B',
+            firstEventVersion: 15,
+            lastEventVersion: 15,
+            firstRequestId: rowA.requestId,
+            lastRequestId: rowA.requestId,
+            firstBlockHeight: rowA.blockHeight,
+            lastBlockHeight: rowA.blockHeight,
+            distinctAggregateIds: ['B'],
+            distinctEventTypes: ['B'],
+          },
+          deleteMs: 3,
+          watermarkBefore: '100',
+          watermarkAfter: '101',
+        });
+        return 1;
+      })
+      .mockResolvedValue(0);
+
+    const svc = new EventStoreWriteService<any>(adapter as any, pub as any, readSvc as any, {});
+    await svc.save(a1 as any);
+
+    expect(adapter.fetchDeliverAckChunk).toHaveBeenCalledTimes(2);
+    const observer = adapter.fetchDeliverAckChunk.mock.calls[0][2];
+    expect(typeof observer).toBe('function');
+    expect(pub.publisher.publishWireStreamBatchWithAck).toHaveBeenCalledWith([rowA]);
+  });
+
 });

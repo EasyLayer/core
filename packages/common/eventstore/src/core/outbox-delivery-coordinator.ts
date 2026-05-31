@@ -32,6 +32,10 @@ export class OutboxDeliveryCoordinator {
 
   constructor(private readonly observe?: OutboxDeliveryObserver) {}
 
+  async waitForIdle(): Promise<void> {
+    await this.tail.catch(() => undefined);
+  }
+
   async run<T>(source: string, handler: (ctx: OutboxDeliveryRunContext) => Promise<T>): Promise<T> {
     const flowId = this.nextFlowId++;
     const queuedAt = Date.now();

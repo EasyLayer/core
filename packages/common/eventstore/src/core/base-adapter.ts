@@ -12,6 +12,33 @@ export interface SnapshotOptions {
   allowPruning: boolean;
 }
 
+export interface OutboxDeliveryChunkInfo {
+  outboxIds: string[];
+  eventCount: number;
+  firstOutboxId?: string;
+  lastOutboxId?: string;
+  firstAggregateId?: string;
+  lastAggregateId?: string;
+  firstEventType?: string;
+  lastEventType?: string;
+  firstEventVersion?: number;
+  lastEventVersion?: number;
+  firstRequestId?: string;
+  lastRequestId?: string;
+  firstBlockHeight?: number | null;
+  lastBlockHeight?: number | null;
+  distinctAggregateIds?: string[];
+  distinctEventTypes?: string[];
+}
+
+export type OutboxDeliveryChunkObserver = (event: {
+  phase: 'selected' | 'delete-started' | 'delete-committed' | 'watermark-advanced';
+  chunk: OutboxDeliveryChunkInfo;
+  deleteMs?: number;
+  watermarkBefore?: string;
+  watermarkAfter?: string;
+}) => void;
+
 export interface OutboxDeliveryAck {
   ok: boolean;
   okIndices?: number[];
@@ -123,7 +150,8 @@ export abstract class BaseAdapter<T extends AggregateRoot = AggregateRoot> {
   abstract deleteOutboxByIds(ids: string[]): Promise<void>;
   abstract fetchDeliverAckChunk(
     transportMaxFrameBytes: number,
-    publish: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
+    publish: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>,
+    observe?: OutboxDeliveryChunkObserver
   ): Promise<number>;
   abstract rollbackAggregates(aggregateIds: string[], blockHeight: number): Promise<void>;
   abstract advanceWatermark(lastId: string): void;

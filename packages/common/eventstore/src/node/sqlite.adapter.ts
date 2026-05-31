@@ -11,13 +11,54 @@ import type {
   SnapshotOptions,
   PersistAggregatesOptions,
 } from '../core';
-import { assertFullOutboxAck, BaseAdapter, type OutboxDeliveryAck } from '../core';
+import {
+  assertFullOutboxAck,
+  BaseAdapter,
+  type OutboxDeliveryAck,
+  type OutboxDeliveryChunkInfo,
+  type OutboxDeliveryChunkObserver,
+} from '../core';
 import { toEventDataModel, toDomainEvent, toEventReadRow } from './event-data.serialize';
 import { toWireEventRecord } from './outbox.deserialize';
 import { toSnapshotDataModel, toSnapshotReadRow, toSnapshotParsedPayload } from './snapshot.serialize';
 import { validateAggregateId } from './entities';
 import { applyDefaultSqlitePragmas } from './node-utils';
 import type { SqliteFileManager } from './sqlite-file-manager';
+
+function summarizeOutboxRows(
+  rows: Array<{
+    id: string;
+    aggregateId: string;
+    eventType: string;
+    eventVersion: number;
+    requestId: string;
+    blockHeight: number | null;
+  }>
+): OutboxDeliveryChunkInfo {
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const distinctAggregateIds = Array.from(new Set(rows.map((r) => r.aggregateId))).slice(0, 10);
+  const distinctEventTypes = Array.from(new Set(rows.map((r) => r.eventType))).slice(0, 10);
+
+  return {
+    outboxIds: rows.map((r) => r.id),
+    eventCount: rows.length,
+    firstOutboxId: first?.id,
+    lastOutboxId: last?.id,
+    firstAggregateId: first?.aggregateId,
+    lastAggregateId: last?.aggregateId,
+    firstEventType: first?.eventType,
+    lastEventType: last?.eventType,
+    firstEventVersion: first?.eventVersion,
+    lastEventVersion: last?.eventVersion,
+    firstRequestId: first?.requestId,
+    lastRequestId: last?.requestId,
+    firstBlockHeight: first?.blockHeight ?? null,
+    lastBlockHeight: last?.blockHeight ?? null,
+    distinctAggregateIds,
+    distinctEventTypes,
+  };
+}
 
 /**
  * SQLite adapter (Node sqlite).
@@ -295,7 +336,8 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
 
   public async fetchDeliverAckChunk(
     transportCapBytes: number,
-    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>
+    deliver: (events: WireEventRecord[]) => Promise<OutboxDeliveryAck>,
+    observe?: OutboxDeliveryChunkObserver
   ): Promise<number> {
     return this.deliverLock.runExclusive(async () => {
       const wantRows = Math.max(1, Math.floor(transportCapBytes / SqliteAdapter.AVG_EVENT_BYTES_GUESS));
@@ -351,6 +393,9 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
         running += add;
       }
 
+      const chunkInfo = summarizeOutboxRows(accepted);
+      observe?.({ phase: 'selected', chunk: chunkInfo, watermarkBefore: String(this.lastSeenId) });
+
       const events: WireEventRecord[] = new Array(accepted.length);
       for (let i = 0; i < accepted.length; i++) {
         const r = accepted[i]!;
@@ -372,6 +417,10 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
       const ack = await deliver(events);
       assertFullOutboxAck(ack, events.length);
 
+      const deleteStartedAt = Date.now();
+      const watermarkBefore = String(this.lastSeenId);
+      observe?.({ phase: 'delete-started', chunk: chunkInfo, watermarkBefore });
+
       await this.writeLock.runExclusive(async () => {
         const ids = accepted.map((r) => r.id);
         const qr = this.dataSource.createQueryRunner();
@@ -386,6 +435,15 @@ export class SqliteAdapter<T extends AggregateRoot = AggregateRoot> extends Base
           }
           await qr.query('COMMIT');
           this.lastSeenId = nextId;
+          const watermarkAfter = String(this.lastSeenId);
+          observe?.({
+            phase: 'delete-committed',
+            chunk: chunkInfo,
+            deleteMs: Date.now() - deleteStartedAt,
+            watermarkBefore,
+            watermarkAfter,
+          });
+          observe?.({ phase: 'watermark-advanced', chunk: chunkInfo, watermarkBefore, watermarkAfter });
         } catch (e) {
           await qr.query('ROLLBACK').catch(() => undefined);
           throw e;
