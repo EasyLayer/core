@@ -1,4 +1,4 @@
-import { BlockchainProviderService, Block } from '../../../../blockchain-provider';
+import { BlockchainProviderService, Block, IncomingRawBlock } from '../../../../blockchain-provider';
 import { RpcZmqProviderStrategy } from '../rpc-zmq-provider.strategy';
 import { BlocksQueue } from '../../../blocks-queue';
 
@@ -23,6 +23,10 @@ function createTestBlock(height: number, hash: string, size: number): Block {
     difficulty: '1',
     nTx: 0,
   } as Block;
+}
+
+function createIncomingRawBlock(hash: string, prevHash: string, size: number): IncomingRawBlock {
+  return { hash, prevHash, size, bytes: Buffer.alloc(size) };
 }
 
 describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
@@ -60,6 +64,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       getActiveNetworkProviderName: jest.fn(),
       getNetworkProviderByName: jest.fn(),
       subscribeToNewBlocks: jest.fn(),
+      getOneBlockHashByHeight: jest.fn(),
     } as any;
 
     strategy = new RpcZmqProviderStrategy(mockLogger, mockProvider, queue, {
@@ -145,7 +150,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       (queue as any)._lastHeight = 5;
       mockProvider.hasNetworkProvidersAvailable.mockReturnValue(true);
 
-      let blockCallback: ((b: Block) => void) | undefined;
+      let blockCallback: ((b: IncomingRawBlock) => void) | undefined;
       let resolveSubscription!: () => void;
       const subscriptionPromise = new Promise<void>((res) => {
         resolveSubscription = res;
@@ -162,7 +167,8 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
 
       expect(blockCallback).toBeDefined();
 
-      const newBlock = createTestBlock(6, 'newHash', 1000);
+      mockProvider.getOneBlockHashByHeight.mockResolvedValue('hash5');
+      const newBlock = createIncomingRawBlock('newHash', 'hash5', 1000);
       await blockCallback!(newBlock);
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(6);
@@ -197,7 +203,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       (queue as any)._lastHeight = 5;
       mockProvider.hasNetworkProvidersAvailable.mockReturnValue(true);
 
-      let blockCallback: ((b: Block) => void) | undefined;
+      let blockCallback: ((b: IncomingRawBlock) => void) | undefined;
       const subscriptionPromise = new Promise<void>(() => {}) as any;
       subscriptionPromise.unsubscribe = jest.fn();
 
@@ -211,7 +217,7 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
 
       expect(blockCallback).toBeDefined();
       Object.defineProperty(queue, 'isQueueFull', { get: () => true, configurable: true });
-      await blockCallback!(createTestBlock(6, 'hash6', 1000));
+      await blockCallback!(createIncomingRawBlock('hash6', 'hash5', 1000));
 
       await expect(loadPromise).rejects.toThrow('The queue is full');
     });
@@ -233,16 +239,14 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       expect(mockProvider.subscribeToNewBlocks).not.toHaveBeenCalled();
     });
 
-    it('skips incoming blocks with height ≤ lastHeight', async () => {
+    it('rejects incoming live blocks that do not connect to the queue tip hash', async () => {
       (queue as any)._lastHeight = 5;
       mockProvider.hasNetworkProvidersAvailable.mockReturnValue(true);
+      mockProvider.getOneBlockHashByHeight.mockResolvedValue('hash5');
 
-      let blockCallback: ((b: Block) => void) | undefined;
-      let resolveSubscription!: () => void;
-      const subscriptionPromise = new Promise<void>((res) => {
-        resolveSubscription = res;
-      }) as any;
-      subscriptionPromise.unsubscribe = () => resolveSubscription();
+      let blockCallback: ((b: IncomingRawBlock) => void) | undefined;
+      const subscriptionPromise = new Promise<void>(() => {}) as any;
+      subscriptionPromise.unsubscribe = jest.fn();
 
       mockProvider.subscribeToNewBlocks.mockImplementation((cb: any) => {
         blockCallback = cb;
@@ -252,15 +256,11 @@ describe('RpcZmqProviderStrategy (RPC catch-up + ZMQ subscription)', () => {
       const loadPromise = strategy.load(5);
       await new Promise((r) => setImmediate(r));
 
-      await blockCallback!(createTestBlock(3, 'oldHash', 1000));
-      expect(queue.length).toBe(0);
-      expect(mockLogger.verbose).toHaveBeenCalledWith(
-        'RPC+ZMQ strategy: skipping block with height ≤ lastHeight',
-        expect.objectContaining({ module: 'blocks-queue' })
-      );
+      await blockCallback!(createIncomingRawBlock('badHash', 'otherTip', 1000));
 
-      resolveSubscription();
-      await loadPromise;
+      await expect(loadPromise).rejects.toThrow('live block continuity mismatch');
+      expect(queue.length).toBe(0);
     });
+
   });
 });

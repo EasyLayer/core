@@ -5,6 +5,8 @@ export interface RawBlock {
   height: number;
   size: number;
   bytes: Buffer;
+  /** Header previousblockhash, when available from realtime raw metadata. */
+  prevHash?: string;
 }
 
 export interface BlocksCommandExecutor {

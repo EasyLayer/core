@@ -1,5 +1,4 @@
 import { BlocksQueue, CapacityPlanner } from '../blocks-queue';
-import { setBitcoinNativeBindings } from '../../native';
 import type { RawBlock } from '../interfaces';
 
 function createRawBlock(height: number, size = 1000, hashSuffix = ''): RawBlock {
@@ -72,17 +71,18 @@ describe('BlocksQueue', () => {
   });
 
   afterEach(() => {
-    setBitcoinNativeBindings(undefined);
   });
 
   describe('Initialization', () => {
-    it('initializes with empty state', () => {
+    it('initializes with JS Buffer queue by default', () => {
+      expect(queue.queueMode).toBe('js-buffer');
       expect(queue.length).toBe(0);
       expect(queue.lastHeight).toBe(-1);
       expect(queue.currentSize).toBe(0);
       expect(queue.isQueueFull).toBe(false);
       expect(queue.isMaxHeightReached).toBe(false);
     });
+
   });
 
   describe('enqueue()', () => {
@@ -148,55 +148,6 @@ describe('BlocksQueue', () => {
       await expect(q.enqueue(createRawBlock(1, 1))).rejects.toThrow('Would exceed memory limit');
     });
 
-    it('native path calls validateEnqueue then enqueueBytes', async () => {
-      const calls: string[] = [];
-      let receivedHash = '';
-      let receivedBytes: Buffer | undefined;
-
-      class FakeNativeBlocksQueue {
-        validateEnqueue(meta: any) { calls.push(`validate:${meta.hash}:${meta.height}:${meta.size}`); }
-        enqueueBytes(hash: string, _h: number, _s: number, bytes: Buffer) {
-          calls.push('enqueueBytes');
-          receivedHash = hash;
-          receivedBytes = bytes;
-        }
-        isQueueFull() { return false; }
-        isQueueOverloaded() { return false; }
-        getBlockSize() { return 1; }
-        setBlockSize() {}
-        isMaxHeightReached() { return false; }
-        getMaxBlockHeight() { return Number.MAX_SAFE_INTEGER; }
-        setMaxBlockHeight() {}
-        getMaxQueueSize() { return 10 * 1024 * 1024; }
-        setMaxQueueSize() {}
-        getCurrentSize() { return 0; }
-        getLength() { return 0; }
-        getLastHeight() { return -1; }
-        getBatchUpToSize() { return []; }
-        findBlocks() { return []; }
-        dequeue() { return 0; }
-        clear() {}
-        reorganize() {}
-        dispose() {}
-        getMemoryStats() { return { bufferAllocated: 0, blocksUsed: 0, bufferEfficiency: 0, avgBlockSize: 0, indexesSize: 0, memoryUsedBytes: 0 }; }
-      }
-
-      setBitcoinNativeBindings({ NativeBlocksQueue: FakeNativeBlocksQueue as any });
-
-      const nativeQueue = new BlocksQueue({
-        lastHeight: -1,
-        maxBlockHeight: Number.MAX_SAFE_INTEGER,
-        blockSize: 1024,
-        maxQueueSize: 10 * 1024 * 1024,
-      });
-
-      const raw = createRawBlock(0, 200);
-      await nativeQueue.enqueue(raw);
-
-      expect(calls).toEqual([`validate:${raw.hash}:0:200`, 'enqueueBytes']);
-      expect(receivedHash).toBe(raw.hash);
-      expect(receivedBytes).toBe(raw.bytes);
-    });
   });
 
   describe('dequeue()', () => {
@@ -251,47 +202,6 @@ describe('BlocksQueue', () => {
   });
 
 
-    it('native getBatchUpToSize and findBlocks use shared raw block API directly', async () => {
-      const bytes = Buffer.from([1, 2, 3]);
-      const raw = { hash: 'native-hash', height: 0, size: bytes.length, bytes };
-      const calls: string[] = [];
-
-      class FakeNativeBlocksQueue {
-        validateEnqueue() {}
-        enqueueBytes() {}
-        isQueueFull() { return false; }
-        isQueueOverloaded() { return false; }
-        getBlockSize() { return 1; }
-        setBlockSize() {}
-        isMaxHeightReached() { return false; }
-        getMaxBlockHeight() { return Number.MAX_SAFE_INTEGER; }
-        setMaxBlockHeight() {}
-        getMaxQueueSize() { return 10 * 1024 * 1024; }
-        setMaxQueueSize() {}
-        getCurrentSize() { return bytes.length; }
-        getLength() { return 1; }
-        getLastHeight() { return 0; }
-        getBatchUpToSize(maxSize: number) { calls.push(`getBatch:${maxSize}`); return [raw]; }
-        findBlocks(hashes: string[]) { calls.push(`find:${hashes.join(',')}`); return [raw]; }
-        dequeue() { return 0; }
-        clear() {}
-        reorganize() {}
-        dispose() {}
-        getMemoryStats() { return { bufferAllocated: 1, blocksUsed: 1, bufferEfficiency: 1, avgBlockSize: bytes.length, indexesSize: 2, memoryUsedBytes: bytes.length }; }
-      }
-
-      setBitcoinNativeBindings({ NativeBlocksQueue: FakeNativeBlocksQueue as any });
-      const nativeQueue = new BlocksQueue({
-        lastHeight: -1,
-        maxBlockHeight: Number.MAX_SAFE_INTEGER,
-        blockSize: 1024,
-        maxQueueSize: 10 * 1024 * 1024,
-      });
-
-      expect(await nativeQueue.getBatchUpToSize(1024)).toEqual([raw]);
-      expect(await nativeQueue.findBlocks(new Set(['native-hash']))).toEqual([raw]);
-      expect(calls).toEqual(['getBatch:1024', 'find:native-hash']);
-    });
 
   describe('findBlocks()', () => {
     it('finds blocks by hash and returns RawBlock[]', async () => {

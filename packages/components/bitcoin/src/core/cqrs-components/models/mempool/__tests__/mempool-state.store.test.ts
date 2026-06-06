@@ -1,4 +1,5 @@
-import { JsMempoolStateStore } from '../mempool-state.store';
+import { createMempoolStateStore, JsMempoolStateStore } from '../mempool-state.store';
+import { setBitcoinNativeBindings, setBitcoinNativeLoadError } from '../../../../native';
 
 const meta = (txid: string, fee = 1000): any => ({
   txid,
@@ -87,5 +88,131 @@ describe('JsMempoolStateStore', () => {
         providerTx_map: new Map([['providerA', new Set([123])]]),
       })
     ).toThrow('Unsupported mempool snapshot format');
+  });
+});
+
+
+describe('NativeMempoolStateAdapter contract', () => {
+  afterEach(() => {
+    setBitcoinNativeBindings(undefined);
+  });
+
+
+  it('requires native mempool store instead of falling back to JS', () => {
+    setBitcoinNativeBindings(undefined);
+    setBitcoinNativeLoadError(new Error('native addon missing in test'));
+
+    expect(() => createMempoolStateStore()).toThrow(/NativeMempoolState requires the Bitcoin Rust native addon/);
+    expect(() => createMempoolStateStore()).toThrow(/native addon missing in test/);
+  });
+
+  it('fails immediately when a selected native store lacks required methods', () => {
+    class IncompleteNativeMempoolState {
+      applySnapshot() {}
+      providers() { return []; }
+      pendingTxids() { return []; }
+      recordLoaded() {}
+      *txIds() {}
+      *loadedTransactions() {}
+      *metadata() {}
+      hasTransaction() { return false; }
+      isTransactionLoaded() { return false; }
+      getTransactionMetadata() { return undefined; }
+      getFullTransaction() { return undefined; }
+      getStats() { return { txids: 0, metadata: 0, transactions: 0, providers: 0 }; }
+      getMemoryUsage() {
+        return { unit: 'MB', counts: { txids: 0, metadata: 0, transactions: 0, loaded: 0, providers: 0 }, bytes: { txIndex: 0, metadata: 0, txStore: 0, loadTracker: 0, providerTx: 0, total: 0 } };
+      }
+      exportSnapshot() { return { version: 2, txids: [], providerTx: [], metadata: [], transactions: [], loadTracker: [] }; }
+      importSnapshot() {}
+      dispose() {}
+    }
+
+    setBitcoinNativeBindings({ NativeMempoolState: IncompleteNativeMempoolState as any });
+
+    expect(() => createMempoolStateStore()).toThrow(/missing required method\(s\): mergeSnapshot, removeTxids/);
+  });
+
+  it('does not silently fall back to JS when a selected native store fails to initialize', () => {
+    class ThrowingNativeMempoolState {
+      constructor() {
+        throw new Error('native allocation failed');
+      }
+    }
+
+    setBitcoinNativeBindings({ NativeMempoolState: ThrowingNativeMempoolState as any });
+
+    expect(() => createMempoolStateStore()).toThrow(
+      /NativeMempoolState binding was selected but failed to initialize: native allocation failed/
+    );
+  });
+
+
+
+  it('uses a complete native store and delegates required incremental methods', () => {
+    const calls: string[] = [];
+
+    class CompleteNativeMempoolState extends JsMempoolStateStore {
+      mergeSnapshot(snapshot: any) {
+        calls.push('mergeSnapshot');
+        super.mergeSnapshot(snapshot);
+      }
+
+      removeTxids(txids: string[]) {
+        calls.push('removeTxids');
+        super.removeTxids(txids);
+      }
+    }
+
+    setBitcoinNativeBindings({ NativeMempoolState: CompleteNativeMempoolState as any });
+
+    const store = createMempoolStateStore();
+    const txid = 'd'.repeat(64);
+    store.mergeSnapshot({ providerA: [{ txid, metadata: meta(txid) }] });
+    expect(store.hasTransaction(txid)).toBe(true);
+
+    store.removeTxids([txid]);
+    expect(store.hasTransaction(txid)).toBe(false);
+    expect(calls).toEqual(['mergeSnapshot', 'removeTxids']);
+  });
+
+
+  // it('accepts native snake_case method names without falling back to JS', () => {
+  //   const calls: string[] = [];
+
+  //   class SnakeCaseNativeMempoolState extends JsMempoolStateStore {
+  //     merge_snapshot(snapshot: any) {
+  //       calls.push('merge_snapshot');
+  //       super.mergeSnapshot(snapshot);
+  //     }
+
+  //     remove_txids(txids: string[]) {
+  //       calls.push('remove_txids');
+  //       super.removeTxids(txids);
+  //     }
+  //   }
+
+  //   setBitcoinNativeBindings({ NativeMempoolState: SnakeCaseNativeMempoolState as any });
+
+  //   const store = createMempoolStateStore();
+  //   const txid = 'e'.repeat(64);
+  //   store.mergeSnapshot({ providerA: [{ txid, metadata: meta(txid) }] });
+  //   expect(store.hasTransaction(txid)).toBe(true);
+
+  //   store.removeTxids([txid]);
+  //   expect(store.hasTransaction(txid)).toBe(false);
+  //   expect(calls).toEqual(['merge_snapshot', 'remove_txids']);
+  // });
+
+  it('preserves optional metadata values as undefined rather than inventing zero defaults', () => {
+    const store = new JsMempoolStateStore();
+    const txid = 'c'.repeat(64);
+    store.applySnapshot({ providerA: [{ txid, metadata: { txid, fees: {} } as any }] });
+
+    const metadata = store.getTransactionMetadata(txid)!;
+    expect(metadata.vsize).toBeUndefined();
+    expect(metadata.fee).toBeUndefined();
+    expect(metadata.height).toBeUndefined();
+    expect(metadata.fees.base).toBeUndefined();
   });
 });

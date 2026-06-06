@@ -1,6 +1,8 @@
-import type { UniversalBlock, UniversalBlockStats, UniversalTransaction } from './interfaces';
+import type { IncomingRawBlock, UniversalBlock, UniversalBlockStats, UniversalTransaction } from './interfaces';
 import { BaseProvider } from './base.provider';
 import { UniversalTransformer } from './universal-transformer';
+import { extractRawBlockHeaderMetadata } from './raw-block-metadata';
+import { asBufferView } from '../utils/buffer-view';
 
 /**
  * NetworkProvider
@@ -23,7 +25,7 @@ export class NetworkProvider extends BaseProvider {
    * RPC calls: 0 (streaming). Time: O(1) per block, parsing ~O(#tx + bytes).
    */
   subscribeToNewBlocks(
-    callback: (raw: { hash: string; height: number; size: number; bytes: Buffer }) => void,
+    callback: (raw: IncomingRawBlock) => void,
     onError?: (err: Error) => void
   ): { unsubscribe: () => void } {
     if (typeof (this.transport as any).subscribeToNewBlocks !== 'function') {
@@ -34,32 +36,19 @@ export class NetworkProvider extends BaseProvider {
 
     return this.transport.subscribeToNewBlocks!((blockData: Buffer | Uint8Array) => {
       try {
-        const u8 =
-          typeof Buffer !== 'undefined' && (blockData as any).buffer
-            ? new Uint8Array(
-                (blockData as any).buffer,
-                (blockData as any).byteOffset ?? 0,
-                (blockData as any).byteLength ?? (blockData as any).length
-              )
-            : (blockData as Uint8Array);
-
-        // Parse only to extract hash and height — bytes are passed through
-        const parsed = UniversalTransformer.parseBlockBytes(u8, this.network);
-        const bytes = Buffer.isBuffer(blockData) ? blockData : Buffer.from(u8);
-        callback({
-          hash: parsed.hash,
-          height: parsed.height ?? 0,
-          size: parsed.size ?? bytes.length,
-          bytes,
-        });
+        // Extract header-only metadata. Height is resolved by the loading strategy
+        // through queue continuity; do not full-parse the block only to enqueue it.
+        const bytes = asBufferView(blockData);
+        const metadata = extractRawBlockHeaderMetadata(bytes);
+        callback({ ...metadata, bytes });
       } catch (err) {
         const wrapped =
           err instanceof Error
             ? new Error(
-                `Provider "${(this.transport as any).uniqName}": failed to parse incoming block bytes: ${err.message}`
+                `Provider "${(this.transport as any).uniqName}": failed to read incoming block header metadata: ${err.message}`
               )
             : new Error(
-                `Provider "${(this.transport as any).uniqName}": failed to parse incoming block bytes: ${String(err)}`
+                `Provider "${(this.transport as any).uniqName}": failed to read incoming block header metadata: ${String(err)}`
               );
         onError?.(wrapped);
       }
@@ -123,7 +112,7 @@ export class NetworkProvider extends BaseProvider {
         hashToResult.set(info.hash, null);
         return;
       }
-      const bytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf as Uint8Array);
+      const bytes = asBufferView(buf as Buffer | Uint8Array);
       hashToResult.set(info.hash, {
         hash: info.hash,
         height: info.height,

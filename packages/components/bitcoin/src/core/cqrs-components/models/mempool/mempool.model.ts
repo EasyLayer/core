@@ -62,8 +62,10 @@ export class BatchSizer {
  * Event-sourced mempool aggregate.
  *
  * Persistent state is delegated to a compact store implementation:
- * - Node runtime: Rust N-API store when the native binary is available.
- * - Browser/test/runtime fallback: JS handle-based store with the same public behavior.
+ * - Node runtime: Rust N-API store is required and loaded automatically.
+ * - Missing, incomplete, or failing native bindings are runtime errors; there is
+ *   no production JS fallback for mempool state.
+ * - The JS store remains available only for direct unit tests and parity work.
  *
  * State changes still happen only via event handlers. Provider RPC loading remains in TS.
  */

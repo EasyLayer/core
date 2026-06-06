@@ -8,6 +8,7 @@ import type {
   UniversalTransaction,
   UniversalMempoolTxMetadata,
   UniversalMempoolInfo,
+  IncomingRawBlock,
 } from './providers';
 import { UniversalTransformer } from './providers/universal-transformer';
 import type { NetworkConfig } from './transports';
@@ -179,10 +180,7 @@ export class BlockchainProviderService {
    * @param callback Function to call when new block arrives
    * @returns Subscription promise with unsubscribe method
    */
-  public subscribeToNewBlocks(
-    callback: (raw: { hash: string; height: number; size: number; bytes: Buffer }) => void,
-    onError?: (err: Error) => void
-  ): Subscription {
+  public subscribeToNewBlocks(callback: (raw: IncomingRawBlock) => void, onError?: (err: Error) => void): Subscription {
     this.ensureNetworkProviders();
 
     let resolveSubscription!: () => void;

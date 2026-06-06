@@ -1,20 +1,17 @@
 import { hash as fastSha256 } from 'fast-sha256';
 import { Buffer } from 'buffer';
-import { getBitcoinNativeBindings } from '../native';
+import { BitcoinNativeRuntimeError, requireBitcoinNativeMerkleVerifier } from '../native';
+import { asBufferView, reverseHexBE } from './utils/buffer-view';
 
 /**
- *
  * Fast Merkle utilities:
+ * - Public runtime methods require the Rust native verifier in Node.js.
+ * - Private JS helpers are kept only for local algorithm tests and browser/WASM parity work.
  * - Input txids/wtxids are BE hex (RPC style).
  * - Internally hashes use LE bytes; we reverse to LE up front.
  * - Each level: H(H(leftLE || rightLE)), odd leaves duplicate the last.
  * - Final root is returned as BE hex (RPC style).
  * - BIP141 witness commitment: H(H(witness_root_LE || reserved32)) embedded in coinbase.
- *
- * All routines are allocation-lean:
- * - In-place byte reversal instead of string juggling.
- * - Reuse a single 64-byte scratch buffer per hashing pair.
- * - Ping-pong arrays between levels to avoid per-level reallocations.
  */
 function hexBEtoBufLE(hexBE: string): Buffer {
   const buf = Buffer.from(hexBE, 'hex');
@@ -27,19 +24,13 @@ function hexBEtoBufLE(hexBE: string): Buffer {
 }
 
 function bufLEtoHexBE(bufLE: Buffer): string {
-  const out = Buffer.from(bufLE);
-  for (let i = 0, j = out.length - 1; i < j; i++, j--) {
-    const t = out[i];
-    out[i] = out[j]!;
-    out[j] = t!;
-  }
-  return out.toString('hex');
+  return reverseHexBE(bufLE);
 }
 
 function dsha256(buf: Buffer): Buffer {
   const h1 = fastSha256(buf);
   const h2 = fastSha256(h1);
-  return Buffer.from(h2);
+  return asBufferView(h2);
 }
 
 function dsha256Pair(leftLE: Buffer, rightLE: Buffer, scratch64: Buffer): Buffer {
@@ -48,21 +39,23 @@ function dsha256Pair(leftLE: Buffer, rightLE: Buffer, scratch64: Buffer): Buffer
   return dsha256(scratch64);
 }
 
+function asNativeError(method: string, err: unknown): BitcoinNativeRuntimeError {
+  if (err instanceof BitcoinNativeRuntimeError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  return new BitcoinNativeRuntimeError(`NativeMerkleVerifier.${method} failed: ${message}`);
+}
+
 export class BitcoinMerkleVerifier {
   /**
    * Compute Merkle root from BE txids. Single-tx case returns that txid.
-   * Uses LE hashing internally and returns BE hex to match RPC.
+   * Uses the Rust native verifier in Node.js; JavaScript fallback is disabled.
    */
   static computeMerkleRoot(txidsBE: string[]): string {
-    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
-    if (native) {
-      try {
-        return native.bitcoinComputeMerkleRoot(txidsBE);
-      } catch {
-        /* fallback */
-      }
+    try {
+      return requireBitcoinNativeMerkleVerifier().bitcoinComputeMerkleRoot(txidsBE);
+    } catch (err) {
+      throw asNativeError('bitcoinComputeMerkleRoot', err);
     }
-    return BitcoinMerkleVerifier._computeMerkleRootJS(txidsBE);
   }
 
   private static _computeMerkleRootJS(txidsBE: string[]): string {
@@ -92,24 +85,13 @@ export class BitcoinMerkleVerifier {
   }
 
   /**
-   * Verify Merkle root equality, tolerant to empty-tx convention (64 zeros).
+   * Verify Merkle root equality. Uses Rust native verifier; no JS fallback.
    */
   static verifyMerkleRoot(txidsBE: string[], expectedRootBE: string): boolean {
-    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
-    if (native) {
-      try {
-        return native.bitcoinVerifyMerkleRoot(txidsBE, expectedRootBE);
-      } catch {
-        /* fallback */
-      }
-    }
     try {
-      if (!expectedRootBE) return false;
-      if (!txidsBE || txidsBE.length === 0) return expectedRootBE === '0'.repeat(64);
-      const computed = this._computeMerkleRootJS(txidsBE);
-      return computed === expectedRootBE.toLowerCase();
-    } catch {
-      return false;
+      return requireBitcoinNativeMerkleVerifier().bitcoinVerifyMerkleRoot(txidsBE, expectedRootBE);
+    } catch (err) {
+      throw asNativeError('bitcoinVerifyMerkleRoot', err);
     }
   }
 
@@ -127,18 +109,14 @@ export class BitcoinMerkleVerifier {
 
   /**
    * Validate BIP141 witness commitment embedded in coinbase.
-   * If there is no commitment or no witness context, returns true (N/A).
+   * Uses Rust native verifier; no JS fallback.
    */
   static verifyWitnessCommitment(block: any): boolean {
-    const native = getBitcoinNativeBindings()?.NativeMerkleVerifier;
-    if (native) {
-      try {
-        return native.bitcoinVerifyWitnessCommitment(block);
-      } catch {
-        /* fallback */
-      }
+    try {
+      return requireBitcoinNativeMerkleVerifier().bitcoinVerifyWitnessCommitment(block);
+    } catch (err) {
+      throw asNativeError('bitcoinVerifyWitnessCommitment', err);
     }
-    return BitcoinMerkleVerifier._verifyWitnessCommitmentJS(block);
   }
 
   private static _verifyWitnessCommitmentJS(block: any): boolean {
@@ -160,7 +138,7 @@ export class BitcoinMerkleVerifier {
         wtxids.unshift('0'.repeat(64));
       }
 
-      const witnessRootBE = this.computeWitnessMerkleRoot(wtxids);
+      const witnessRootBE = this._computeMerkleRootJS(['0'.repeat(64), ...wtxids.slice(1)]);
       const witnessRootLE = hexBEtoBufLE(witnessRootBE);
       const reserved = this.extractWitnessReservedValue(block.tx[0]) ?? Buffer.alloc(32, 0x00);
 
@@ -208,7 +186,8 @@ export class BitcoinMerkleVerifier {
         if (hasObjects) return this.verifyWitnessCommitment(block);
       }
       return true;
-    } catch {
+    } catch (err) {
+      if (err instanceof BitcoinNativeRuntimeError) throw err;
       return false;
     }
   }

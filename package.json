@@ -34,7 +34,10 @@
     "pre-push": "lerna run test:unit --concurrency 1 --stream",
     "commit": "cz",
     "docs:development:generate": "typedoc",
-    "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s -r 1 -k lerna.json"
+    "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s -r 1 -k lerna.json",
+    "native:build": "node ./scripts/native-builder/build-native-package.mjs",
+    "native:list-targets": "node ./scripts/native-builder/build-native-package.mjs --list-targets",
+    "native:list-packages": "node ./scripts/native-builder/build-native-package.mjs --list-packages"
   },
   "devDependencies": {
     "@commitlint/cli": "18.4.3",

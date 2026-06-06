@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/EasyLayer/core/compare/v1.3.7...v1.4.0) (2026-06-06)
+
+
+### Bug Fixes
+
+* improved memory handling; removed rust queue; added linux builder; ([d956c75](https://github.com/EasyLayer/core/commit/d956c75b36ca2168a0a1da354a7711a5906bf1f8))
+
 ## [1.3.7](https://github.com/EasyLayer/core/compare/v1.3.6...v1.3.7) (2026-05-31)
 
 ## [1.3.6](https://github.com/EasyLayer/core/compare/v1.3.5...v1.3.6) (2026-05-30)
