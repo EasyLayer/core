@@ -1,71 +1,6 @@
 import type { MempoolTxMetadata } from '../blockchain-provider';
 import type { LightTransaction } from '../cqrs-components/models/interfaces';
 
-export interface BlocksQueueNativeOptions {
-  lastHeight: number;
-  maxQueueSize: number;
-  blockSize: number;
-  maxBlockHeight: number;
-  plannerConfig?: {
-    maxSlots?: number;
-    minSlots?: number;
-    minAvgBytes?: number;
-    maxAvgBytes?: number;
-    alpha?: number;
-    growThreshold?: number;
-    shrinkThreshold?: number;
-    resizeCooldownMs?: number;
-  };
-}
-
-export interface NativeBlockEnqueueMeta {
-  hash: string;
-  height: number;
-  size: number;
-}
-
-export interface NativeRawBlock {
-  hash: string;
-  height: number;
-  size: number;
-  bytes: Buffer;
-}
-
-export interface NativeBlocksQueue {
-  isQueueFull(): boolean;
-  isQueueOverloaded(additionalSize: number): boolean;
-  getBlockSize(): number;
-  setBlockSize(size: number): void;
-  isMaxHeightReached(): boolean;
-  getMaxBlockHeight(): number;
-  setMaxBlockHeight(height: number): void;
-  getMaxQueueSize(): number;
-  setMaxQueueSize(size: number): void;
-  getCurrentSize(): number;
-  getLength(): number;
-  getLastHeight(): number;
-  validateEnqueue(meta: NativeBlockEnqueueMeta): void;
-  enqueueBytes(hash: string, height: number, size: number, bytes: Buffer): void;
-  getBatchUpToSize(maxSize: number): NativeRawBlock[];
-  findBlocks(hashes: string[]): NativeRawBlock[];
-  dequeue(hashOrHashes: string | string[]): number;
-  clear(): void;
-  reorganize(height: number): void;
-  getMemoryStats(): {
-    bufferAllocated: number;
-    blocksUsed: number;
-    bufferEfficiency: number;
-    avgBlockSize: number;
-    indexesSize: number;
-    memoryUsedBytes: number;
-  };
-  dispose(): void;
-}
-
-export interface NativeBlocksQueueConstructor {
-  new (options: BlocksQueueNativeOptions): NativeBlocksQueue;
-}
-
 export interface NativeMerkleVerifier {
   bitcoinComputeMerkleRoot(txidsBE: string[]): string;
   bitcoinVerifyMerkleRoot(txidsBE: string[], expectedRootBE: string): boolean;
@@ -160,7 +95,6 @@ export interface NativeMempoolStateConstructor {
 }
 
 export interface NativeBitcoinBindings {
-  NativeBlocksQueue?: NativeBlocksQueueConstructor;
   NativeMempoolState?: NativeMempoolStateConstructor;
   NativeMerkleVerifier?: NativeMerkleVerifier;
 }

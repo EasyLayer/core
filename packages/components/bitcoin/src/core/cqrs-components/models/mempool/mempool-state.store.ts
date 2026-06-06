@@ -1,4 +1,4 @@
-import { getBitcoinNativeBindings } from '../../../native';
+import { requireBitcoinNativeMempoolState } from '../../../native';
 import type {
   MempoolLoadInfo,
   MempoolMemoryUsage,
@@ -38,29 +38,108 @@ function normalizeMempoolSnapshotV2(state: any): MempoolStateSnapshotV2 {
  * Refresh/sync decisions, provider RPC calls, domain events and CQRS lifecycle
  * stay in `Mempool`; this adapter only forwards state/index operations to Rust.
  */
+const REQUIRED_NATIVE_MEMPOOL_METHODS: Array<keyof MempoolStateStore> = [
+  'applySnapshot',
+  'mergeSnapshot',
+  'removeTxids',
+  'providers',
+  'pendingTxids',
+  'recordLoaded',
+  'txIds',
+  'loadedTransactions',
+  'metadata',
+  'hasTransaction',
+  'isTransactionLoaded',
+  'getTransactionMetadata',
+  'getFullTransaction',
+  'getStats',
+  'getMemoryUsage',
+  'exportSnapshot',
+  'importSnapshot',
+  'dispose',
+];
+
+const NATIVE_MEMPOOL_METHOD_ALIASES: Partial<Record<keyof MempoolStateStore, string[]>> = {
+  // napi-rs usually exposes js_name aliases, but some already-built artifacts may
+  // expose Rust snake_case names for newly added methods. This is not a JS
+  // fallback: both accepted names must be native functions on NativeMempoolState.
+  mergeSnapshot: ['mergeSnapshot', 'merge_snapshot'],
+  removeTxids: ['removeTxids', 'remove_txids'],
+};
+
+function availableNativeMethodNames(native: object): string[] {
+  const names = new Set<string>();
+  let cursor: any = native;
+
+  while (cursor && cursor !== Object.prototype) {
+    for (const name of Object.getOwnPropertyNames(cursor)) {
+      if (name !== 'constructor' && typeof (native as any)[name] === 'function') {
+        names.add(name);
+      }
+    }
+    cursor = Object.getPrototypeOf(cursor);
+  }
+
+  return [...names].sort();
+}
+
+function resolveNativeMethod<T extends keyof MempoolStateStore>(native: object, method: T): MempoolStateStore[T] {
+  const aliases = NATIVE_MEMPOOL_METHOD_ALIASES[method] || [method as string];
+  for (const alias of aliases) {
+    const fn = (native as any)[alias];
+    if (typeof fn === 'function') {
+      return fn.bind(native);
+    }
+  }
+
+  const available = availableNativeMethodNames(native);
+  throw new Error(
+    `NativeMempoolState binding is missing required method: ${String(method)}. ` +
+      `Accepted native name(s): ${aliases.join(', ')}. ` +
+      `Available native methods: ${available.length > 0 ? available.join(', ') : '<none>'}`
+  );
+}
+
+function assertNativeMempoolStateContract(native: object): asserts native is MempoolStateStore {
+  const missing = REQUIRED_NATIVE_MEMPOOL_METHODS.filter((method) => {
+    const aliases = NATIVE_MEMPOOL_METHOD_ALIASES[method] || [method as string];
+    return !aliases.some((alias) => typeof (native as any)[alias] === 'function');
+  });
+
+  if (missing.length > 0) {
+    const available = availableNativeMethodNames(native);
+    throw new Error(
+      `NativeMempoolState binding is missing required method(s): ${missing.join(', ')}. ` +
+        `Available native methods: ${available.length > 0 ? available.join(', ') : '<none>'}`
+    );
+  }
+}
+
 class NativeMempoolStateAdapter implements MempoolStateStore {
-  constructor(private readonly native: MempoolStateStore) {}
+  private readonly nativeMergeSnapshot: MempoolStateStore['mergeSnapshot'];
+  private readonly nativeRemoveTxids: MempoolStateStore['removeTxids'];
+
+  constructor(private readonly native: MempoolStateStore) {
+    assertNativeMempoolStateContract(native);
+    this.nativeMergeSnapshot = resolveNativeMethod(native, 'mergeSnapshot');
+    this.nativeRemoveTxids = resolveNativeMethod(native, 'removeTxids');
+  }
 
   applySnapshot(perProvider: MempoolProviderSnapshot): void {
     this.native.applySnapshot(perProvider);
   }
 
   mergeSnapshot(perProvider: MempoolProviderSnapshot): void {
-    // If native store supports mergeSnapshot use it; otherwise fall back to JS emulation.
-    if (typeof (this.native as any).mergeSnapshot === 'function') {
-      (this.native as any).mergeSnapshot(perProvider);
-    } else {
-      // Fallback: collect current txids, apply new snapshot, then re-add preserved ones.
-      // This is a safe approximation — native binary should be updated to support mergeSnapshot.
-      this.native.applySnapshot(perProvider);
-    }
+    // NativeMempoolState must implement the same contract as the JS store.
+    // Do not silently applySnapshot() here: missing native merge support would
+    // turn an additive refresh into a full replacement and hide a native API drift.
+    this.nativeMergeSnapshot(perProvider);
   }
 
   removeTxids(txids: string[]): void {
-    if (typeof (this.native as any).removeTxids === 'function') {
-      (this.native as any).removeTxids(txids);
-    }
-    // If native does not support removeTxids yet, no-op — will be cleaned on next refresh.
+    // Confirmed transaction cleanup is required state behavior. A missing native
+    // removeTxids implementation is a contract error, not a safe no-op.
+    this.nativeRemoveTxids(txids);
   }
 
   providers(): string[] {
@@ -131,10 +210,12 @@ class NativeMempoolStateAdapter implements MempoolStateStore {
 }
 
 /**
- * JavaScript fallback for the Rust mempool backing store.
+ * JavaScript mempool state store used only by direct unit tests and parity work.
  *
- * Data layout mirrors the native design so behavior stays identical when native
- * bindings are unavailable:
+ * Production Node runtime uses the Rust native store. Missing or incomplete
+ * native bindings are errors and must not silently switch to this class.
+ *
+ * Data layout mirrors the native design so behavior stays comparable:
  * - `txidToHandle` maps a full txid string to a compact numeric handle;
  * - `txids[handle]` stores the canonical txid once;
  * - `providerTx` stores provider membership as handles instead of duplicated
@@ -152,7 +233,7 @@ class NativeMempoolStateAdapter implements MempoolStateStore {
  *   provider/metadata/transaction/load records.
  *
  * Memory notes:
- * Native Rust stores txids as 32 raw bytes. This JS fallback stores txids as JS
+ * Native Rust stores txids as 32 raw bytes. This JS test store stores txids as JS
  * strings and uses Map/Set objects, so its real V8 heap cost is higher than the
  * native store. The public `getMemoryUsage()` method intentionally returns the
  * same heuristic shape as native code, useful for relative comparisons but not
@@ -487,15 +568,12 @@ export class JsMempoolStateStore implements MempoolStateStore {
 }
 
 export function createMempoolStateStore(): MempoolStateStore {
-  const NativeMempoolState = getBitcoinNativeBindings()?.NativeMempoolState;
+  const NativeMempoolState = requireBitcoinNativeMempoolState();
 
-  if (NativeMempoolState) {
-    try {
-      return new NativeMempoolStateAdapter(new NativeMempoolState());
-    } catch {
-      // Fallback keeps the package usable even when native bindings cannot initialize.
-    }
+  try {
+    return new NativeMempoolStateAdapter(new NativeMempoolState());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`NativeMempoolState binding was selected but failed to initialize: ${message}`);
   }
-
-  return new JsMempoolStateStore();
 }

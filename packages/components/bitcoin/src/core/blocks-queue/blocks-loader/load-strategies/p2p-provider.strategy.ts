@@ -1,5 +1,5 @@
 import type { Logger } from '@nestjs/common';
-import type { BlockchainProviderService } from '../../../blockchain-provider';
+import type { BlockchainProviderService, IncomingRawBlock } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy, Subscription } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
@@ -95,11 +95,11 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
       let settledWithError = false;
 
       this._subscription = this.blockchainProvider.subscribeToNewBlocks(
-        async (raw: RawBlock) => {
+        async (raw: IncomingRawBlock) => {
           if (this._isBlockProcessing) {
             this.logger.verbose('P2P strategy: block skipped (previous still processing)', {
               module: this.moduleName,
-              args: { height: raw.height },
+              args: { hash: raw.hash, prevHash: raw.prevHash },
             });
             return;
           }
@@ -115,7 +115,7 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
               return;
             }
 
-            await this.enqueueBlock(raw);
+            await this.enqueueLiveBlock(raw);
           } catch (error) {
             this.logger.verbose('P2P strategy: block processing error', {
               module: this.moduleName,
@@ -158,6 +158,42 @@ export class P2PProviderStrategy implements BlocksLoadingStrategy {
           if (!settledWithError) reject(err);
         });
     });
+  }
+
+  private async enqueueLiveBlock(raw: IncomingRawBlock): Promise<void> {
+    const tipHash = await this.ensureQueueTipHashForLive();
+    const expectedHeight = this.queue.lastHeight + 1;
+
+    if (raw.prevHash !== tipHash) {
+      throw new Error(
+        `P2P strategy: live block continuity mismatch: prevHash=${raw.prevHash}, expectedTipHash=${tipHash}, incomingHash=${raw.hash}, expectedHeight=${expectedHeight}`
+      );
+    }
+
+    await this.enqueueBlock({
+      hash: raw.hash,
+      prevHash: raw.prevHash,
+      height: expectedHeight,
+      size: raw.size,
+      bytes: raw.bytes,
+    });
+  }
+
+  private async ensureQueueTipHashForLive(): Promise<string> {
+    if (this.queue.lastHash) return this.queue.lastHash;
+
+    const lastHeight = this.queue.lastHeight;
+    if (!Number.isFinite(lastHeight) || lastHeight < 0) {
+      throw new Error(`P2P strategy: cannot start live subscription without a known queue height`);
+    }
+
+    const tipHash = await this.blockchainProvider.getOneBlockHashByHeight(lastHeight);
+    if (!tipHash) {
+      throw new Error(`P2P strategy: cannot start live subscription without tip hash for height ${lastHeight}`);
+    }
+
+    this.queue.setLastHashForContinuity(tipHash);
+    return tipHash;
   }
 
   private async enqueueBlock(raw: RawBlock): Promise<void> {

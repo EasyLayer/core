@@ -1,3 +1,5 @@
+import type { Buffer } from 'buffer';
+
 // ===== UNIVERSAL INTERFACES (what providers return) =====
 
 /**
@@ -217,4 +219,16 @@ export interface UniversalMempoolTxMetadata {
   // RBF / unbroadcast
   bip125_replaceable?: boolean;
   unbroadcast?: boolean;
+}
+
+/**
+ * Raw block bytes plus header metadata emitted by realtime transports.
+ * Height is intentionally absent: Bitcoin block headers do not contain height.
+ * Load strategies must resolve height from catch-up/continuity context before enqueue.
+ */
+export interface IncomingRawBlock {
+  hash: string;
+  prevHash: string;
+  size: number;
+  bytes: Buffer;
 }

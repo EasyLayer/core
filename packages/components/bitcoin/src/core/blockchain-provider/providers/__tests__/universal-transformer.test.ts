@@ -138,6 +138,37 @@ describe('UniversalTransformer – smart fee', () => {
 });
 
 describe('UniversalTransformer – bytes guards', () => {
+
+
+  it('preserves SegWit coinbase witness reserved value and exposes coinbase wtxid/hash from raw bytes', () => {
+    const coinbaseTxHex = [
+      '01000000',
+      '0001',
+      '01',
+      '0000000000000000000000000000000000000000000000000000000000000000',
+      'ffffffff',
+      '02',
+      '0101',
+      'ffffffff',
+      '01',
+      '0000000000000000',
+      '26',
+      '6a24aa21a9ed0000000000000000000000000000000000000000000000000000000000000000',
+      '01',
+      '20',
+      '0000000000000000000000000000000000000000000000000000000000000000',
+      '00000000',
+    ].join('');
+
+    const tx = UniversalTransformer.parseTxBytes(Buffer.from(coinbaseTxHex, 'hex'), segwitNet);
+
+    expect(tx.vin[0]?.coinbase).toBe('0101');
+    expect(tx.vin[0]?.txinwitness).toEqual(['0'.repeat(64)]);
+    expect(tx.wtxid).toMatch(/^[0-9a-f]{64}$/);
+    expect(tx.hash).toBe(tx.wtxid);
+    expect(tx.hash).not.toBe(tx.txid);
+  });
+
   it('parseTxBytes throws on empty bytes', () => {
     expect(() => UniversalTransformer.parseTxBytes(new Uint8Array(), segwitNet)).toThrow(/Transaction bytes are required/i);
   });

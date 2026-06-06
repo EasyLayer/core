@@ -1,6 +1,4 @@
 import { Mutex } from 'async-mutex';
-import { getBitcoinNativeBindings } from '../native';
-import type { NativeBlocksQueue } from '../native';
 import type { RawBlock } from './interfaces';
 
 /**
@@ -142,13 +140,12 @@ export class CapacityPlanner {
  */
 export class BlocksQueue {
   private _lastHeight: number;
+  private _lastHash?: string;
   private _maxQueueSize: number; // bytes budget
   private _blockSize: number; // initial expected size (seed for EMA)
   private _size: number = 0; // current bytes used
   private _maxBlockHeight: number;
   private readonly mutex = new Mutex();
-  private native?: NativeBlocksQueue;
-
   // Capacity planner (EMA + thresholds)
   private planner: CapacityPlanner;
 
@@ -184,17 +181,6 @@ export class BlocksQueue {
 
     this.planner = new CapacityPlanner(this._blockSize, plannerConfig);
 
-    const NativeBlocksQueueCtor = getBitcoinNativeBindings()?.NativeBlocksQueue;
-    if (NativeBlocksQueueCtor) {
-      try {
-        this.native = new NativeBlocksQueueCtor({ lastHeight, maxQueueSize, blockSize, maxBlockHeight, plannerConfig });
-        this.blocks = [];
-        return;
-      } catch {
-        this.native = undefined;
-      }
-    }
-
     const initialSlots = Math.max(2, this.planner.desiredSlots(this._maxQueueSize));
     this.blocks = new Array(initialSlots).fill(null);
   }
@@ -202,76 +188,67 @@ export class BlocksQueue {
   // ========== CORE QUEUE PROPERTIES ==========
 
   public get isQueueFull(): boolean {
-    if (this.native) return this.native.isQueueFull();
     return this._size >= this._maxQueueSize;
   }
 
   public isQueueOverloaded(additionalSize: number): boolean {
-    if (this.native) return this.native.isQueueOverloaded(additionalSize);
     if (this.currentBlockCount === 0) return false;
     const projectedSize = this.currentSize + additionalSize;
     return projectedSize > this.maxQueueSize;
   }
 
   public get blockSize(): number {
-    if (this.native) return this.native.getBlockSize();
     return this._blockSize;
   }
 
   public set blockSize(size: number) {
-    if (this.native) {
-      this.native.setBlockSize(size);
-      return;
-    }
     this._blockSize = size;
     // We keep EMA from observations; no immediate re-seed by default.
   }
 
   get isMaxHeightReached(): boolean {
-    if (this.native) return this.native.isMaxHeightReached();
     return this._lastHeight >= this._maxBlockHeight;
   }
 
   public get maxBlockHeight(): number {
-    if (this.native) return this.native.getMaxBlockHeight();
     return this._maxBlockHeight;
   }
 
   public set maxBlockHeight(height: number) {
-    if (this.native) {
-      this.native.setMaxBlockHeight(height);
-      return;
-    }
     this._maxBlockHeight = height;
   }
 
   public get maxQueueSize(): number {
-    if (this.native) return this.native.getMaxQueueSize();
     return this._maxQueueSize;
   }
 
   public set maxQueueSize(length: number) {
-    if (this.native) {
-      this.native.setMaxQueueSize(length);
-      return;
-    }
     this._maxQueueSize = length;
     // No immediate resize; ring adapts as new blocks arrive (observe + maybeResize).
   }
 
   public get currentSize(): number {
-    if (this.native) return this.native.getCurrentSize();
     return this._size;
   }
 
   public get length(): number {
-    if (this.native) return this.native.getLength();
     return this.currentBlockCount;
   }
 
   public get lastHeight(): number {
-    if (this.native) return this.native.getLastHeight();
     return this._lastHeight;
+  }
+
+  public get lastHash(): string | undefined {
+    return this._lastHash;
+  }
+
+  public setLastHashForContinuity(hash: string | undefined): void {
+    this._lastHash = hash;
+  }
+
+  public get queueMode(): 'js-buffer' {
+    return 'js-buffer';
   }
 
   /**
@@ -280,15 +257,6 @@ export class BlocksQueue {
    */
   public async enqueue(item: RawBlock): Promise<void> {
     await this.mutex.runExclusive(async () => {
-      if (this.native) {
-        this.native.validateEnqueue({
-          hash: item.hash,
-          height: item.height,
-          size: item.size,
-        });
-        this.native.enqueueBytes(item.hash, item.height, item.size, item.bytes);
-        return;
-      }
       if (this.hashIndex.has(item.hash)) {
         throw new Error('Duplicate block hash');
       }
@@ -341,6 +309,7 @@ export class BlocksQueue {
       this.currentBlockCount++;
       this._size += totalBlockSize;
       this._lastHeight = item.height;
+      this._lastHash = item.hash;
     });
   }
 
@@ -360,8 +329,6 @@ export class BlocksQueue {
     const hashes: string[] = Array.isArray(hashOrHashes) ? hashOrHashes : [hashOrHashes];
 
     return this.mutex.runExclusive(() => {
-      if (this.native) return this.native.dequeue(hashes);
-
       let height = 0;
 
       for (const hash of hashes) {
@@ -402,10 +369,6 @@ export class BlocksQueue {
    */
   public findBlocks(hashSet: Set<string>): Promise<RawBlock[]> {
     return this.mutex.runExclusive(async (): Promise<RawBlock[]> => {
-      if (this.native) {
-        return this.native.findBlocks([...hashSet]);
-      }
-
       const blocks: RawBlock[] = [];
       for (const hash of hashSet) {
         const bufferIndex = this.hashIndex.get(hash);
@@ -427,9 +390,6 @@ export class BlocksQueue {
    */
   public async getBatchUpToSize(maxSize: number): Promise<RawBlock[]> {
     return this.mutex.runExclusive(async () => {
-      if (this.native) {
-        return this.native.getBatchUpToSize(maxSize);
-      }
       if (this.currentBlockCount === 0) {
         return [];
       }
@@ -478,16 +438,12 @@ export class BlocksQueue {
    * @complexity O(n) - needs to clear indexes
    */
   public clear(): void {
-    if (this.native) {
-      this.native.clear();
-      return;
-    }
-
     // Reset all pointers and counters
     this.headIndex = 0;
     this.tailIndex = 0;
     this.currentBlockCount = 0;
     this._size = 0;
+    this._lastHash = undefined;
 
     // Clear the blocks array
     this.blocks.fill(null);
@@ -503,12 +459,9 @@ export class BlocksQueue {
    */
   public async reorganize(reorganizeHeight: number): Promise<void> {
     await this.mutex.runExclusive(() => {
-      if (this.native) {
-        this.native.reorganize(reorganizeHeight);
-        return;
-      }
       this.clear();
       this._lastHeight = reorganizeHeight;
+      this._lastHash = undefined;
     });
   }
 
@@ -521,15 +474,11 @@ export class BlocksQueue {
    * and drops the backing array so V8 can reclaim it.
    */
   public dispose(): void {
-    if (this.native) {
-      this.native.dispose();
-      return;
-    }
-
     this.headIndex = 0;
     this.tailIndex = 0;
     this.currentBlockCount = 0;
     this._size = 0;
+    this._lastHash = undefined;
     this.blocks = [];
     this.heightIndex.clear();
     this.hashIndex.clear();
@@ -583,8 +532,6 @@ export class BlocksQueue {
     indexesSize: number;
     memoryUsedBytes: number;
   } {
-    if (this.native) return this.native.getMemoryStats();
-
     const indexesSize = this.heightIndex.size + this.hashIndex.size;
 
     return {

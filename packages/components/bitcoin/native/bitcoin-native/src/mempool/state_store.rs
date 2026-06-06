@@ -75,6 +75,7 @@ struct MempoolBackingStore {
   metadata: HashMap<u32, Value>,
   transactions: HashMap<u32, Value>,
   load_tracker: HashMap<u32, Value>,
+  removed_handles: HashSet<u32>,
 }
 
 impl MempoolBackingStore {
@@ -85,6 +86,7 @@ impl MempoolBackingStore {
     self.metadata.clear();
     self.transactions.clear();
     self.load_tracker.clear();
+    self.removed_handles.clear();
   }
 
   /// Clears and shrinks all native containers.
@@ -101,6 +103,7 @@ impl MempoolBackingStore {
     self.metadata.shrink_to_fit();
     self.transactions.shrink_to_fit();
     self.load_tracker.shrink_to_fit();
+    self.removed_handles.shrink_to_fit();
   }
 
   /// Returns the compact handle for `key`, inserting it once if needed.
@@ -263,6 +266,100 @@ impl NativeMempoolState {
     Ok(())
   }
 
+  /// Additively merges a provider snapshot into the current mempool state.
+  ///
+  /// This mirrors the TypeScript `JsMempoolStateStore.mergeSnapshot()` contract:
+  /// it adds new txids and refreshes metadata for existing txids, but it does
+  /// not remove transactions that are absent from the new provider snapshot.
+  /// Confirmed transaction cleanup must go through `removeTxids()`.
+  pub fn merge_snapshot(&mut self, per_provider: Value) -> Result<()> {
+    self.merge_snapshot_impl(per_provider)
+  }
+
+  #[napi]
+  #[allow(non_snake_case)]
+  pub fn mergeSnapshot(&mut self, per_provider: Value) -> Result<()> {
+    self.merge_snapshot_impl(per_provider)
+  }
+
+  fn merge_snapshot_impl(&mut self, per_provider: Value) -> Result<()> {
+    let Value::Object(providers) = per_provider else {
+      return Ok(());
+    };
+
+    let mut seen = HashSet::new();
+
+    for (provider, items) in providers {
+      let Value::Array(arr) = items else {
+        continue;
+      };
+
+      for item in arr {
+        let Some(txid) = string_field(&item, "txid") else {
+          continue;
+        };
+        let Some(metadata) = item.get("metadata").cloned() else {
+          continue;
+        };
+        let Some(key) = parse_txid(txid) else {
+          continue;
+        };
+
+        if !seen.insert(key) {
+          continue;
+        }
+
+        let handle = self.store.ensure_handle(key);
+        self.store.removed_handles.remove(&handle);
+        self.store.metadata.insert(handle, metadata);
+
+        let handles = self.store.provider_tx.entry(provider.clone()).or_default();
+        if !handles.contains(&handle) {
+          handles.push(handle);
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  /// Removes confirmed transactions from all native indexes.
+  ///
+  /// Handles are tombstoned instead of reindexing `txids`, matching the JS store
+  /// design where handle slots are stable and `txIds()` skips removed entries.
+  pub fn remove_txids(&mut self, txids: Vec<String>) -> Result<()> {
+    self.remove_txids_impl(txids)
+  }
+
+  #[napi]
+  #[allow(non_snake_case)]
+  pub fn removeTxids(&mut self, txids: Vec<String>) -> Result<()> {
+    self.remove_txids_impl(txids)
+  }
+
+  fn remove_txids_impl(&mut self, txids: Vec<String>) -> Result<()> {
+    for txid in txids {
+      let Some(key) = parse_txid(&txid) else {
+        continue;
+      };
+      let Some(handle) = self.store.txid_to_handle.remove(&key) else {
+        continue;
+      };
+
+      self.store.metadata.remove(&handle);
+      self.store.transactions.remove(&handle);
+      self.store.load_tracker.remove(&handle);
+      self.store.removed_handles.insert(handle);
+
+      for handles in self.store.provider_tx.values_mut() {
+        handles.retain(|candidate| *candidate != handle);
+      }
+    }
+
+    self.store.provider_tx.retain(|_, handles| !handles.is_empty());
+    Ok(())
+  }
+
   #[napi]
   pub fn providers(&self) -> Vec<String> {
     self.store.provider_tx.keys().cloned().collect()
@@ -288,7 +385,10 @@ impl NativeMempoolState {
           break;
         }
 
-        if self.store.load_tracker.contains_key(handle) || !self.store.metadata.contains_key(handle) {
+        if self.store.removed_handles.contains(handle)
+          || self.store.load_tracker.contains_key(handle)
+          || !self.store.metadata.contains_key(handle)
+        {
           continue;
         }
 
@@ -345,7 +445,14 @@ impl NativeMempoolState {
 
   #[napi(js_name = "txIds")]
   pub fn tx_ids(&self) -> Vec<String> {
-    self.store.txids.iter().map(|key| txid_to_hex(*key)).collect()
+    self
+      .store
+      .txids
+      .iter()
+      .enumerate()
+      .filter(|(handle, _)| !self.store.removed_handles.contains(&(*handle as u32)))
+      .map(|(_, key)| txid_to_hex(*key))
+      .collect()
   }
 
   #[napi(js_name = "loadedTransactions")]
@@ -431,7 +538,14 @@ impl NativeMempoolState {
 
   #[napi(js_name = "exportSnapshot")]
   pub fn export_snapshot(&self) -> Value {
-    let txids: Vec<String> = self.store.txids.iter().map(|key| txid_to_hex(*key)).collect();
+    let txids: Vec<String> = self
+      .store
+      .txids
+      .iter()
+      .enumerate()
+      .filter(|(handle, _)| !self.store.removed_handles.contains(&(*handle as u32)))
+      .map(|(_, key)| txid_to_hex(*key))
+      .collect();
 
     let provider_tx: Vec<Value> = self
       .store
@@ -440,6 +554,7 @@ impl NativeMempoolState {
       .map(|(provider, handles)| {
         let ids: Vec<String> = handles
           .iter()
+          .filter(|h| !self.store.removed_handles.contains(h))
           .filter_map(|h| self.store.txids.get(*h as usize))
           .map(|key| txid_to_hex(*key))
           .collect();
@@ -451,6 +566,7 @@ impl NativeMempoolState {
       .store
       .metadata
       .iter()
+      .filter(|(h, _)| !self.store.removed_handles.contains(h))
       .filter_map(|(h, md)| self.store.txids.get(*h as usize).map(|key| json!([txid_to_hex(*key), md])))
       .collect();
 
@@ -458,6 +574,7 @@ impl NativeMempoolState {
       .store
       .transactions
       .iter()
+      .filter(|(h, _)| !self.store.removed_handles.contains(h))
       .filter_map(|(h, tx)| self.store.txids.get(*h as usize).map(|key| json!([txid_to_hex(*key), tx])))
       .collect();
 
@@ -465,6 +582,7 @@ impl NativeMempoolState {
       .store
       .load_tracker
       .iter()
+      .filter(|(h, _)| !self.store.removed_handles.contains(h))
       .filter_map(|(h, info)| self.store.txids.get(*h as usize).map(|key| json!([txid_to_hex(*key), info])))
       .collect();
 
@@ -572,5 +690,100 @@ impl NativeMempoolState {
   #[napi(js_name = "assertStoreOnly")]
   pub fn assert_store_only(&self) -> bool {
     true
+  }
+}
+
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn meta(txid: &str, fee: u64) -> Value {
+    json!({
+      "txid": txid,
+      "fee": fee,
+      "fees": { "base": fee }
+    })
+  }
+
+  #[test]
+  fn native_mempool_merge_snapshot_is_additive() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let c = "c".repeat(64);
+    let mut store = NativeMempoolState::new();
+
+    store
+      .apply_snapshot(json!({
+        "providerA": [
+          { "txid": a, "metadata": meta(&a, 1000) },
+          { "txid": b, "metadata": meta(&b, 2000) }
+        ]
+      }))
+      .unwrap();
+
+    store
+      .record_loaded(vec![json!({
+        "txid": a,
+        "transaction": { "txid": a, "feeRate": 10 },
+        "providerName": "providerA"
+      })])
+      .unwrap();
+
+    store
+      .merge_snapshot(json!({
+        "providerA": [
+          { "txid": b, "metadata": meta(&b, 2500) },
+          { "txid": c, "metadata": meta(&c, 3000) }
+        ]
+      }))
+      .unwrap();
+
+    assert!(store.has_transaction(a.clone()));
+    assert!(store.has_transaction(b.clone()));
+    assert!(store.has_transaction(c.clone()));
+    assert!(store.is_transaction_loaded(a.clone()));
+    assert_eq!(store.get_transaction_metadata(b.clone()).unwrap()["fee"], json!(2500));
+
+    let pending = store.pending_txids("providerA".to_string(), 10.0);
+    assert!(!pending.contains(&a));
+    assert!(pending.contains(&b));
+    assert!(pending.contains(&c));
+  }
+
+  #[test]
+  fn native_mempool_remove_txids_cleans_indexes() {
+    let a = "a".repeat(64);
+    let b = "b".repeat(64);
+    let mut store = NativeMempoolState::new();
+
+    store
+      .apply_snapshot(json!({
+        "providerA": [
+          { "txid": a, "metadata": meta(&a, 1000) },
+          { "txid": b, "metadata": meta(&b, 2000) }
+        ]
+      }))
+      .unwrap();
+
+    store
+      .record_loaded(vec![json!({
+        "txid": b,
+        "transaction": { "txid": b, "feeRate": 20 },
+        "providerName": "providerA"
+      })])
+      .unwrap();
+
+    store.remove_txids(vec![b.clone()]).unwrap();
+
+    assert!(store.has_transaction(a.clone()));
+    assert!(!store.has_transaction(b.clone()));
+    assert!(!store.tx_ids().contains(&b));
+    assert!(store.get_transaction_metadata(b.clone()).is_none());
+    assert!(store.get_full_transaction(b.clone()).is_none());
+    assert!(!store.pending_txids("providerA".to_string(), 10.0).contains(&b));
+
+    let snapshot = store.export_snapshot();
+    assert!(!snapshot["txids"].as_array().unwrap().iter().any(|v| v.as_str() == Some(b.as_str())));
   }
 }

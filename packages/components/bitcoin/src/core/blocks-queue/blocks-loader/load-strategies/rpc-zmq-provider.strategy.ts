@@ -1,5 +1,5 @@
 import type { Logger } from '@nestjs/common';
-import type { BlockchainProviderService } from '../../../blockchain-provider';
+import type { BlockchainProviderService, IncomingRawBlock } from '../../../blockchain-provider';
 import type { BlocksLoadingStrategy, Subscription } from './load-strategy.interface';
 import { StrategyNames } from './load-strategy.interface';
 import type { BlocksQueue } from '../../blocks-queue';
@@ -134,7 +134,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
       let settledWithError = false;
 
       this._subscription = this.blockchainProvider.subscribeToNewBlocks(
-        async (raw: RawBlock) => {
+        async (raw: IncomingRawBlock) => {
           try {
             if (this.queue.isMaxHeightReached) return;
 
@@ -145,7 +145,7 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
               return;
             }
 
-            await this.enqueueBlock(raw);
+            await this.enqueueLiveBlock(raw);
           } catch (error) {
             this.logger.verbose('RPC+ZMQ strategy: block processing error', {
               module: this.moduleName,
@@ -189,6 +189,42 @@ export class RpcZmqProviderStrategy implements BlocksLoadingStrategy {
           if (!settledWithError) reject(err);
         });
     });
+  }
+
+  private async enqueueLiveBlock(raw: IncomingRawBlock): Promise<void> {
+    const tipHash = await this.ensureQueueTipHashForLive();
+    const expectedHeight = this.queue.lastHeight + 1;
+
+    if (raw.prevHash !== tipHash) {
+      throw new Error(
+        `RPC+ZMQ strategy: live block continuity mismatch: prevHash=${raw.prevHash}, expectedTipHash=${tipHash}, incomingHash=${raw.hash}, expectedHeight=${expectedHeight}`
+      );
+    }
+
+    await this.enqueueBlock({
+      hash: raw.hash,
+      prevHash: raw.prevHash,
+      height: expectedHeight,
+      size: raw.size,
+      bytes: raw.bytes,
+    });
+  }
+
+  private async ensureQueueTipHashForLive(): Promise<string> {
+    if (this.queue.lastHash) return this.queue.lastHash;
+
+    const lastHeight = this.queue.lastHeight;
+    if (!Number.isFinite(lastHeight) || lastHeight < 0) {
+      throw new Error(`RPC+ZMQ strategy: cannot start live subscription without a known queue height`);
+    }
+
+    const tipHash = await this.blockchainProvider.getOneBlockHashByHeight(lastHeight);
+    if (!tipHash) {
+      throw new Error(`RPC+ZMQ strategy: cannot start live subscription without tip hash for height ${lastHeight}`);
+    }
+
+    this.queue.setLastHashForContinuity(tipHash);
+    return tipHash;
   }
 
   private async enqueueBlock(raw: RawBlock): Promise<void> {

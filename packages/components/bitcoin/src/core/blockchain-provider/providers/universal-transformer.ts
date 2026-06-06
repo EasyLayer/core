@@ -11,6 +11,11 @@ import type {
 } from './interfaces';
 import type { NetworkConfig } from '../transports';
 import { BlockSizeCalculator } from '../utils';
+import {
+  detectBitcoinCoreScriptType,
+  formatScriptPubKeyAsmLikeBitcoinCore,
+  formatScriptSigAsmLikeBitcoinCore,
+} from '../utils/bitcoin-core-asm-formatter';
 
 /**
  * UniversalTransformer
@@ -30,9 +35,13 @@ import { BlockSizeCalculator } from '../utils';
  * - Normalization from RPC: O(1) per object.
  */
 
-function bufToHexBE(buf?: Buffer): string | undefined {
+function reverseHexBE(buf?: Buffer | Uint8Array): string | undefined {
   if (!buf) return undefined;
-  return Buffer.from(buf).reverse().toString('hex');
+  const out = new Array<string>(buf.length);
+  for (let i = buf.length - 1, j = 0; i >= 0; i -= 1, j += 1) {
+    out[j] = buf[i]!.toString(16).padStart(2, '0');
+  }
+  return out.join('');
 }
 
 /** Zero-copy Buffer view from Uint8Array. */
@@ -354,14 +363,14 @@ export class UniversalTransformer {
       vsize: m.vsize,
       version: btcBlock.version,
       versionHex: '0x' + btcBlock.version.toString(16).padStart(8, '0'),
-      merkleroot: bufToHexBE(btcBlock.merkleRoot) ?? '',
+      merkleroot: reverseHexBE(btcBlock.merkleRoot) ?? '',
       time,
       mediantime: time, // no median time available from bitcoinjs
       nonce: btcBlock.nonce,
       bits: '0x' + btcBlock.bits.toString(16).padStart(8, '0'),
       difficulty: this.calculateDifficulty(btcBlock.bits),
       chainwork: '', // not derivable from a single block buffer
-      previousblockhash: bufToHexBE(btcBlock.prevHash),
+      previousblockhash: reverseHexBE(btcBlock.prevHash),
       nextblockhash: undefined,
       tx: transactions,
       nTx: transactions.length,
@@ -421,9 +430,18 @@ export class UniversalTransformer {
       ({ size, strippedSize, weight, vsize } = m);
     }
 
+    const txid = tx.getId();
+    let rpcHash = txid;
+    let wtxid: string | undefined;
+
+    if (net?.hasSegWit && tx.hasWitnesses()) {
+      wtxid = reverseHexBE(tx.getHash(true));
+      if (wtxid) rpcHash = wtxid;
+    }
+
     const result: UniversalTransaction = {
-      txid: tx.getId(),
-      hash: tx.getId(),
+      txid,
+      hash: rpcHash,
       version: tx.version,
       size,
       vsize,
@@ -438,10 +456,7 @@ export class UniversalTransformer {
       blocktime: blocktime ?? time,
     };
 
-    if (net?.hasSegWit && tx.hasWitnesses()) {
-      const wtxidBE = Buffer.from(tx.getHash(true)).reverse().toString('hex');
-      result.wtxid = wtxidBE;
-    }
+    if (wtxid) result.wtxid = wtxid;
 
     return result;
   }
@@ -449,13 +464,17 @@ export class UniversalTransformer {
   private static parseVin(input: bitcoin.Transaction['ins'][0], _index: number, net?: NetworkConfig): UniversalVin {
     const isCoinbase = input.hash.every((b) => b === 0) && input.index === 0xffffffff;
     if (isCoinbase) {
-      return { coinbase: input.script.toString('hex'), sequence: input.sequence };
+      const vin: UniversalVin = { coinbase: input.script.toString('hex'), sequence: input.sequence };
+      if (net?.hasSegWit && input.witness?.length) {
+        vin.txinwitness = input.witness.map((w) => w.toString('hex'));
+      }
+      return vin;
     }
 
     const vin: UniversalVin = {
-      txid: bufToHexBE(input.hash)!,
+      txid: reverseHexBE(input.hash)!,
       vout: input.index,
-      scriptSig: { asm: this.safeToASM(input.script), hex: input.script.toString('hex') },
+      scriptSig: { asm: formatScriptSigAsmLikeBitcoinCore(input.script), hex: input.script.toString('hex') },
       sequence: input.sequence,
     };
 
@@ -472,7 +491,7 @@ export class UniversalTransformer {
       value: output.value / 1e8,
       n: index,
       scriptPubKey: {
-        asm: this.safeToASM(output.script),
+        asm: formatScriptPubKeyAsmLikeBitcoinCore(output.script),
         hex: scriptHex,
         type: this.detectScriptType(scriptHex),
         addresses: undefined,
@@ -497,6 +516,8 @@ export class UniversalTransformer {
       if (script.length === 34 && script[0] === 0x00 && script[1] === 0x20) return 'witness_v0_scripthash';
       if (script.length === 34 && script[0] === 0x51 && script[1] === 0x20) return 'witness_v1_taproot';
       if ((script.length === 35 || script.length === 67) && script[script.length - 1] === 0xac) return 'pubkey';
+      const coreType = detectBitcoinCoreScriptType(scriptHex);
+      if (coreType) return coreType;
       if (script[0] === 0x6a) return 'nulldata';
       if (script[script.length - 1] === 0xae) return 'multisig';
       return 'nonstandard';
@@ -547,13 +568,5 @@ export class UniversalTransformer {
     }
     size += 4; // locktime
     return size;
-  }
-
-  private static safeToASM(script: Buffer): string {
-    try {
-      return bitcoin.script.toASM(script);
-    } catch {
-      return '';
-    }
   }
 }

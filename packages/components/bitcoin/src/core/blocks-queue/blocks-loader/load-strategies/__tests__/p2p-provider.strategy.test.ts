@@ -1,10 +1,14 @@
 import { P2PProviderStrategy } from '../p2p-provider.strategy';
 import { BlocksQueue } from '../../../blocks-queue';
-import type { BlockchainProviderService } from '../../../../blockchain-provider';
+import type { BlockchainProviderService, IncomingRawBlock } from '../../../../blockchain-provider';
 import type { RawBlock } from '../../../interfaces';
 
 function createRawBlock(height: number, hash: string, size: number): RawBlock {
   return { hash, height, size, bytes: Buffer.alloc(size) };
+}
+
+function createIncomingRawBlock(hash: string, prevHash: string, size: number): IncomingRawBlock {
+  return { hash, prevHash, size, bytes: Buffer.alloc(size) };
 }
 
 describe('P2PProviderStrategy', () => {
@@ -32,6 +36,7 @@ describe('P2PProviderStrategy', () => {
     mockProvider = {
       getManyBlocksRawByHeights: jest.fn(),
       subscribeToNewBlocks: jest.fn(),
+      getOneBlockHashByHeight: jest.fn(),
     } as any;
 
     strategy = new P2PProviderStrategy(mockLogger, mockProvider, queue);
@@ -115,7 +120,7 @@ describe('P2PProviderStrategy', () => {
     it('subscribes after catch-up and enqueues incoming RawBlocks', async () => {
       (queue as any)._lastHeight = 5;
 
-      let blockCallback: ((raw: RawBlock) => void) | undefined;
+      let blockCallback: ((raw: IncomingRawBlock) => void) | undefined;
       let resolveSubscription!: () => void;
       const subscriptionPromise = new Promise<void>((res) => {
         resolveSubscription = res;
@@ -130,7 +135,8 @@ describe('P2PProviderStrategy', () => {
       const loadPromise = strategy.load(5);
       await new Promise((r) => setImmediate(r));
 
-      await blockCallback!(createRawBlock(6, 'hash6', 1000));
+      mockProvider.getOneBlockHashByHeight.mockResolvedValue('hash5');
+      await blockCallback!(createIncomingRawBlock('hash6', 'hash5', 1000));
 
       expect(queue.length).toBe(1);
       expect(queue.lastHeight).toBe(6);
@@ -161,7 +167,7 @@ describe('P2PProviderStrategy', () => {
     it('rejects when queue is full during subscription', async () => {
       (queue as any)._lastHeight = 5;
 
-      let blockCallback: ((raw: RawBlock) => void) | undefined;
+      let blockCallback: ((raw: IncomingRawBlock) => void) | undefined;
       const subscriptionPromise = new Promise<void>(() => {}) as any;
       subscriptionPromise.unsubscribe = jest.fn();
 
@@ -174,20 +180,18 @@ describe('P2PProviderStrategy', () => {
       await new Promise((r) => setImmediate(r));
 
       Object.defineProperty(queue, 'isQueueFull', { get: () => true, configurable: true });
-      await blockCallback!(createRawBlock(6, 'hash6', 1000));
+      await blockCallback!(createIncomingRawBlock('hash6', 'hash5', 1000));
 
       await expect(loadPromise).rejects.toThrow('The queue is full');
     });
 
-    it('skips blocks with height ≤ lastHeight in subscription', async () => {
+    it('rejects incoming live blocks that do not connect to the queue tip hash', async () => {
       (queue as any)._lastHeight = 5;
+      mockProvider.getOneBlockHashByHeight.mockResolvedValue('hash5');
 
-      let blockCallback: ((raw: RawBlock) => void) | undefined;
-      let resolveSubscription!: () => void;
-      const subscriptionPromise = new Promise<void>((res) => {
-        resolveSubscription = res;
-      }) as any;
-      subscriptionPromise.unsubscribe = () => resolveSubscription();
+      let blockCallback: ((raw: IncomingRawBlock) => void) | undefined;
+      const subscriptionPromise = new Promise<void>(() => {}) as any;
+      subscriptionPromise.unsubscribe = jest.fn();
 
       mockProvider.subscribeToNewBlocks.mockImplementation((cb: any) => {
         blockCallback = cb;
@@ -197,16 +201,12 @@ describe('P2PProviderStrategy', () => {
       const loadPromise = strategy.load(5);
       await new Promise((r) => setImmediate(r));
 
-      await blockCallback!(createRawBlock(3, 'oldHash', 1000));
-      expect(queue.length).toBe(0);
-      expect(mockLogger.verbose).toHaveBeenCalledWith(
-        'P2P strategy: skipping block with height ≤ lastHeight',
-        expect.objectContaining({ module: 'blocks-queue' })
-      );
+      await blockCallback!(createIncomingRawBlock('badHash', 'otherTip', 1000));
 
-      resolveSubscription();
-      await loadPromise;
+      await expect(loadPromise).rejects.toThrow('live block continuity mismatch');
+      expect(queue.length).toBe(0);
     });
+
 
     it('does not re-subscribe if subscription already active', async () => {
       (queue as any)._lastHeight = 5;
